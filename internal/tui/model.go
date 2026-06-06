@@ -1,0 +1,666 @@
+package tui
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/atotto/clipboard"
+	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/viewport"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+
+	"yourbot/internal/app"
+)
+
+type Mode int
+
+const (
+	ModeChat Mode = iota
+	ModeModal
+	ModePlanEdit
+)
+
+type Model struct {
+	app       *app.App
+	input     textarea.Model
+	selectAll bool
+	output    viewport.Model
+	activity  viewport.Model
+	modal     viewport.Model
+	width     int
+	height    int
+	mode      Mode
+	panel     string
+	messages  []app.Message
+	events    []activityEvent
+	status    string
+	planEdit  textarea.Model
+
+	configFields    []configField
+	configIndex     int
+	configEditing   bool
+	configEditValue string
+	modelOptions    []app.ModelOption
+	modelGroups     []app.ModelGroup
+	modelIndex      int
+}
+
+type replyMsg app.Reply
+
+type activityEvent struct {
+	Time    time.Time
+	Input   string
+	Command string
+	Panel   string
+	Status  string
+	Detail  string
+}
+
+func New(a *app.App) Model {
+	input := textarea.New()
+	input.Placeholder = "Message NullBot or type /help"
+	input.Prompt = "| "
+	input.CharLimit = 0
+	input.SetHeight(3)
+	input.Focus()
+
+	planEdit := textarea.New()
+	planEdit.Placeholder = "Write or edit the plan..."
+	planEdit.Prompt = "| "
+	planEdit.CharLimit = 0
+	planEdit.SetHeight(10)
+
+	state := a.State()
+	return Model{
+		app:      a,
+		input:    input,
+		output:   viewport.New(20, 10),
+		activity: viewport.New(20, 10),
+		modal:    viewport.New(20, 10),
+		planEdit: planEdit,
+		messages: state.History,
+		events: []activityEvent{
+			{Time: time.Now(), Status: "NullBot started", Detail: "Press /help for commands."},
+			{Time: time.Now(), Status: "Shortcuts ready", Detail: "Ctrl+Q quit, Ctrl+O full activity, Ctrl+J newline."},
+		},
+		status: "ready",
+	}
+}
+
+func (m Model) Init() tea.Cmd {
+	return textarea.Blink
+}
+
+func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		m.resize()
+		return m, nil
+	case replyMsg:
+		reply := app.Reply(msg)
+		m.messages = reply.History
+		m.status = reply.Message
+		m.events = append(m.events, activityEvent{
+			Time:    time.Now(),
+			Command: reply.Command,
+			Panel:   reply.OpenPanel,
+			Status:  compactStatus(reply.Message),
+			Detail:  reply.Message,
+		})
+		if text, ok := reply.Data["copy"].(string); ok {
+			if err := clipboard.WriteAll(text); err != nil {
+				m.status = "Copy failed: " + err.Error()
+			}
+		}
+		m.refreshContent(reply)
+		if reply.OpenPanel != "" {
+			m.openModal(reply.OpenPanel, reply)
+		}
+		return m, nil
+	case tea.KeyMsg:
+		return m.handleKey(msg)
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
+	}
+
+	var cmd tea.Cmd
+	if m.mode == ModePlanEdit {
+		m.planEdit, cmd = m.planEdit.Update(msg)
+		return m, cmd
+	}
+	m.input, cmd = m.input.Update(msg)
+	return m, cmd
+}
+
+func (m Model) View() string {
+	if m.width == 0 {
+		return "starting NullBot..."
+	}
+	header := m.headerView()
+	main := lipgloss.JoinHorizontal(lipgloss.Top, m.outputPanel(), m.activityPanel())
+	status := statusStyle.Width(m.width).Render(m.statusLine())
+	input := inputBoxStyle.Width(max(1, m.width-2)).Render(m.inputView())
+	view := lipgloss.JoinVertical(lipgloss.Left, header, main, status, input)
+	if m.mode == ModeModal || m.mode == ModePlanEdit {
+		return placeModal(m.width, m.height, view, m.modalView())
+	}
+	return view
+}
+
+func (m Model) headerView() string {
+	name := "NULLBOT"
+	state := m.app.State()
+	if state.Config.BrandPrefix != "" {
+		name = strings.ToUpper(state.Config.BrandPrefix + "Bot")
+	}
+	tagline := state.Config.Tagline
+	if tagline == "" {
+		tagline = "It's just a client - no magic here."
+	}
+	banner := blockTitle(name)
+	lines := strings.Split(banner, "\n")
+	for i, line := range lines {
+		lines[i] = blockShadowStyle.Render(centerText(line, m.width))
+	}
+	tag := headerStyle.Width(m.width).Render(centerText(tagline, m.width))
+	return lipgloss.JoinVertical(lipgloss.Left, append(lines, tag)...)
+}
+
+func (m Model) inputView() string {
+	if !m.selectAll {
+		return m.input.View()
+	}
+	value := m.input.Value()
+	if value == "" {
+		return m.input.View()
+	}
+	return selectedInputStyle.Render(value)
+}
+
+func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.mode == ModePlanEdit {
+		switch msg.String() {
+		case "esc":
+			m.mode = ModeModal
+			m.input.Focus()
+			return m, nil
+		case "ctrl+s":
+			m.app.SetPlan(m.planEdit.Value())
+			m.mode = ModeModal
+			reply := app.Reply{Message: "Plan saved.", OpenPanel: "plan", Data: map[string]any{"plan": m.app.Plan()}}
+			m.openModal("plan", reply)
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.planEdit, cmd = m.planEdit.Update(msg)
+		return m, cmd
+	}
+
+	if m.mode == ModeModal {
+		if next, cmd, handled := m.handleConfigKey(msg); handled {
+			return next, cmd
+		}
+		if next, cmd, handled := m.handleModelsKey(msg); handled {
+			return next, cmd
+		}
+		switch msg.String() {
+		case "esc", "q":
+			m.mode = ModeChat
+			m.input.Focus()
+			return m, nil
+		case "e":
+			if m.panel == "plan" {
+				m.mode = ModePlanEdit
+				m.planEdit.SetValue(m.app.Plan())
+				m.planEdit.Focus()
+				return m, textarea.Blink
+			}
+		case "ctrl+o":
+			m.openActivityModal()
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.modal, cmd = m.modal.Update(msg)
+		return m, cmd
+	}
+
+	switch msg.String() {
+	case "ctrl+c":
+		return m, m.submit("/pause")
+	case "ctrl+v":
+		if text, err := clipboard.ReadAll(); err == nil {
+			if m.selectAll {
+				m.input.Reset()
+				m.selectAll = false
+			}
+			m.input.InsertString(text)
+		} else {
+			m.status = "Paste failed: " + err.Error()
+		}
+		return m, nil
+	case "ctrl+a":
+		m.selectAll = true
+		m.status = "Input selected. Type or paste to replace."
+		return m, nil
+	case "home":
+		m.input.SetCursor(0)
+		m.selectAll = false
+		return m, nil
+	case "end":
+		m.input.SetCursor(len(m.input.Value()))
+		m.selectAll = false
+		return m, nil
+	case "ctrl+z":
+		m.input.Reset()
+		m.selectAll = false
+		m.status = "Input cleared."
+		return m, nil
+	case "ctrl+q":
+		return m, tea.Quit
+	case "ctrl+o":
+		m.openActivityModal()
+		return m, nil
+	case "ctrl+k":
+		m.messages = nil
+		m.output.SetContent(mutedStyle.Render("Output cleared. History is still available with /history."))
+		m.status = "Output area cleared."
+		return m, nil
+	case "ctrl+l":
+		m.events = nil
+		m.activity.SetContent(mutedStyle.Render("Activity panel cleared."))
+		m.status = "Activity panel cleared."
+		return m, nil
+	case "enter":
+		if m.input.Value() == "" {
+			return m, nil
+		}
+		value := m.input.Value()
+		m.input.Reset()
+		m.selectAll = false
+		return m, m.submit(value)
+	case "ctrl+j":
+		m.input.InsertString("\n")
+		return m, nil
+	case "tab":
+		m.completeInput()
+		return m, nil
+	case "right":
+		m.completeInput()
+		return m, nil
+	case "ctrl+h":
+		return m, m.submit("/history")
+	case "ctrl+p":
+		return m, m.submit("/plan")
+	case "pgup":
+		m.output.PageUp()
+		return m, nil
+	case "pgdown":
+		m.output.PageDown()
+		return m, nil
+	case "shift+up":
+		m.activity.LineUp(3)
+		return m, nil
+	case "shift+down":
+		m.activity.LineDown(3)
+		return m, nil
+	}
+
+	var cmd tea.Cmd
+	if m.selectAll && isReplacingKey(msg) {
+		m.input.Reset()
+		m.selectAll = false
+	}
+	m.input, cmd = m.input.Update(msg)
+	return m, cmd
+}
+
+func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if msg.Type != tea.MouseWheelUp && msg.Type != tea.MouseWheelDown {
+		return m, nil
+	}
+	delta := 3
+	if msg.Type == tea.MouseWheelUp {
+		delta = -3
+	}
+	if m.mode == ModeModal || m.mode == ModePlanEdit {
+		if delta < 0 {
+			m.modal.LineUp(-delta)
+		} else {
+			m.modal.LineDown(delta)
+		}
+		return m, nil
+	}
+	if m.mouseInActivity(msg) {
+		if delta < 0 {
+			m.activity.LineUp(-delta)
+		} else {
+			m.activity.LineDown(delta)
+		}
+		return m, nil
+	}
+	if m.mouseInOutput(msg) {
+		if delta < 0 {
+			m.output.LineUp(-delta)
+		} else {
+			m.output.LineDown(delta)
+		}
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m *Model) resize() {
+	leftW, rightW, panelH := m.layoutSize()
+	m.output.Width = max(1, leftW-2)
+	m.output.Height = max(1, panelH-3)
+	m.activity.Width = max(1, rightW-2)
+	m.activity.Height = max(1, panelH-3)
+	m.modal.Width = max(40, int(float64(m.width)*0.68)-4)
+	m.modal.Height = max(8, int(float64(m.height)*0.60)-4)
+	m.input.SetWidth(max(1, m.width-6))
+	m.planEdit.SetWidth(m.modal.Width - 2)
+	m.planEdit.SetHeight(max(8, m.modal.Height-4))
+	m.refreshContent(app.Reply{})
+}
+
+func (m *Model) refreshContent(reply app.Reply) {
+	m.output.SetContent(renderMessages(m.messages))
+	m.output.GotoBottom()
+	m.activity.SetContent(renderActivity(m.events, reply))
+	m.activity.GotoBottom()
+}
+
+func (m *Model) submit(input string) tea.Cmd {
+	m.events = append(m.events, activityEvent{
+		Time:   time.Now(),
+		Input:  input,
+		Status: "submitted",
+	})
+	m.refreshContent(app.Reply{})
+	return func() tea.Msg {
+		return replyMsg(m.app.Submit(context.Background(), input))
+	}
+}
+
+func (m *Model) openModal(panel string, reply app.Reply) {
+	if panel == "config" {
+		m.openConfigModal()
+		return
+	}
+	if panel == "models" {
+		m.openModelsModal()
+		return
+	}
+	m.mode = ModeModal
+	m.panel = panel
+	m.input.Blur()
+	m.modal.SetContent(renderModal(panel, reply))
+	m.modal.GotoTop()
+}
+
+func (m *Model) openActivityModal() {
+	m.mode = ModeModal
+	m.panel = "activity"
+	m.input.Blur()
+	m.modal.SetContent(renderFullActivity(m.events))
+	m.modal.GotoBottom()
+}
+
+func (m *Model) completeInput() {
+	value := m.input.Value()
+	if value == "" {
+		return
+	}
+	for _, candidate := range completions(m.app.State()) {
+		if strings.HasPrefix(candidate, value) && candidate != value {
+			m.input.SetValue(candidate)
+			m.input.SetCursor(len(candidate))
+			return
+		}
+	}
+}
+
+func (m Model) outputPanel() string {
+	leftW, _, panelH := m.layoutSize()
+	label := labelStyle.Width(leftW).Render("Output")
+	body := panelStyle.Width(max(1, leftW-2)).Height(max(1, panelH-3)).Render(m.output.View())
+	return lipgloss.JoinVertical(lipgloss.Left, label, body)
+}
+
+func (m Model) activityPanel() string {
+	_, rightW, panelH := m.layoutSize()
+	label := labelStyle.Width(rightW).Render("Activity Panel")
+	body := activityStyle.Width(max(1, rightW-2)).Height(max(1, panelH-3)).Render(m.activity.View())
+	return lipgloss.JoinVertical(lipgloss.Left, label, body)
+}
+
+func (m Model) layoutSize() (leftW int, rightW int, panelH int) {
+	width := max(1, m.width)
+	leftW = int(float64(width) * 0.70)
+	rightW = width - leftW
+	if width >= 54 && rightW < 24 {
+		rightW = 24
+		leftW = width - rightW
+	}
+	if width >= 54 && leftW < 30 {
+		leftW = 30
+		rightW = max(20, width-leftW)
+	}
+	if width < 54 {
+		leftW = max(1, width/2)
+		rightW = max(1, width-leftW)
+	}
+	// Header 7 + panel area + status 1 + bordered 3-line input 6.
+	panelH = max(5, m.height-14)
+	return leftW, rightW, panelH
+}
+
+func (m Model) mouseInOutput(msg tea.MouseMsg) bool {
+	leftW, _, panelH := m.layoutSize()
+	// y: header 0, label 1, panel rows start 2.
+	return msg.X >= 0 && msg.X < leftW && msg.Y >= 2 && msg.Y < 2+panelH
+}
+
+func (m Model) mouseInActivity(msg tea.MouseMsg) bool {
+	leftW, rightW, panelH := m.layoutSize()
+	return msg.X >= leftW && msg.X < leftW+rightW && msg.Y >= 2 && msg.Y < 2+panelH
+}
+
+func (m Model) statusLine() string {
+	state := m.app.State()
+	runtime, _ := state.Data["runtime"].(map[string]any)
+	provider := fmt.Sprint(runtime["provider"])
+	model := fmt.Sprint(runtime["model"])
+	return fmt.Sprintf(" %s | %s | /help /plan /mcp /market /skills /history /logs | Ctrl+Q quit | Ctrl+J newline ", provider, model)
+}
+
+func (m Model) modalView() string {
+	title := modalTitleStyle.Render(strings.ToUpper(m.panel))
+	footer := "Esc close"
+	if m.panel == "plan" && m.mode == ModeModal {
+		footer += " | e edit | /plan focus <topic> | /plan execute"
+	}
+	if m.mode == ModePlanEdit {
+		title = modalTitleStyle.Render("EDIT PLAN")
+		footer = "Ctrl+S save | Esc cancel"
+		return modalStyle.Width(m.modal.Width + 2).Height(m.modal.Height + 4).Render(lipgloss.JoinVertical(lipgloss.Left, title, m.planEdit.View(), footerStyle.Render(footer)))
+	}
+	return modalStyle.Width(m.modal.Width + 2).Height(m.modal.Height + 4).Render(lipgloss.JoinVertical(lipgloss.Left, title, m.modal.View(), footerStyle.Render(footer)))
+}
+
+func renderMessages(messages []app.Message) string {
+	if len(messages) == 0 {
+		return mutedStyle.Render("No messages yet. Type /help to start.")
+	}
+	var b strings.Builder
+	for _, msg := range messages {
+		role := userStyle
+		if msg.Role == "assistant" {
+			role = botStyle
+		}
+		b.WriteString(role.Render(strings.ToUpper(msg.Role)))
+		b.WriteString("\n")
+		b.WriteString(msg.Content)
+		b.WriteString("\n\n")
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func renderActivity(events []activityEvent, reply app.Reply) string {
+	var b strings.Builder
+	start := max(0, len(events)-40)
+	for _, event := range events[start:] {
+		b.WriteString(activityLine(event))
+		b.WriteByte('\n')
+	}
+	if reply.OpenPanel != "" {
+		fmt.Fprintf(&b, "\nPanel: %s\n", reply.OpenPanel)
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func renderFullActivity(events []activityEvent) string {
+	if len(events) == 0 {
+		return "No activity yet."
+	}
+	var b strings.Builder
+	for _, event := range events {
+		fmt.Fprintf(&b, "%s\n", event.Time.Format("15:04:05"))
+		if event.Input != "" {
+			fmt.Fprintf(&b, "  input: %s\n", event.Input)
+		}
+		if event.Command != "" {
+			fmt.Fprintf(&b, "  command: %s\n", event.Command)
+		}
+		if event.Panel != "" {
+			fmt.Fprintf(&b, "  panel: %s\n", event.Panel)
+		}
+		if event.Status != "" {
+			fmt.Fprintf(&b, "  status: %s\n", event.Status)
+		}
+		if event.Detail != "" && event.Detail != event.Status {
+			fmt.Fprintf(&b, "  detail: %s\n", event.Detail)
+		}
+		b.WriteByte('\n')
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func activityLine(event activityEvent) string {
+	var parts []string
+	if event.Input != "" {
+		parts = append(parts, "input "+quoteCompact(event.Input, 34))
+	}
+	if event.Command != "" {
+		parts = append(parts, event.Command)
+	}
+	if event.Panel != "" {
+		parts = append(parts, "panel="+event.Panel)
+	}
+	if event.Status != "" {
+		parts = append(parts, event.Status)
+	}
+	if len(parts) == 0 {
+		parts = append(parts, "event")
+	}
+	return fmt.Sprintf("%s  %s", mutedStyle.Render(event.Time.Format("15:04:05")), strings.Join(parts, "  "))
+}
+
+func compactStatus(text string) string {
+	return quoteCompact(strings.ReplaceAll(text, "\n", " "), 52)
+}
+
+func quoteCompact(text string, limit int) string {
+	text = strings.TrimSpace(text)
+	if len(text) > limit {
+		text = text[:limit] + "..."
+	}
+	return text
+}
+
+func renderModal(panel string, reply app.Reply) string {
+	if reply.Data != nil {
+		data, _ := json.MarshalIndent(reply.Data, "", "  ")
+		return reply.Message + "\n\n" + string(data)
+	}
+	return reply.Message
+}
+
+func completions(state app.Reply) []string {
+	var out []string
+	out = append(out, state.Suggestions...)
+	for i := len(state.History) - 1; i >= 0 && len(out) < 80; i-- {
+		if state.History[i].Role == "user" {
+			out = append(out, state.History[i].Content)
+		}
+	}
+	return out
+}
+
+func placeModal(width, height int, base, modal string) string {
+	lines := strings.Split(base, "\n")
+	boxLines := strings.Split(modal, "\n")
+	top := max(1, height/2-len(boxLines)/2)
+	left := max(2, width/2-lipgloss.Width(modal)/2)
+	for i, line := range boxLines {
+		idx := top + i
+		if idx >= len(lines) {
+			break
+		}
+		prefix := strings.Repeat(" ", min(left, max(0, width-1)))
+		lines[idx] = prefix + line
+	}
+	return strings.Join(lines, "\n")
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func centerText(text string, width int) string {
+	textWidth := lipgloss.Width(text)
+	if textWidth >= width {
+		return text
+	}
+	left := (width - textWidth) / 2
+	return strings.Repeat(" ", left) + text
+}
+
+func isReplacingKey(msg tea.KeyMsg) bool {
+	switch msg.Type {
+	case tea.KeyRunes, tea.KeySpace, tea.KeyBackspace, tea.KeyDelete:
+		return true
+	default:
+		return false
+	}
+}
+
+func blockTitle(text string) string {
+	if text != "NULLBOT" {
+		return text
+	}
+	return strings.Join([]string{
+		"███╗   ██╗██╗   ██╗██╗     ██╗     ██████╗  ██████╗ ████████╗",
+		"████╗  ██║██║   ██║██║     ██║     ██╔══██╗██╔═══██╗╚══██╔══╝",
+		"██╔██╗ ██║██║   ██║██║     ██║     ██████╔╝██║   ██║   ██║   ",
+		"██║╚██╗██║██║   ██║██║     ██║     ██╔══██╗██║   ██║   ██║   ",
+		"██║ ╚████║╚██████╔╝███████╗███████╗██████╔╝╚██████╔╝   ██║   ",
+		"╚═╝  ╚═══╝ ╚═════╝ ╚══════╝╚══════╝╚═════╝  ╚═════╝    ╚═╝   ",
+	}, "\n")
+}

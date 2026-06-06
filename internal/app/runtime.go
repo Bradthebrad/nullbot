@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	tcagent "tinychain/agent"
@@ -53,11 +52,11 @@ func (a *App) buildRuntime(ctx context.Context, skillHints []string) (*runtimeBu
 	if err != nil {
 		return nil, err
 	}
-	systemPrompt := baseSystemPrompt(a.config, skillHints)
 
 	tools := BuiltinTools(a.config, a)
 	mcpTools, closers := a.loadMCPTools(ctx)
 	tools = append(tools, mcpTools...)
+	systemPrompt := baseSystemPrompt(a.config, skillHints, tools, skills)
 
 	return &runtimeBundle{
 		agent: tcagent.New(tcagent.Config{
@@ -151,10 +150,6 @@ func apiKeyForProvider(config Config, provider string, env string) string {
 
 func (a *App) loadSkills() ([]tcagent.Skill, error) {
 	var skills []tcagent.Skill
-	rootSkill := filepath.Join(a.config.AppDir, "SKILL.md")
-	if skill, err := tcagent.ParseSkillFile(rootSkill); err == nil {
-		skills = append(skills, skill)
-	}
 	for _, dir := range a.config.SkillDirs {
 		loaded, err := tcagent.LoadSkills(dir)
 		if err != nil {
@@ -221,11 +216,39 @@ func (a *App) langChainHistory() []lc.BaseMessage {
 	return messages
 }
 
-func baseSystemPrompt(config Config, skillHints []string) string {
+func baseSystemPrompt(config Config, skillHints []string, tools []tcagent.Tool, skills []tcagent.Skill) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "You are %s. %s\n", DisplayName(config), config.Tagline)
-	b.WriteString("You are a compact local bot client. Use only available tools. Coding, shell, arbitrary file access, email, and web access are unavailable unless the user installed and enabled matching MCP servers.\n")
-	b.WriteString("Slash commands are handled by the app. If the user references a skill token mid-sentence, treat it as a hint, not as a command execution request.\n")
+	b.WriteString("Be direct about what you can and cannot do. Do not claim coding, shell, web, email, filesystem, browser, or elevated local capabilities unless an enabled tool explicitly provides them.\n")
+	b.WriteString("Slash commands are handled by the app UI. If the user references a skill token mid-sentence, treat it as a hint, not as a command execution request.\n")
+	b.WriteString("Available built-in tools are for NullBot metadata only: listing config-directory files, reading small config-directory text files, listing skills, listing configured MCP servers, listing cached market metadata, and summarizing recent chat history.\n")
+	if len(tools) > 0 {
+		b.WriteString("Current tool inventory:\n")
+		for _, tool := range tools {
+			def := tool.Definition()
+			fmt.Fprintf(&b, "- %s: %s\n", def.Name, def.Description)
+		}
+	}
+	if len(skills) > 0 {
+		b.WriteString("Installed user skills:\n")
+		for _, skill := range skills {
+			fmt.Fprintf(&b, "- %s: %s\n", skill.Name, skill.Description)
+		}
+	} else {
+		b.WriteString("No user skills are currently installed in the configured skills directories.\n")
+	}
+	if len(config.EnabledMCPServers) > 0 {
+		b.WriteString("Configured MCP servers:\n")
+		for name, server := range config.EnabledMCPServers {
+			state := "disabled"
+			if server.Enabled {
+				state = "enabled"
+			}
+			fmt.Fprintf(&b, "- %s: %s (%s)\n", name, server.Transport, state)
+		}
+	} else {
+		b.WriteString("No MCP servers are currently configured.\n")
+	}
 	if config.Model.ReasoningEffort != "" {
 		fmt.Fprintf(&b, "Requested reasoning effort: %s.\n", config.Model.ReasoningEffort)
 	}

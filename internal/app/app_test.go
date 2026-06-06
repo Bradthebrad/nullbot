@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -67,6 +68,16 @@ func TestModelGroupsFlatten(t *testing.T) {
 	flat := FlattenModelGroups(groups)
 	if len(flat) != 1 || flat[0].ID != "a" {
 		t.Fatalf("flat = %#v", flat)
+	}
+}
+
+func TestBaseSystemPromptDoesNotClaimAdminTools(t *testing.T) {
+	prompt := baseSystemPrompt(DefaultConfig(), nil, nil, nil)
+	if strings.Contains(strings.ToLower(prompt), "admin") {
+		t.Fatalf("prompt should not claim admin tools:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "No MCP servers are currently configured.") {
+		t.Fatalf("prompt missing MCP inventory:\n%s", prompt)
 	}
 }
 

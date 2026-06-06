@@ -3,27 +3,26 @@ package app
 import "os"
 
 const defaultSkill = `---
-name: api-operator
-description: Safely discover APIs, explain API behavior, write focused skills, and search available MCP tools when tool discovery is installed.
+name: nullbot-basics
+description: Understand NullBot's local config, installed skills, configured MCP servers, and recent history without assuming extra capabilities.
 allowed-tools: config_dir_list, config_dir_read, skills_list, history_recent, market_list, mcp_list
 ---
 
-# API Operator
+# NullBot Basics
 
-Use this skill when the user asks the bot to interact with APIs, understand API
-documentation, write new SKILL.md files, or discover tools that could extend the
-bot.
+Use this skill when the user asks what NullBot can currently do, which skills are
+installed, which MCP servers are configured, where local app files live, or what
+recent conversation context is available.
 
 Principles:
 
-- Prefer documented APIs and explicit user-provided credentials.
-- When web tooling is installed, inspect official docs or visible API pages
-  before forming requests.
-- When web tooling is not installed, explain what tool category is needed.
-- Write new skills as small SKILL.md files with clear trigger descriptions.
-- Search installed MCP tools before claiming a capability is unavailable.
-- Never pretend coding, shell, email, or browser tooling exists unless the user
-  installed and enabled the relevant MCP server.
+- Be precise about available tools.
+- Never claim coding, shell, email, browser, web search, or arbitrary filesystem
+  access unless an enabled MCP server exposes that capability.
+- Use skills_list to inspect installed skills.
+- Use mcp_list to inspect configured MCP servers.
+- Use history_recent for a compact look at recent conversation context.
+- Use config-directory tools only for NullBot's own app data files.
 `
 
 func ensureDefaultSkill(path string) error {

@@ -50,7 +50,7 @@ func TestWorkspaceSlashCommands(t *testing.T) {
 	}
 	app := New(config)
 	reply := app.Submit(context.Background(), "/dir")
-	if !strings.Contains(reply.Message, "hello.txt") || strings.Contains(reply.Message, "disabled") {
+	if !strings.Contains(reply.Message, "hello.txt") || !strings.Contains(reply.Message, "```text") || !strings.Contains(reply.Message, "-rw-") || strings.Contains(reply.Message, "disabled") {
 		t.Fatalf("/dir reply = %q", reply.Message)
 	}
 	reply = app.Submit(context.Background(), "/files workspace "+config.AppDir)

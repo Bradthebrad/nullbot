@@ -85,6 +85,13 @@ func listWorkspaceDir(config Config, rel string, maxItems int) (string, error) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Workspace: `%s`\n", root)
 	fmt.Fprintf(&b, "Directory: `%s`\n\n", relOrDot(root, dir))
+	b.WriteString("```text\n")
+	fmt.Fprintf(&b, "%-10s %10s  %-16s  %s\n", "mode", "size", "modified", "name")
+	fmt.Fprintf(&b, "%-10s %10s  %-16s  %s\n", "----------", "----------", "----------------", "----")
+	fmt.Fprintf(&b, "%-10s %10d  %-16s  %s\n", "drwxr-xr-x", int64(0), time.Now().Format("2006-01-02 15:04"), "./")
+	if dir != root {
+		fmt.Fprintf(&b, "%-10s %10d  %-16s  %s\n", "drwxr-xr-x", int64(0), time.Now().Format("2006-01-02 15:04"), "../")
+	}
 	for i, entry := range entries {
 		if i >= maxItems {
 			fmt.Fprintf(&b, "... %d more entries\n", len(entries)-i)
@@ -100,12 +107,38 @@ func listWorkspaceDir(config Config, rel string, maxItems int) (string, error) {
 			mod = entryInfo.ModTime()
 		}
 		if entry.IsDir() {
-			kind = "dir"
-			name += string(os.PathSeparator)
+			kind = "drwxr-xr-x"
+			name += "/"
+		} else {
+			kind = fileModeString(entryInfo)
 		}
-		fmt.Fprintf(&b, "%-4s %-36s %10d %s\n", kind, name, size, mod.Format("2006-01-02 15:04"))
+		fmt.Fprintf(&b, "%-10s %10d  %-16s  %s\n", kind, size, mod.Format("2006-01-02 15:04"), name)
 	}
+	b.WriteString("```")
 	return strings.TrimRight(b.String(), "\n"), nil
+}
+
+func fileModeString(info os.FileInfo) string {
+	if info == nil {
+		return "-rw-r--r--"
+	}
+	mode := info.Mode()
+	chars := []byte("-rw-r--r--")
+	if mode&0111 != 0 {
+		chars[3] = 'x'
+		chars[6] = 'x'
+		chars[9] = 'x'
+	}
+	if mode&0200 == 0 {
+		chars[2] = '-'
+	}
+	if mode&0040 != 0 {
+		chars[5] = 'w'
+	}
+	if mode&0004 != 0 {
+		chars[8] = 'r'
+	}
+	return string(chars)
 }
 
 func relOrDot(root, path string) string {

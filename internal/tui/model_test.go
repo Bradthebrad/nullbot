@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -157,6 +159,56 @@ func TestMCPModalRendersInteractiveRows(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(rendered), "click") {
 		t.Fatalf("mcp modal missing interaction hint:\n%s", rendered)
+	}
+}
+
+func TestInputHistoryNavigationRestoresDraft(t *testing.T) {
+	model := New(app.New(app.DefaultConfig()))
+	model.rememberInput("/help")
+	model.rememberInput("/ls")
+	model.input.SetValue("draft message")
+
+	model.historyPrev()
+	if got := model.input.Value(); got != "/ls" {
+		t.Fatalf("prev = %q", got)
+	}
+	model.historyPrev()
+	if got := model.input.Value(); got != "/help" {
+		t.Fatalf("second prev = %q", got)
+	}
+	model.historyNext()
+	model.historyNext()
+	if got := model.input.Value(); got != "draft message" {
+		t.Fatalf("draft restored = %q", got)
+	}
+}
+
+func TestPathCompletionForFilesWorkspace(t *testing.T) {
+	parent := t.TempDir()
+	target := filepath.Join(parent, "workspace-target")
+	if err := os.Mkdir(target, 0700); err != nil {
+		t.Fatal(err)
+	}
+	model := New(app.New(app.DefaultConfig()))
+	model.input.SetValue("/files workspace " + filepath.Join(parent, "work"))
+	model.completeInput()
+	want := "/files workspace " + target + string(os.PathSeparator)
+	if got := model.input.Value(); got != want {
+		t.Fatalf("completion = %q, want %q", got, want)
+	}
+}
+
+func TestPathCompletionForWorkspaceListCommand(t *testing.T) {
+	config := app.DefaultConfig()
+	config.WorkspaceDir = t.TempDir()
+	if err := os.Mkdir(filepath.Join(config.WorkspaceDir, "src"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	model := New(app.New(config))
+	model.input.SetValue("/ls s")
+	model.completeInput()
+	if got, want := model.input.Value(), "/ls src"+string(os.PathSeparator); got != want {
+		t.Fatalf("completion = %q, want %q", got, want)
 	}
 }
 

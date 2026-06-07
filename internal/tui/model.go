@@ -28,6 +28,9 @@ type Model struct {
 	app       *app.App
 	input     textarea.Model
 	selectAll bool
+	history   []string
+	historyAt int
+	draft     string
 	output    viewport.Model
 	activity  viewport.Model
 	modal     viewport.Model
@@ -96,13 +99,14 @@ func New(a *app.App) Model {
 		FPS:    time.Second / 8,
 	}), spinner.WithStyle(spinnerStyle))
 	return Model{
-		app:      a,
-		input:    input,
-		output:   viewport.New(20, 10),
-		activity: viewport.New(20, 10),
-		modal:    viewport.New(20, 10),
-		planEdit: planEdit,
-		messages: state.History,
+		app:       a,
+		input:     input,
+		historyAt: -1,
+		output:    viewport.New(20, 10),
+		activity:  viewport.New(20, 10),
+		modal:     viewport.New(20, 10),
+		planEdit:  planEdit,
+		messages:  state.History,
 		events: []activityEvent{
 			{Time: time.Now(), Status: "NullBot started", Detail: "Press /help for commands."},
 			{Time: time.Now(), Status: "Shortcuts ready", Detail: "Ctrl+Q quit, Ctrl+O full activity, Ctrl+J newline."},
@@ -366,6 +370,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		value := m.input.Value()
+		m.rememberInput(value)
 		m.input.Reset()
 		m.selectAll = false
 		return m, m.submit(value)
@@ -378,6 +383,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "right":
 		m.completeInput()
 		return m, nil
+	case "up":
+		if m.input.Line() == 0 {
+			m.historyPrev()
+			return m, nil
+		}
+	case "down":
+		if m.input.Line() >= m.input.LineCount()-1 {
+			m.historyNext()
+			return m, nil
+		}
 	case "ctrl+h":
 		return m, m.submit("/history")
 	case "ctrl+p":
@@ -400,6 +415,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.selectAll && isReplacingKey(msg) {
 		m.input.Reset()
 		m.selectAll = false
+	}
+	if isReplacingKey(msg) {
+		m.historyAt = len(m.history)
+		m.draft = ""
 	}
 	m.input, cmd = m.input.Update(msg)
 	return m, cmd
@@ -542,6 +561,9 @@ func (m *Model) openActivityModal() {
 }
 
 func (m *Model) completeInput() {
+	if m.completePathInput() {
+		return
+	}
 	value := m.input.Value()
 	if value == "" {
 		return

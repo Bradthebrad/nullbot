@@ -1,6 +1,9 @@
 .gocache/
 .gomodcache/
 .appdata/
-nullbot.exe
+dist/
+release-assets/
+examples/compressed/
+scripts/release.ps1
+*.exe
 /nullbot
-yourbot.exe

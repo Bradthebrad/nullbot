@@ -81,6 +81,11 @@ var (
 				Background(lipgloss.Color("#F4D35E")).
 				Bold(true)
 
+	selectedRowStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#F4F7F5")).
+				Background(lipgloss.Color("#24383B")).
+				Bold(true)
+
 	modalStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("#F4D35E")).

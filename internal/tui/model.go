@@ -51,6 +51,15 @@ type Model struct {
 	modelOptions    []app.ModelOption
 	modelGroups     []app.ModelGroup
 	modelIndex      int
+
+	marketPackages []app.MarketPackage
+	marketIndex    int
+	marketSelected map[string]bool
+	marketDetails  bool
+
+	mcpPackages []app.MarketPackage
+	mcpIndex    int
+	mcpDetails  bool
 }
 
 type replyMsg app.Reply
@@ -260,6 +269,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if next, cmd, handled := m.handleModelsKey(msg); handled {
 			return next, cmd
 		}
+		if next, cmd, handled := m.handleMarketKey(msg); handled {
+			return next, cmd
+		}
+		if next, cmd, handled := m.handleMCPKey(msg); handled {
+			return next, cmd
+		}
 		switch msg.String() {
 		case "esc", "q":
 			m.mode = ModeChat
@@ -393,6 +408,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if msg.Type == tea.MouseLeft && m.mode == ModeModal {
+		if next, cmd, handled := m.handleMarketMouse(msg); handled {
+			return next, cmd
+		}
+		if next, cmd, handled := m.handleMCPMouse(msg); handled {
+			return next, cmd
+		}
+	}
 	if msg.Type != tea.MouseWheelUp && msg.Type != tea.MouseWheelDown {
 		return m, nil
 	}
@@ -495,6 +518,14 @@ func (m *Model) openModal(panel string, reply app.Reply) {
 	}
 	if panel == "models" {
 		m.openModelsModal()
+		return
+	}
+	if panel == "market" {
+		m.openMarketModal(reply)
+		return
+	}
+	if panel == "mcp" {
+		m.openMCPModal(reply)
 		return
 	}
 	m.mode = ModeModal
@@ -600,6 +631,12 @@ func (m Model) modalView() string {
 	footer := "Esc close"
 	if m.panel == "plan" && m.mode == ModeModal {
 		footer += " | e edit | /plan focus <topic> | /plan execute"
+	}
+	if m.panel == "market" {
+		footer += " | up/down move | space select | i install | s small | e install+enable | r refresh | d details"
+	}
+	if m.panel == "mcp" {
+		footer += " | up/down move | e enable | x disable | r remove | d details"
 	}
 	if m.mode == ModePlanEdit {
 		title = modalTitleStyle.Render("EDIT PLAN")

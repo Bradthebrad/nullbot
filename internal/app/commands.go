@@ -23,7 +23,7 @@ var commands = []Command{
 	{Name: "/pause", Usage: "/pause", Description: "Pause active work without discarding state."},
 	{Name: "/mcp", Usage: "/mcp [enable|disable|remove <id>]", Description: "Manage MCP servers."},
 	{Name: "/models", Usage: "/models", Description: "Select provider and model."},
-	{Name: "/market", Usage: "/market [refresh|install <id> [small] [enable]]", Description: "Browse and install MCP tool packages or skills."},
+	{Name: "/market", Usage: "/market [refresh|install <id>[,<id>...] [small] [enable]]", Description: "Browse and install MCP tool packages or skills."},
 	{Name: "/skills", Usage: "/skills [list|add|remove|open|reload]", Description: "Manage skills."},
 	{Name: "/analyze", Usage: "/analyze [focus]", Description: "Analyze the current session or a focused topic."},
 	{Name: "/compact", Usage: "/compact [focus]", Description: "Compact history with an optional focus."},

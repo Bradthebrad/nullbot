@@ -107,6 +107,53 @@ func TestRenderFullActivityUsesMarkdownPresentation(t *testing.T) {
 	}
 }
 
+func TestMarketModalRendersInteractiveRows(t *testing.T) {
+	model := New(app.New(app.DefaultConfig()))
+	model.width = 100
+	model.height = 36
+	model.resize()
+	model.openMarketModal(app.Reply{
+		Message: "Market panel opened.",
+		Data: map[string]any{"packages": []app.MarketPackage{{
+			ID:          "nullbot-code-mcp",
+			Kind:        "mcp_server",
+			Description: "Coding tools",
+			Status:      "available",
+		}}},
+	})
+	rendered := stripANSI(model.modal.View())
+	if !strings.Contains(rendered, "[ ] nullbot-code-mcp") {
+		t.Fatalf("market modal missing selectable row:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "click rows") {
+		t.Fatalf("market modal missing interaction hint:\n%s", rendered)
+	}
+}
+
+func TestMCPModalRendersInteractiveRows(t *testing.T) {
+	model := New(app.New(app.DefaultConfig()))
+	model.width = 100
+	model.height = 36
+	model.resize()
+	model.openMCPModal(app.Reply{
+		Message: "MCP panel opened.",
+		Data: map[string]any{"packages": []app.MarketPackage{{
+			ID:          "nullbot-code-mcp",
+			Kind:        "mcp_server",
+			Description: "Coding tools",
+			Installed:   true,
+			Enabled:     true,
+		}}},
+	})
+	rendered := stripANSI(model.modal.View())
+	if !strings.Contains(rendered, "nullbot-code-mcp") || !strings.Contains(rendered, "enabled") {
+		t.Fatalf("mcp modal missing interactive row:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "click rows") {
+		t.Fatalf("mcp modal missing interaction hint:\n%s", rendered)
+	}
+}
+
 func stripANSI(text string) string {
 	return regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(text, "")
 }

@@ -15,6 +15,14 @@ func TestInlineSkillHints(t *testing.T) {
 	}
 }
 
+func TestSplitMarketPackageIDs(t *testing.T) {
+	ids := splitMarketPackageIDs("nullbot-code-mcp, nullbot-parsers-mcp,,api-probe")
+	want := []string{"nullbot-code-mcp", "nullbot-parsers-mcp", "api-probe"}
+	if strings.Join(ids, "|") != strings.Join(want, "|") {
+		t.Fatalf("ids = %#v, want %#v", ids, want)
+	}
+}
+
 func TestConfigCommandUpdatesBrand(t *testing.T) {
 	config := DefaultConfig()
 	config.AppDir = t.TempDir()

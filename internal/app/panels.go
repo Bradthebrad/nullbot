@@ -90,26 +90,34 @@ func (a *App) marketCommand(sub string) Reply {
 			return a.marketPanelReply("Market refreshed.", manifest)
 		case "install":
 			if len(fields) < 2 {
-				return a.reply("Usage: /market install <package-id> [small] [enable]", "/market", "market")
+				return a.reply("Usage: /market install <package-id>[,<package-id>...] [small] [enable]", "/market", "market")
 			}
 			small := containsField(fields[2:], "small")
 			enable := containsField(fields[2:], "enable")
-			pkg, err := InstallMarketPackage(contextOrBackground(), a.config, fields[1], small)
-			if err != nil {
-				return a.reply("Market install failed: "+err.Error(), "/market", "market")
+			ids := splitMarketPackageIDs(fields[1])
+			if len(ids) == 0 {
+				return a.reply("Usage: /market install <package-id>[,<package-id>...] [small] [enable]", "/market", "market")
 			}
-			if enable && pkg.Kind == "mcp_server" {
-				config, err := EnableMCPServer(a.config, pkg.ID)
+			installed := make([]string, 0, len(ids))
+			for _, id := range ids {
+				pkg, err := InstallMarketPackage(contextOrBackground(), a.config, id, small)
 				if err != nil {
-					return a.reply("Installed "+pkg.ID+" but enable failed: "+err.Error(), "/market", "market")
+					return a.reply("Market install failed: "+err.Error(), "/market", "market")
 				}
-				a.mu.Lock()
-				a.config = config
-				a.mu.Unlock()
-				a.MarkRuntimeDirty("installed and enabled MCP package " + pkg.ID)
+				if enable && pkg.Kind == "mcp_server" {
+					config, err := EnableMCPServer(a.config, pkg.ID)
+					if err != nil {
+						return a.reply("Installed "+pkg.ID+" but enable failed: "+err.Error(), "/market", "market")
+					}
+					a.mu.Lock()
+					a.config = config
+					a.mu.Unlock()
+					a.MarkRuntimeDirty("installed and enabled MCP package " + pkg.ID)
+				}
+				installed = append(installed, pkg.ID)
 			}
 			manifest, _ := LoadMarketManifest(a.config)
-			return a.marketPanelReply("Installed "+pkg.ID+".", manifest)
+			return a.marketPanelReply("Installed "+strings.Join(installed, ", ")+".", manifest)
 		}
 	}
 	manifest, err := LoadMarketManifest(a.config)
@@ -117,6 +125,17 @@ func (a *App) marketCommand(sub string) Reply {
 		return a.reply("Market panel failed: "+err.Error(), "/market", "market")
 	}
 	return a.marketPanelReply("Market panel opened.", manifest)
+}
+
+func splitMarketPackageIDs(input string) []string {
+	var ids []string
+	for _, raw := range strings.Split(input, ",") {
+		id := strings.TrimSpace(raw)
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 func (a *App) skillsCommand(sub string) Reply {

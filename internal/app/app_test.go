@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"tinychain/mcp"
 )
@@ -217,10 +218,40 @@ func TestLoadMCPToolsDiscoversStdioServer(t *testing.T) {
 	}
 	t.Setenv("NULLBOT_MCP_HELPER", "1")
 	app := New(config)
-	tools, closers := app.loadMCPTools(context.Background())
+	tools, closers := app.loadMCPTools(context.Background(), config)
 	defer closeAll(closers)
 	if len(tools) != 1 || tools[0].Definition().Name != "helper_echo" {
 		t.Fatalf("tools = %#v", tools)
+	}
+}
+
+func TestBuildRuntimeAfterDirtyDoesNotDeadlock(t *testing.T) {
+	config := DefaultConfig()
+	config.AppDir = t.TempDir()
+	config.SkillDirs = []string{filepath.Join(config.AppDir, "skills")}
+	if err := EnsureAppDir(config); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveAPIKeys(config, APIKeys{OpenAI: "sk-test"}); err != nil {
+		t.Fatal(err)
+	}
+	app := New(config)
+	app.MarkRuntimeDirty("test dirty rebuild")
+	done := make(chan error, 1)
+	go func() {
+		bundle, err := app.buildRuntime(context.Background(), nil)
+		if bundle != nil {
+			closeAll(bundle.closers)
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("dirty runtime rebuild deadlocked")
 	}
 }
 

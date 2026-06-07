@@ -47,27 +47,32 @@ func (a *App) runAgent(ctx context.Context, skillHints []string) Reply {
 
 func (a *App) buildRuntime(ctx context.Context, skillHints []string) (*runtimeBundle, error) {
 	a.mu.Lock()
-	if a.runtimeDirty {
-		a.logInfo("runtime rebuild", "reason", a.runtimeDirtyReason)
+	config := a.config
+	dirty := a.runtimeDirty
+	dirtyReason := a.runtimeDirtyReason
+	if dirty {
 		a.runtimeDirty = false
 		a.runtimeDirtyReason = ""
 	}
 	a.mu.Unlock()
+	if dirty {
+		a.logInfo("runtime rebuild", "reason", dirtyReason)
+	}
 
-	model, err := modelFromConfig(a.config)
+	model, err := modelFromConfig(config)
 	if err != nil {
 		return nil, err
 	}
 
-	skills, err := a.loadSkills()
+	skills, err := loadSkills(config)
 	if err != nil {
 		return nil, err
 	}
 
-	tools := BuiltinTools(a.config, a)
-	mcpTools, closers := a.loadMCPTools(ctx)
+	tools := BuiltinTools(config, a)
+	mcpTools, closers := a.loadMCPTools(ctx, config)
 	tools = append(tools, mcpTools...)
-	systemPrompt := baseSystemPrompt(a.config, skillHints, tools, skills)
+	systemPrompt := baseSystemPrompt(config, skillHints, tools, skills)
 
 	return &runtimeBundle{
 		agent: tcagent.New(tcagent.Config{
@@ -75,7 +80,7 @@ func (a *App) buildRuntime(ctx context.Context, skillHints []string) (*runtimeBu
 			SystemPrompt:  systemPrompt,
 			Tools:         tools,
 			Skills:        skills,
-			MaxIterations: a.config.Agent.MaxIterations,
+			MaxIterations: config.Agent.MaxIterations,
 			Callbacks:     callbacks.SinkFunc(a.handleAgentCallback),
 		}),
 		closers: closers,
@@ -193,9 +198,9 @@ func apiKeyForProvider(config Config, provider string, env string) string {
 	return os.Getenv(env)
 }
 
-func (a *App) loadSkills() ([]tcagent.Skill, error) {
+func loadSkills(config Config) ([]tcagent.Skill, error) {
 	var skills []tcagent.Skill
-	for _, dir := range a.config.SkillDirs {
+	for _, dir := range config.SkillDirs {
 		loaded, err := tcagent.LoadSkills(dir)
 		if err != nil {
 			continue
@@ -205,10 +210,10 @@ func (a *App) loadSkills() ([]tcagent.Skill, error) {
 	return skills, nil
 }
 
-func (a *App) loadMCPTools(ctx context.Context) ([]tcagent.Tool, []func() error) {
+func (a *App) loadMCPTools(ctx context.Context, config Config) ([]tcagent.Tool, []func() error) {
 	var tools []tcagent.Tool
 	var closers []func() error
-	for id, entry := range a.config.EnabledMCPServers {
+	for id, entry := range config.EnabledMCPServers {
 		if !entry.Enabled {
 			continue
 		}

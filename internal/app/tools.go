@@ -18,6 +18,8 @@ func BuiltinTools(config Config, state *App) []agent.Tool {
 		configDirReadTool(config),
 		skillsListTool(config),
 		createSkillTool(config),
+		workspaceInfoTool(config),
+		workspaceListDirTool(config),
 		historyRecentTool(state),
 		historySessionsTool(config),
 		historySessionReadTool(config),
@@ -32,6 +34,38 @@ func BuiltinTools(config Config, state *App) []agent.Tool {
 		mcpRemoveServerTool(state),
 		marketListTool(config),
 		mcpListTool(config),
+	}
+}
+
+func workspaceInfoTool(config Config) agent.Tool {
+	return agent.ToolFunc{
+		Name:        "workspace_info",
+		Description: "Describe NullBot's configured workspace directory for lightweight file browsing.",
+		Schema:      agent.ToolSchema(map[string]any{}),
+		Func: func(ctx context.Context, args map[string]any) (string, error) {
+			root, err := workspaceRoot(config)
+			if err != nil {
+				return "", err
+			}
+			return prettyJSON(map[string]any{
+				"workspace": root,
+				"note":      "Built-in NullBot workspace browsing is limited to listing files. Install/enable nullbot-code-mcp for reading, writing, searching, editing, and commands.",
+			}), nil
+		},
+	}
+}
+
+func workspaceListDirTool(config Config) agent.Tool {
+	return agent.ToolFunc{
+		Name:        "list_dir",
+		Description: "List files and directories in NullBot's configured workspace. This built-in version is read-only and lightweight.",
+		Schema: agent.ToolSchema(map[string]any{
+			"path":      agent.StringProperty("Optional workspace-relative directory path. Defaults to workspace root."),
+			"max_items": agent.NumberProperty("Maximum entries to return. Defaults to 200."),
+		}),
+		Func: func(ctx context.Context, args map[string]any) (string, error) {
+			return listWorkspaceDir(config, stringArg(args, "path"), intArg(args, "max_items", 200))
+		},
 	}
 }
 
@@ -480,6 +514,17 @@ func stringArg(args map[string]any, key string) string {
 func boolArg(args map[string]any, key string) bool {
 	value, _ := args[key].(bool)
 	return value
+}
+
+func intArg(args map[string]any, key string, fallback int) int {
+	switch value := args[key].(type) {
+	case int:
+		return value
+	case float64:
+		return int(value)
+	default:
+		return fallback
+	}
 }
 
 func prettyJSON(value any) string {

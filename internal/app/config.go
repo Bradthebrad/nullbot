@@ -20,6 +20,7 @@ type Config struct {
 	Compaction          CompactionConfig    `json:"compaction"`
 	Editor              EditorConfig        `json:"editor"`
 	UI                  UIConfig            `json:"ui"`
+	WorkspaceDir        string              `json:"workspace_dir"`
 	SkillDirs           []string            `json:"skill_dirs"`
 	EnabledMCPServers   map[string]MCPEntry `json:"enabled_mcp_servers"`
 	PermissionDefaults  map[string]string   `json:"permission_defaults"`
@@ -91,7 +92,8 @@ func DefaultConfig() Config {
 		Editor: EditorConfig{
 			Command: defaultEditor(),
 		},
-		UI: UIConfig{Theme: "steel"},
+		UI:           UIConfig{Theme: "steel"},
+		WorkspaceDir: defaultWorkspaceDir(),
 		SkillDirs: []string{
 			filepath.Join(appDir, "skills"),
 		},
@@ -153,6 +155,7 @@ func loadOrInit(config Config) (Config, error) {
 }
 
 func SaveConfig(config Config) error {
+	config = normalizeConfig(config)
 	if err := EnsureAppDir(config); err != nil {
 		return err
 	}
@@ -193,13 +196,41 @@ func normalizeConfig(config Config) Config {
 	if len(config.SkillDirs) == 0 {
 		config.SkillDirs = []string{filepath.Join(config.AppDir, "skills")}
 	}
+	if strings.TrimSpace(config.WorkspaceDir) == "" {
+		config.WorkspaceDir = defaultWorkspaceDir()
+	}
+	if abs, err := filepath.Abs(config.WorkspaceDir); err == nil {
+		config.WorkspaceDir = abs
+	}
 	if config.EnabledMCPServers == nil {
 		config.EnabledMCPServers = map[string]MCPEntry{}
 	}
+	config.EnabledMCPServers = syncMCPWorkspaceArgs(config.EnabledMCPServers, config.WorkspaceDir)
 	if config.PermissionDefaults == nil {
 		config.PermissionDefaults = map[string]string{"coding": "deny", "shell": "ask", "network": "ask"}
 	}
 	return config
+}
+
+func syncMCPWorkspaceArgs(servers map[string]MCPEntry, workspace string) map[string]MCPEntry {
+	if len(servers) == 0 || strings.TrimSpace(workspace) == "" {
+		return servers
+	}
+	out := make(map[string]MCPEntry, len(servers))
+	for id, entry := range servers {
+		entry.Args = append([]string{}, entry.Args...)
+		for i, arg := range entry.Args {
+			if arg == "{{workspace}}" {
+				entry.Args[i] = workspace
+				continue
+			}
+			if arg == "--workspace" && i+1 < len(entry.Args) {
+				entry.Args[i+1] = workspace
+			}
+		}
+		out[id] = entry
+	}
+	return out
 }
 
 func DisplayName(config Config) string {
@@ -215,4 +246,16 @@ func defaultEditor() string {
 		return "notepad"
 	}
 	return "vi"
+}
+
+func defaultWorkspaceDir() string {
+	dir, err := os.Getwd()
+	if err == nil {
+		return dir
+	}
+	home, err := os.UserHomeDir()
+	if err == nil {
+		return home
+	}
+	return "."
 }

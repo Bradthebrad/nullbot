@@ -1,0 +1,251 @@
+package tui
+
+import (
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strings"
+
+	"yourbot/internal/app"
+)
+
+func renderMessages(messages []app.Message, width int) string {
+	if len(messages) == 0 {
+		return mutedStyle.Render("No messages yet. Type /help to start.")
+	}
+	entries := make([]logEntry, 0, len(messages))
+	for _, msg := range messages {
+		role := userStyle
+		if msg.Role == "assistant" {
+			role = botStyle
+		}
+		entries = append(entries, logEntry{
+			Title: strings.ToUpper(msg.Role),
+			Body:  msg.Content,
+			Style: role,
+		})
+	}
+	return renderRichLog(entries, width)
+}
+
+func renderActivity(events []activityEvent, reply app.Reply, width int) string {
+	var b strings.Builder
+	start := max(0, len(events)-40)
+	for _, event := range events[start:] {
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(activityLine(event, width))
+	}
+	if reply.OpenPanel != "" {
+		fmt.Fprintf(&b, "\n\n%s\n", renderMarkdown("- Panel: `"+reply.OpenPanel+"`", width))
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func renderFullActivity(events []activityEvent, width int) string {
+	if len(events) == 0 {
+		return "No activity yet."
+	}
+	var b strings.Builder
+	for _, event := range events {
+		fmt.Fprintf(&b, "### %s\n", event.Time.Format("15:04:05"))
+		if event.Input != "" {
+			fmt.Fprintf(&b, "- **input:** %s\n", event.Input)
+		}
+		if event.Command != "" {
+			fmt.Fprintf(&b, "- **command:** `%s`\n", event.Command)
+		}
+		if event.Panel != "" {
+			fmt.Fprintf(&b, "- **panel:** `%s`\n", event.Panel)
+		}
+		if event.Status != "" {
+			fmt.Fprintf(&b, "- **status:** %s\n", event.Status)
+		}
+		if event.Detail != "" && event.Detail != event.Status {
+			fmt.Fprintf(&b, "- **detail:** %s\n", event.Detail)
+		}
+		b.WriteByte('\n')
+	}
+	return renderMarkdown(strings.TrimSpace(b.String()), width)
+}
+
+func activityLine(event activityEvent, width int) string {
+	var parts []string
+	if event.Input != "" {
+		parts = append(parts, "`input` "+quoteCompact(event.Input, max(16, width-18)))
+	}
+	if event.Command != "" {
+		parts = append(parts, "`"+event.Command+"`")
+	}
+	if event.Panel != "" {
+		parts = append(parts, "`panel="+event.Panel+"`")
+	}
+	if event.Status != "" {
+		parts = append(parts, event.Status)
+	}
+	if len(parts) == 0 {
+		parts = append(parts, "event")
+	}
+	text := fmt.Sprintf("`%s` %s", event.Time.Format("15:04:05"), strings.Join(parts, " "))
+	return renderMarkdown(text, width)
+}
+
+func compactStatus(text string) string {
+	return quoteCompact(strings.ReplaceAll(text, "\n", " "), 52)
+}
+
+func quoteCompact(text string, limit int) string {
+	text = strings.TrimSpace(text)
+	if len(text) > limit {
+		text = text[:limit] + "..."
+	}
+	return text
+}
+
+func renderModal(panel string, reply app.Reply, width int) string {
+	switch panel {
+	case "history":
+		return renderHistoryModal(reply, width)
+	case "logs":
+		return renderLogsModal(reply, width)
+	case "market":
+		return renderMarketModal(reply, width)
+	case "mcp":
+		return renderMCPModal(reply, width)
+	}
+	if reply.Data != nil {
+		data, _ := json.MarshalIndent(reply.Data, "", "  ")
+		return renderMarkdown(reply.Message+"\n\n```json\n"+string(data)+"\n```", width)
+	}
+	return renderMarkdown(reply.Message, width)
+}
+
+func renderMarketModal(reply app.Reply, width int) string {
+	var b strings.Builder
+	b.WriteString(reply.Message)
+	b.WriteString("\n\n# Marketplace\n")
+	if summary, ok := reply.Data["summary"].(string); ok && summary != "" {
+		b.WriteString(summary)
+		b.WriteString("\n")
+	}
+	if packages, ok := reply.Data["packages"].([]app.MarketPackage); ok {
+		b.WriteString("\n## Packages\n")
+		if len(packages) == 0 {
+			b.WriteString("- none found\n")
+		}
+		for _, pkg := range packages {
+			state := pkg.Status
+			if pkg.Enabled {
+				state = "enabled"
+			} else if pkg.Installed {
+				state = "installed"
+			}
+			fmt.Fprintf(&b, "- `%s` [%s/%s] %s\n", pkg.ID, pkg.Kind, state, pkg.Description)
+			if len(pkg.Permissions) > 0 {
+				fmt.Fprintf(&b, "  permissions: `%s`\n", strings.Join(pkg.Permissions, "`, `"))
+			}
+			if pkg.Error != "" {
+				fmt.Fprintf(&b, "  error: %s\n", pkg.Error)
+			}
+		}
+	}
+	b.WriteString("\n## Commands\n")
+	b.WriteString("- `/market refresh`\n")
+	b.WriteString("- `/market install <package-id>`\n")
+	b.WriteString("- `/market install <package-id> small`\n")
+	b.WriteString("- `/market install <package-id> enable`\n")
+	b.WriteString("- `/mcp enable <server-id>`\n")
+	return renderMarkdown(b.String(), width)
+}
+
+func renderMCPModal(reply app.Reply, width int) string {
+	var b strings.Builder
+	b.WriteString(reply.Message)
+	b.WriteString("\n\n# MCP Servers\n")
+	if servers, ok := reply.Data["servers"].(map[string]app.MCPEntry); ok && len(servers) > 0 {
+		names := make([]string, 0, len(servers))
+		for name := range servers {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			server := servers[name]
+			state := "disabled"
+			if server.Enabled {
+				state = "enabled"
+			}
+			fmt.Fprintf(&b, "- `%s` [%s] %s `%s`\n", name, state, server.Transport, server.Command)
+		}
+	} else {
+		b.WriteString("- no enabled MCP servers\n")
+	}
+	if packages, ok := reply.Data["packages"].([]app.MarketPackage); ok {
+		b.WriteString("\n## Installed Packages\n")
+		found := false
+		for _, pkg := range packages {
+			if pkg.Kind != "mcp_server" || !pkg.Installed {
+				continue
+			}
+			found = true
+			state := "installed"
+			if pkg.Enabled {
+				state = "enabled"
+			}
+			fmt.Fprintf(&b, "- `%s` [%s] %s\n", pkg.ID, state, pkg.InstallDir)
+		}
+		if !found {
+			b.WriteString("- none installed\n")
+		}
+	}
+	b.WriteString("\n## Commands\n")
+	b.WriteString("- `/mcp enable <server-id>`\n")
+	b.WriteString("- `/mcp disable <server-id>`\n")
+	b.WriteString("- `/mcp remove <server-id>`\n")
+	return renderMarkdown(b.String(), width)
+}
+
+func renderHistoryModal(reply app.Reply, width int) string {
+	var b strings.Builder
+	b.WriteString(reply.Message)
+	if files, ok := reply.Data["history_files"].([]app.HistoryFile); ok {
+		b.WriteString("\n\n# History Files\n")
+		if len(files) == 0 {
+			b.WriteString("- none yet\n")
+		}
+		for _, file := range files {
+			fmt.Fprintf(&b, "- %s (%d bytes)\n", file.Name, file.Size)
+		}
+	}
+	if artifacts, ok := reply.Data["artifacts"].([]app.HistoryFile); ok {
+		b.WriteString("\n# Artifacts\n")
+		if len(artifacts) == 0 {
+			b.WriteString("- none yet\n")
+		}
+		for _, file := range artifacts {
+			fmt.Fprintf(&b, "- %s (%d bytes)\n", file.Name, file.Size)
+		}
+	}
+	if messages, ok := reply.Data["history"].([]app.Message); ok {
+		b.WriteString("\n# Visible Session\n")
+		start := max(0, len(messages)-12)
+		for _, message := range messages[start:] {
+			fmt.Fprintf(&b, "- %s: %s\n", message.Role, quoteCompact(message.Content, 160))
+		}
+	}
+	return renderMarkdown(b.String(), width)
+}
+
+func renderLogsModal(reply app.Reply, width int) string {
+	var b strings.Builder
+	b.WriteString(reply.Message)
+	if logs, ok := reply.Data["logs"].([]string); ok {
+		b.WriteString("\n\n```text\n")
+		for _, line := range logs {
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
+		b.WriteString("```")
+	}
+	return renderMarkdown(b.String(), width)
+}

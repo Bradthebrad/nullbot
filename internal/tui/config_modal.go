@@ -36,6 +36,7 @@ func configFields(config app.Config) []configField {
 		{Label: "Token Threshold", Key: "compact_tokens", Value: strconv.Itoa(config.Compaction.ApproxTokenLimit)},
 		{Label: "Keep Last Messages", Key: "keep_last", Value: strconv.Itoa(config.Compaction.KeepLastMessages)},
 		{Label: "Editor", Key: "editor", Value: config.Editor.Command},
+		{Label: "Workspace", Key: "workspace", Value: config.WorkspaceDir},
 	}
 }
 
@@ -170,6 +171,7 @@ func (m *Model) saveConfigFields() error {
 		config.Compaction.ApproxTokenLimit = parseIntDefault(values["compact_tokens"], config.Compaction.ApproxTokenLimit)
 		config.Compaction.KeepLastMessages = parseIntDefault(values["keep_last"], config.Compaction.KeepLastMessages)
 		config.Editor.Command = values["editor"]
+		config.WorkspaceDir = values["workspace"]
 	})
 }
 

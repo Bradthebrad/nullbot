@@ -155,9 +155,46 @@ func (a *App) compactCommand(focus string) Reply {
 }
 
 func (a *App) filesCommand(sub string) Reply {
-	reply := a.reply("Files panel opened. External editor: "+a.config.Editor.Command, "/files", "files")
-	reply.Data = map[string]any{"subcommand": sub, "editor": a.config.Editor}
+	fields := strings.Fields(sub)
+	if len(fields) >= 2 && fields[0] == "workspace" {
+		path := strings.TrimSpace(strings.TrimPrefix(sub, "workspace"))
+		if err := a.UpdateConfig(func(config *Config) {
+			config.WorkspaceDir = path
+		}); err != nil {
+			return a.reply("Workspace update failed: "+err.Error(), "/files", "files")
+		}
+		a.MarkRuntimeDirty("workspace changed")
+		return a.filesCommand("")
+	}
+	root, err := workspaceRoot(a.config)
+	message := "Files panel opened."
+	if err != nil {
+		message = "Files panel opened, but workspace is invalid: " + err.Error()
+	}
+	reply := a.reply(message, "/files", "files")
+	reply.Data = map[string]any{"subcommand": sub, "editor": a.config.Editor, "workspace": root}
 	return reply
+}
+
+func (a *App) listFilesCommand(command, path string) Reply {
+	output, err := listWorkspaceDir(a.config, path, 200)
+	if err != nil {
+		return a.reply("List failed: "+err.Error(), command, "files")
+	}
+	return a.reply(output, command, "files", map[string]any{"workspace": a.config.WorkspaceDir, "path": path})
+}
+
+func (a *App) removeFileCommand(command, sub string, dirsOnly bool) Reply {
+	fields := strings.Fields(sub)
+	if len(fields) == 0 {
+		return a.reply("Usage: "+command+" <path> [--recursive]", command, "files")
+	}
+	recursive := containsField(fields[1:], "--recursive") || containsField(fields[1:], "-r")
+	message, err := removeWorkspacePath(a.config, fields[0], recursive, dirsOnly)
+	if err != nil {
+		return a.reply("Remove failed: "+err.Error(), command, "files")
+	}
+	return a.reply(message, command, "files")
 }
 
 func (a *App) compactSummary(focus string) string {

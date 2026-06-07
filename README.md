@@ -63,8 +63,8 @@ go run ./cmd/nullbot
 | `/copy` | Copies the last assistant output. |
 | `/clear` | Clears the output panel. |
 | `/reset` | Resets the visible conversation state. |
-| `/files` | Opens the file menu shell for future MCP-backed file tooling. |
-| `/ls`, `/dir`, `/rm`, `/rmdir` | Reserved file-operation command shells; real filesystem power should come from explicit MCP tools. |
+| `/files` | Shows workspace/editor info; use `/files workspace <path>` to set the active workspace. |
+| `/ls`, `/dir`, `/rm`, `/rmdir` | Built-in workspace file operations. Heavy reads, edits, search, and commands still come from explicit MCP tools. |
 
 ## Keybinds
 

@@ -21,6 +21,8 @@ type runtimeBundle struct {
 	closers []func() error
 }
 
+const mcpDiscoveryTimeout = 5 * time.Second
+
 func (a *App) runAgent(ctx context.Context, skillHints []string) Reply {
 	workCtx := a.beginWork(ctx)
 	defer a.endWork()
@@ -217,7 +219,7 @@ func (a *App) loadMCPTools(ctx context.Context, config Config) ([]tcagent.Tool, 
 		if !entry.Enabled {
 			continue
 		}
-		loadCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		loadCtx, cancel := context.WithTimeout(ctx, mcpDiscoveryTimeout)
 		a.logInfo("mcp load start", "id", id, "transport", entry.Transport, "command", entry.Command)
 		client, err := mcpClientForEntry(loadCtx, entry)
 		if err != nil {

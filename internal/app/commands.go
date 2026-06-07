@@ -28,16 +28,16 @@ var commands = []Command{
 	{Name: "/analyze", Usage: "/analyze [focus]", Description: "Analyze the current session or a focused topic."},
 	{Name: "/compact", Usage: "/compact [focus]", Description: "Compact history with an optional focus."},
 	{Name: "/init", Usage: "/init", Description: "Initialize app config and default skill."},
-	{Name: "/files", Usage: "/files [open|view|recent]", Description: "View files in app or external editor."},
+	{Name: "/files", Usage: "/files [workspace <path>|open|view|recent]", Description: "View and configure workspace files."},
 	{Name: "/clear", Usage: "/clear", Description: "Clear visible chat history."},
 	{Name: "/copy", Usage: "/copy", Description: "Copy the last assistant output to the clipboard."},
 	{Name: "/history", Usage: "/history", Description: "Open recent session history."},
 	{Name: "/logs", Usage: "/logs", Description: "Open runtime logs."},
 	{Name: "/reset", Usage: "/reset", Description: "Reset current session state."},
 	{Name: "/config", Usage: "/config [key=value]", Description: "Open settings or update a supported config key."},
-	{Name: "/ls", Usage: "/ls", Description: "List files when file tools are installed.", Aliases: []string{"/dir"}},
-	{Name: "/rm", Usage: "/rm <path>", Description: "Remove files when file tools are installed."},
-	{Name: "/rmdir", Usage: "/rmdir <path>", Description: "Remove directories when file tools are installed."},
+	{Name: "/ls", Usage: "/ls [path]", Description: "List files in the configured workspace.", Aliases: []string{"/dir"}},
+	{Name: "/rm", Usage: "/rm <path> [--recursive]", Description: "Remove a workspace file or directory."},
+	{Name: "/rmdir", Usage: "/rmdir <path> [--recursive]", Description: "Remove a workspace directory."},
 }
 
 func (a *App) Execute(ctx context.Context, input string) Reply {
@@ -114,8 +114,12 @@ func (a *App) executeSlash(ctx context.Context, input string) Reply {
 		return a.reply("Reset current session state.", name, "")
 	case "/config":
 		return a.configCommand(strings.TrimSpace(rest))
-	case "/ls", "/dir", "/rm", "/rmdir":
-		return a.reply("File and coding commands are disabled until you install and enable a file/coding MCP server from /market.", name, "market")
+	case "/ls", "/dir":
+		return a.listFilesCommand(name, strings.TrimSpace(rest))
+	case "/rm":
+		return a.removeFileCommand(name, strings.TrimSpace(rest), false)
+	case "/rmdir":
+		return a.removeFileCommand(name, strings.TrimSpace(rest), true)
 	default:
 		return a.reply(fmt.Sprintf("Unknown command %s. Try /help.", name), name, "help")
 	}

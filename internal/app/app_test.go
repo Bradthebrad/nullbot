@@ -36,6 +36,51 @@ func TestConfigCommandUpdatesBrand(t *testing.T) {
 	}
 }
 
+func TestWorkspaceSlashCommands(t *testing.T) {
+	config := DefaultConfig()
+	config.AppDir = t.TempDir()
+	config.SkillDirs = []string{filepath.Join(config.AppDir, "skills")}
+	workspace := t.TempDir()
+	config.WorkspaceDir = workspace
+	if err := EnsureAppDir(config); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "hello.txt"), []byte("hi"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	app := New(config)
+	reply := app.Submit(context.Background(), "/dir")
+	if !strings.Contains(reply.Message, "hello.txt") || strings.Contains(reply.Message, "disabled") {
+		t.Fatalf("/dir reply = %q", reply.Message)
+	}
+	reply = app.Submit(context.Background(), "/files workspace "+config.AppDir)
+	if !strings.Contains(reply.Message, "Files panel opened") || app.Config().WorkspaceDir != config.AppDir {
+		t.Fatalf("/files workspace reply = %q workspace=%q", reply.Message, app.Config().WorkspaceDir)
+	}
+}
+
+func TestWorkspacePathRejectsEscape(t *testing.T) {
+	config := DefaultConfig()
+	config.AppDir = t.TempDir()
+	config.WorkspaceDir = t.TempDir()
+	if _, err := safeWorkspacePath(config, filepath.Join("..", "outside.txt")); err == nil {
+		t.Fatal("expected workspace escape error")
+	}
+}
+
+func TestNormalizeConfigSyncsMCPWorkspaceArgs(t *testing.T) {
+	config := DefaultConfig()
+	workspace := t.TempDir()
+	config.WorkspaceDir = workspace
+	config.EnabledMCPServers = map[string]MCPEntry{
+		"code": {Args: []string{"--workspace", "."}, Enabled: true},
+	}
+	normalized := normalizeConfig(config)
+	if got := normalized.EnabledMCPServers["code"].Args[1]; got != workspace {
+		t.Fatalf("workspace arg = %q, want %q", got, workspace)
+	}
+}
+
 func TestHelpCommandDoesNotRenderIntoHistory(t *testing.T) {
 	config := DefaultConfig()
 	config.AppDir = t.TempDir()

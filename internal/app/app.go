@@ -79,6 +79,7 @@ func (a *App) UpdateConfig(update func(*Config)) error {
 	if config.AppDir == "" {
 		config.AppDir = a.config.AppDir
 	}
+	config = normalizeConfig(config)
 	a.mu.Unlock()
 
 	if err := SaveConfig(config); err != nil {

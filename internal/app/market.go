@@ -486,7 +486,7 @@ func installMCPPackage(ctx context.Context, config Config, pkg MarketPackage, sm
 	pkg.Status = "installed"
 	pkg.Error = ""
 	_ = writeJSON(filepath.Join(dir, "package.json"), pkg)
-	_ = writeJSON(filepath.Join(dir, "server.json"), mcpEntryForPackage(pkg, target))
+	_ = writeJSON(filepath.Join(dir, "server.json"), mcpEntryForPackage(config, pkg, target))
 	return pkg, nil
 }
 
@@ -563,7 +563,7 @@ func EnableMCPServer(config Config, id string) (Config, error) {
 	if pkg.InstalledAsset == "" {
 		return config, fmt.Errorf("%s has no installed asset", id)
 	}
-	entry := mcpEntryForPackage(pkg, serverPath)
+	entry := mcpEntryForPackage(config, pkg, serverPath)
 	entry.Enabled = true
 	config.EnabledMCPServers[id] = entry
 	if err := SaveConfig(config); err != nil {
@@ -626,21 +626,25 @@ func setPackageEnabled(manifest MarketManifest, id string, enabled bool) MarketM
 	return manifest
 }
 
-func mcpEntryForPackage(pkg MarketPackage, command string) MCPEntry {
+func mcpEntryForPackage(config Config, pkg MarketPackage, command string) MCPEntry {
 	return MCPEntry{
 		Name:      pkg.Name,
 		Command:   command,
-		Args:      expandDefaultArgs(pkg.DefaultArgs),
+		Args:      expandDefaultArgs(config, pkg.DefaultArgs),
 		Transport: defaultString(pkg.DefaultTransport, "stdio"),
 		Enabled:   pkg.Enabled,
 	}
 }
 
-func expandDefaultArgs(args []string) []string {
+func expandDefaultArgs(config Config, args []string) []string {
 	out := append([]string{}, args...)
+	workspace := config.WorkspaceDir
+	if strings.TrimSpace(workspace) == "" {
+		workspace = defaultWorkspaceDir()
+	}
 	for i, arg := range out {
 		if arg == "{{workspace}}" {
-			out[i] = "."
+			out[i] = workspace
 		}
 	}
 	return out

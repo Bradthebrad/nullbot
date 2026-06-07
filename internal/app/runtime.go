@@ -221,7 +221,7 @@ func (a *App) loadMCPTools(ctx context.Context, config Config) ([]tcagent.Tool, 
 		}
 		loadCtx, cancel := context.WithTimeout(ctx, mcpDiscoveryTimeout)
 		a.logInfo("mcp load start", "id", id, "transport", entry.Transport, "command", entry.Command)
-		client, err := mcpClientForEntry(loadCtx, entry)
+		client, err := mcpClientForEntry(ctx, entry)
 		if err != nil {
 			cancel()
 			a.logError("mcp connect failed", "id", id, "error", err)

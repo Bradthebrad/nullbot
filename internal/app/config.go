@@ -151,6 +151,7 @@ func loadOrInit(config Config) (Config, error) {
 	if config.AppDir == "" {
 		config.AppDir = DefaultAppDir(config.BrandPrefix)
 	}
+	_ = SaveConfig(config)
 	return config, EnsureAppDir(config)
 }
 
@@ -200,7 +201,7 @@ func normalizeConfig(config Config) Config {
 		config.WorkspaceDir = defaultWorkspaceDir()
 	}
 	if abs, err := filepath.Abs(config.WorkspaceDir); err == nil {
-		config.WorkspaceDir = abs
+		config.WorkspaceDir = normalizeWorkspaceDir(abs)
 	}
 	if config.EnabledMCPServers == nil {
 		config.EnabledMCPServers = map[string]MCPEntry{}
@@ -251,11 +252,31 @@ func defaultEditor() string {
 func defaultWorkspaceDir() string {
 	dir, err := os.Getwd()
 	if err == nil {
-		return dir
+		return normalizeWorkspaceDir(dir)
 	}
 	home, err := os.UserHomeDir()
 	if err == nil {
 		return home
 	}
 	return "."
+}
+
+func normalizeWorkspaceDir(dir string) string {
+	dir = filepath.Clean(dir)
+	if strings.EqualFold(filepath.Base(dir), "dist") {
+		parent := filepath.Dir(dir)
+		if looksLikeProjectRoot(parent) {
+			return parent
+		}
+	}
+	return dir
+}
+
+func looksLikeProjectRoot(dir string) bool {
+	for _, marker := range []string{".git", "go.mod", "package.json", "pyproject.toml", "Cargo.toml"} {
+		if _, err := os.Stat(filepath.Join(dir, marker)); err == nil {
+			return true
+		}
+	}
+	return false
 }

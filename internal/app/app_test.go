@@ -81,6 +81,20 @@ func TestNormalizeConfigSyncsMCPWorkspaceArgs(t *testing.T) {
 	}
 }
 
+func TestNormalizeWorkspaceDirTreatsProjectDistAsParent(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module test\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	dist := filepath.Join(root, "dist")
+	if err := os.Mkdir(dist, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if got := normalizeWorkspaceDir(dist); got != root {
+		t.Fatalf("workspace = %q, want %q", got, root)
+	}
+}
+
 func TestHelpCommandDoesNotRenderIntoHistory(t *testing.T) {
 	config := DefaultConfig()
 	config.AppDir = t.TempDir()
@@ -267,6 +281,13 @@ func TestLoadMCPToolsDiscoversStdioServer(t *testing.T) {
 	defer closeAll(closers)
 	if len(tools) != 1 || tools[0].Definition().Name != "helper_echo" {
 		t.Fatalf("tools = %#v", tools)
+	}
+	output, err := tools[0].Call(context.Background(), map[string]any{"text": "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output != "ok" {
+		t.Fatalf("tool output = %q", output)
 	}
 }
 

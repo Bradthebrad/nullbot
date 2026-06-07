@@ -97,7 +97,12 @@ func (a *App) executeSlash(ctx context.Context, input string) Reply {
 		return a.reply("Copied last assistant output.", name, "", map[string]any{"copy": output})
 	case "/history":
 		reply := a.reply("History panel opened.", name, "history")
-		reply.Data = map[string]any{"history": a.State().History}
+		state := a.State()
+		reply.Data = map[string]any{
+			"history":       state.History,
+			"history_files": listHistoryFiles(a.config, a.config.HistoryRecentLimit),
+			"artifacts":     listArtifactFiles(a.config, a.config.ArtifactRecentLimit),
+		}
 		return reply
 	case "/logs":
 		reply := a.reply("Logs panel opened.", name, "logs")
@@ -129,6 +134,27 @@ func formatHelp() string {
 	b.WriteString("Available commands:\n")
 	for _, cmd := range commands {
 		fmt.Fprintf(&b, "%s - %s\n", cmd.Usage, cmd.Description)
+	}
+	b.WriteString("\nKeybinds:\n")
+	for _, line := range []string{
+		"F1 - open help",
+		"Ctrl+Q - quit",
+		"Ctrl+C - pause active work",
+		"Ctrl+J - insert newline",
+		"Ctrl+O - open full activity log",
+		"Ctrl+K - clear output panel",
+		"Ctrl+L - clear activity panel",
+		"Ctrl+A - select current input",
+		"Ctrl+V - paste",
+		"Ctrl+Z - clear current input",
+		"Home/End - move input cursor or modal scroll",
+		"PageUp/PageDown - scroll output",
+		"Shift+Up/Shift+Down - scroll activity panel",
+		"Tab/Right - complete slash command or recent input",
+		"Up/Down or k/j - move modal selection or scroll modal",
+		"Esc/q - close modal",
+	} {
+		fmt.Fprintf(&b, "%s\n", line)
 	}
 	return strings.TrimSpace(b.String())
 }

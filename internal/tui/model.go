@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/atotto/clipboard"
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -38,6 +39,8 @@ type Model struct {
 	messages  []app.Message
 	events    []activityEvent
 	status    string
+	busy      bool
+	spinner   spinner.Model
 	planEdit  textarea.Model
 
 	configFields    []configField
@@ -50,6 +53,11 @@ type Model struct {
 }
 
 type replyMsg app.Reply
+type liveActivityMsg struct {
+	Record app.ActivityRecord
+	Ch     <-chan app.ActivityRecord
+}
+type liveActivityDoneMsg struct{}
 
 type activityEvent struct {
 	Time    time.Time
@@ -75,6 +83,10 @@ func New(a *app.App) Model {
 	planEdit.SetHeight(10)
 
 	state := a.State()
+	spin := spinner.New(spinner.WithSpinner(spinner.Spinner{
+		Frames: []string{"*", "o", "O", "o"},
+		FPS:    time.Second / 8,
+	}), spinner.WithStyle(spinnerStyle))
 	return Model{
 		app:      a,
 		input:    input,
@@ -87,7 +99,8 @@ func New(a *app.App) Model {
 			{Time: time.Now(), Status: "NullBot started", Detail: "Press /help for commands."},
 			{Time: time.Now(), Status: "Shortcuts ready", Detail: "Ctrl+Q quit, Ctrl+O full activity, Ctrl+J newline."},
 		},
-		status: "ready",
+		status:  "ready",
+		spinner: spin,
 	}
 }
 
@@ -104,8 +117,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case replyMsg:
 		reply := app.Reply(msg)
+		m.busy = false
 		m.messages = reply.History
 		m.status = reply.Message
+		for _, record := range reply.Activity {
+			m.events = append(m.events, activityEvent{
+				Time:    record.Time,
+				Command: record.Name,
+				Status:  record.Status,
+				Detail:  record.Detail,
+			})
+		}
 		m.events = append(m.events, activityEvent{
 			Time:    time.Now(),
 			Command: reply.Command,
@@ -121,6 +143,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshContent(reply)
 		if reply.OpenPanel != "" {
 			m.openModal(reply.OpenPanel, reply)
+		}
+		return m, nil
+	case liveActivityMsg:
+		m.events = append(m.events, activityEventFromRecord(msg.Record))
+		m.refreshContent(app.Reply{})
+		return m, waitActivity(msg.Ch)
+	case liveActivityDoneMsg:
+		return m, nil
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		if m.busy {
+			m.spinner, cmd = m.spinner.Update(msg)
+			return m, cmd
 		}
 		return m, nil
 	case tea.KeyMsg:
@@ -144,7 +179,7 @@ func (m Model) View() string {
 	}
 	header := m.headerView()
 	main := lipgloss.JoinHorizontal(lipgloss.Top, m.outputPanel(), m.activityPanel())
-	status := statusStyle.Width(m.width).Render(m.statusLine())
+	status := m.statusView()
 	input := inputBoxStyle.Width(max(1, m.width-2)).Render(m.inputView())
 	view := lipgloss.JoinVertical(lipgloss.Left, header, main, status, input)
 	if m.mode == ModeModal || m.mode == ModePlanEdit {
@@ -163,13 +198,28 @@ func (m Model) headerView() string {
 	if tagline == "" {
 		tagline = "It's just a client - no magic here."
 	}
-	banner := blockTitle(name)
+	banner := styledBlockTitle(name)
 	lines := strings.Split(banner, "\n")
+	if bannerTooWide(lines, m.width) {
+		lines = strings.Split(styledCompactBlockTitle(name), "\n")
+	}
+	if bannerTooWide(lines, m.width) {
+		lines = []string{blockShadowStyle.Render(name)}
+	}
 	for i, line := range lines {
-		lines[i] = blockShadowStyle.Render(centerText(line, m.width))
+		lines[i] = centerText(line, m.width)
 	}
 	tag := headerStyle.Width(m.width).Render(centerText(tagline, m.width))
 	return lipgloss.JoinVertical(lipgloss.Left, append(lines, tag)...)
+}
+
+func bannerTooWide(lines []string, width int) bool {
+	for _, line := range lines {
+		if lipgloss.Width(line) > width {
+			return true
+		}
+	}
+	return false
 }
 
 func (m Model) inputView() string {
@@ -214,6 +264,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.mode = ModeChat
 			m.input.Focus()
 			return m, nil
+		case "up", "k":
+			m.modal.LineUp(1)
+			return m, nil
+		case "down", "j":
+			m.modal.LineDown(1)
+			return m, nil
+		case "home":
+			m.modal.GotoTop()
+			return m, nil
+		case "end":
+			m.modal.GotoBottom()
+			return m, nil
 		case "e":
 			if m.panel == "plan" {
 				m.mode = ModePlanEdit
@@ -231,7 +293,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg.String() {
+	case "f1":
+		return m, m.submit("/help")
 	case "ctrl+c":
+		if m.busy {
+			m.app.RequestPause()
+			m.status = "Pause requested."
+			m.events = append(m.events, activityEvent{Time: time.Now(), Command: "/pause", Status: "pause requested"})
+			m.refreshContent(app.Reply{})
+			return m, nil
+		}
 		return m, m.submit("/pause")
 	case "ctrl+v":
 		if text, err := clipboard.ReadAll(); err == nil {
@@ -370,21 +441,49 @@ func (m *Model) resize() {
 }
 
 func (m *Model) refreshContent(reply app.Reply) {
-	m.output.SetContent(renderMessages(m.messages))
+	m.output.SetContent(renderMessages(m.messages, m.output.Width))
 	m.output.GotoBottom()
-	m.activity.SetContent(renderActivity(m.events, reply))
+	m.activity.SetContent(renderActivity(m.events, reply, m.activity.Width))
 	m.activity.GotoBottom()
 }
 
 func (m *Model) submit(input string) tea.Cmd {
+	m.busy = true
+	ch := make(chan app.ActivityRecord, 64)
 	m.events = append(m.events, activityEvent{
 		Time:   time.Now(),
 		Input:  input,
 		Status: "submitted",
 	})
 	m.refreshContent(app.Reply{})
+	return tea.Batch(m.spinner.Tick, waitActivity(ch), func() tea.Msg {
+		reply := m.app.SubmitWithActivity(context.Background(), input, func(record app.ActivityRecord) {
+			select {
+			case ch <- record:
+			default:
+			}
+		})
+		close(ch)
+		return replyMsg(reply)
+	})
+}
+
+func waitActivity(ch <-chan app.ActivityRecord) tea.Cmd {
 	return func() tea.Msg {
-		return replyMsg(m.app.Submit(context.Background(), input))
+		record, ok := <-ch
+		if !ok {
+			return liveActivityDoneMsg{}
+		}
+		return liveActivityMsg{Record: record, Ch: ch}
+	}
+}
+
+func activityEventFromRecord(record app.ActivityRecord) activityEvent {
+	return activityEvent{
+		Time:    record.Time,
+		Command: record.Name,
+		Status:  record.Status,
+		Detail:  record.Detail,
 	}
 }
 
@@ -400,7 +499,7 @@ func (m *Model) openModal(panel string, reply app.Reply) {
 	m.mode = ModeModal
 	m.panel = panel
 	m.input.Blur()
-	m.modal.SetContent(renderModal(panel, reply))
+	m.modal.SetContent(renderModal(panel, reply, m.modal.Width))
 	m.modal.GotoTop()
 }
 
@@ -408,7 +507,7 @@ func (m *Model) openActivityModal() {
 	m.mode = ModeModal
 	m.panel = "activity"
 	m.input.Blur()
-	m.modal.SetContent(renderFullActivity(m.events))
+	m.modal.SetContent(renderFullActivity(m.events, m.modal.Width))
 	m.modal.GotoBottom()
 }
 
@@ -456,8 +555,8 @@ func (m Model) layoutSize() (leftW int, rightW int, panelH int) {
 		leftW = max(1, width/2)
 		rightW = max(1, width-leftW)
 	}
-	// Header 7 + panel area + status 1 + bordered 3-line input 6.
-	panelH = max(5, m.height-14)
+	// Header 9 + panel area + status 2 + bordered 3-line input 6.
+	panelH = max(5, m.height-17)
 	return leftW, rightW, panelH
 }
 
@@ -472,12 +571,27 @@ func (m Model) mouseInActivity(msg tea.MouseMsg) bool {
 	return msg.X >= leftW && msg.X < leftW+rightW && msg.Y >= 2 && msg.Y < 2+panelH
 }
 
-func (m Model) statusLine() string {
+func (m Model) statusView() string {
+	return lipgloss.JoinVertical(
+		lipgloss.Left,
+		statusStyle.Width(m.width).Render(m.statusTopLine()),
+		statusWorkStyle.Width(m.width).Render(m.statusWorkLine()),
+	)
+}
+
+func (m Model) statusTopLine() string {
 	state := m.app.State()
 	runtime, _ := state.Data["runtime"].(map[string]any)
 	provider := fmt.Sprint(runtime["provider"])
 	model := fmt.Sprint(runtime["model"])
-	return fmt.Sprintf(" %s | %s | /help /plan /mcp /market /skills /history /logs | Ctrl+Q quit | Ctrl+J newline ", provider, model)
+	return fmt.Sprintf(" %s | %s | F1 /help | Ctrl+O activity | Ctrl+Q quit | Ctrl+J newline ", provider, model)
+}
+
+func (m Model) statusWorkLine() string {
+	if m.busy {
+		return fmt.Sprintf(" %s working | %s ", m.spinner.View(), compactStatus(m.status))
+	}
+	return fmt.Sprintf(" ready | %s ", compactStatus(m.status))
 }
 
 func (m Model) modalView() string {
@@ -494,74 +608,92 @@ func (m Model) modalView() string {
 	return modalStyle.Width(m.modal.Width + 2).Height(m.modal.Height + 4).Render(lipgloss.JoinVertical(lipgloss.Left, title, m.modal.View(), footerStyle.Render(footer)))
 }
 
-func renderMessages(messages []app.Message) string {
+func (m *Model) keepModalLineVisible(line int) {
+	if line < 0 {
+		line = 0
+	}
+	top := m.modal.YOffset
+	bottom := top + max(1, m.modal.Height) - 1
+	if line < top+1 {
+		m.modal.SetYOffset(max(0, line-1))
+		return
+	}
+	if line > bottom-1 {
+		m.modal.SetYOffset(line - max(1, m.modal.Height) + 2)
+	}
+}
+
+func renderMessages(messages []app.Message, width int) string {
 	if len(messages) == 0 {
 		return mutedStyle.Render("No messages yet. Type /help to start.")
 	}
-	var b strings.Builder
+	entries := make([]logEntry, 0, len(messages))
 	for _, msg := range messages {
 		role := userStyle
 		if msg.Role == "assistant" {
 			role = botStyle
 		}
-		b.WriteString(role.Render(strings.ToUpper(msg.Role)))
-		b.WriteString("\n")
-		b.WriteString(msg.Content)
-		b.WriteString("\n\n")
+		entries = append(entries, logEntry{
+			Title: strings.ToUpper(msg.Role),
+			Body:  msg.Content,
+			Style: role,
+		})
 	}
-	return strings.TrimSpace(b.String())
+	return renderRichLog(entries, width)
 }
 
-func renderActivity(events []activityEvent, reply app.Reply) string {
+func renderActivity(events []activityEvent, reply app.Reply, width int) string {
 	var b strings.Builder
 	start := max(0, len(events)-40)
 	for _, event := range events[start:] {
-		b.WriteString(activityLine(event))
-		b.WriteByte('\n')
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(activityLine(event, width))
 	}
 	if reply.OpenPanel != "" {
-		fmt.Fprintf(&b, "\nPanel: %s\n", reply.OpenPanel)
+		fmt.Fprintf(&b, "\n\n%s\n", renderMarkdown("- Panel: `"+reply.OpenPanel+"`", width))
 	}
 	return strings.TrimSpace(b.String())
 }
 
-func renderFullActivity(events []activityEvent) string {
+func renderFullActivity(events []activityEvent, width int) string {
 	if len(events) == 0 {
 		return "No activity yet."
 	}
 	var b strings.Builder
 	for _, event := range events {
-		fmt.Fprintf(&b, "%s\n", event.Time.Format("15:04:05"))
+		fmt.Fprintf(&b, "### %s\n", event.Time.Format("15:04:05"))
 		if event.Input != "" {
-			fmt.Fprintf(&b, "  input: %s\n", event.Input)
+			fmt.Fprintf(&b, "- **input:** %s\n", event.Input)
 		}
 		if event.Command != "" {
-			fmt.Fprintf(&b, "  command: %s\n", event.Command)
+			fmt.Fprintf(&b, "- **command:** `%s`\n", event.Command)
 		}
 		if event.Panel != "" {
-			fmt.Fprintf(&b, "  panel: %s\n", event.Panel)
+			fmt.Fprintf(&b, "- **panel:** `%s`\n", event.Panel)
 		}
 		if event.Status != "" {
-			fmt.Fprintf(&b, "  status: %s\n", event.Status)
+			fmt.Fprintf(&b, "- **status:** %s\n", event.Status)
 		}
 		if event.Detail != "" && event.Detail != event.Status {
-			fmt.Fprintf(&b, "  detail: %s\n", event.Detail)
+			fmt.Fprintf(&b, "- **detail:** %s\n", event.Detail)
 		}
 		b.WriteByte('\n')
 	}
-	return strings.TrimSpace(b.String())
+	return renderMarkdown(strings.TrimSpace(b.String()), width)
 }
 
-func activityLine(event activityEvent) string {
+func activityLine(event activityEvent, width int) string {
 	var parts []string
 	if event.Input != "" {
-		parts = append(parts, "input "+quoteCompact(event.Input, 34))
+		parts = append(parts, "`input` "+quoteCompact(event.Input, max(16, width-18)))
 	}
 	if event.Command != "" {
-		parts = append(parts, event.Command)
+		parts = append(parts, "`"+event.Command+"`")
 	}
 	if event.Panel != "" {
-		parts = append(parts, "panel="+event.Panel)
+		parts = append(parts, "`panel="+event.Panel+"`")
 	}
 	if event.Status != "" {
 		parts = append(parts, event.Status)
@@ -569,7 +701,8 @@ func activityLine(event activityEvent) string {
 	if len(parts) == 0 {
 		parts = append(parts, "event")
 	}
-	return fmt.Sprintf("%s  %s", mutedStyle.Render(event.Time.Format("15:04:05")), strings.Join(parts, "  "))
+	text := fmt.Sprintf("`%s` %s", event.Time.Format("15:04:05"), strings.Join(parts, " "))
+	return renderMarkdown(text, width)
 }
 
 func compactStatus(text string) string {
@@ -584,12 +717,63 @@ func quoteCompact(text string, limit int) string {
 	return text
 }
 
-func renderModal(panel string, reply app.Reply) string {
+func renderModal(panel string, reply app.Reply, width int) string {
+	switch panel {
+	case "history":
+		return renderHistoryModal(reply, width)
+	case "logs":
+		return renderLogsModal(reply, width)
+	}
 	if reply.Data != nil {
 		data, _ := json.MarshalIndent(reply.Data, "", "  ")
-		return reply.Message + "\n\n" + string(data)
+		return renderMarkdown(reply.Message+"\n\n```json\n"+string(data)+"\n```", width)
 	}
-	return reply.Message
+	return renderMarkdown(reply.Message, width)
+}
+
+func renderHistoryModal(reply app.Reply, width int) string {
+	var b strings.Builder
+	b.WriteString(reply.Message)
+	if files, ok := reply.Data["history_files"].([]app.HistoryFile); ok {
+		b.WriteString("\n\n# History Files\n")
+		if len(files) == 0 {
+			b.WriteString("- none yet\n")
+		}
+		for _, file := range files {
+			fmt.Fprintf(&b, "- %s (%d bytes)\n", file.Name, file.Size)
+		}
+	}
+	if artifacts, ok := reply.Data["artifacts"].([]app.HistoryFile); ok {
+		b.WriteString("\n# Artifacts\n")
+		if len(artifacts) == 0 {
+			b.WriteString("- none yet\n")
+		}
+		for _, file := range artifacts {
+			fmt.Fprintf(&b, "- %s (%d bytes)\n", file.Name, file.Size)
+		}
+	}
+	if messages, ok := reply.Data["history"].([]app.Message); ok {
+		b.WriteString("\n# Visible Session\n")
+		start := max(0, len(messages)-12)
+		for _, message := range messages[start:] {
+			fmt.Fprintf(&b, "- %s: %s\n", message.Role, quoteCompact(message.Content, 160))
+		}
+	}
+	return renderMarkdown(b.String(), width)
+}
+
+func renderLogsModal(reply app.Reply, width int) string {
+	var b strings.Builder
+	b.WriteString(reply.Message)
+	if logs, ok := reply.Data["logs"].([]string); ok {
+		b.WriteString("\n\n```text\n")
+		for _, line := range logs {
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
+		b.WriteString("```")
+	}
+	return renderMarkdown(b.String(), width)
 }
 
 func completions(state app.Reply) []string {
@@ -649,18 +833,4 @@ func isReplacingKey(msg tea.KeyMsg) bool {
 	default:
 		return false
 	}
-}
-
-func blockTitle(text string) string {
-	if text != "NULLBOT" {
-		return text
-	}
-	return strings.Join([]string{
-		"███╗   ██╗██╗   ██╗██╗     ██╗     ██████╗  ██████╗ ████████╗",
-		"████╗  ██║██║   ██║██║     ██║     ██╔══██╗██╔═══██╗╚══██╔══╝",
-		"██╔██╗ ██║██║   ██║██║     ██║     ██████╔╝██║   ██║   ██║   ",
-		"██║╚██╗██║██║   ██║██║     ██║     ██╔══██╗██║   ██║   ██║   ",
-		"██║ ╚████║╚██████╔╝███████╗███████╗██████╔╝╚██████╔╝   ██║   ",
-		"╚═╝  ╚═══╝ ╚═════╝ ╚══════╝╚══════╝╚═════╝  ╚═════╝    ╚═╝   ",
-	}, "\n")
 }

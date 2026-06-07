@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 )
@@ -10,11 +11,14 @@ type App struct {
 	mu           sync.Mutex
 	config       Config
 	history      []Message
+	activity     []ActivityRecord
+	sessionID    string
 	logs         []string
 	logger       *Logger
 	plan         string
 	paused       bool
 	activeCancel context.CancelFunc
+	activitySink func(ActivityRecord)
 }
 
 type Message struct {
@@ -23,20 +27,29 @@ type Message struct {
 	Time    time.Time `json:"time"`
 }
 
+type ActivityRecord struct {
+	Time   time.Time `json:"time"`
+	Kind   string    `json:"kind"`
+	Name   string    `json:"name,omitempty"`
+	Status string    `json:"status,omitempty"`
+	Detail string    `json:"detail,omitempty"`
+}
+
 type Reply struct {
-	Message     string         `json:"message"`
-	Command     string         `json:"command,omitempty"`
-	OpenPanel   string         `json:"open_panel,omitempty"`
-	Config      Config         `json:"config"`
-	History     []Message      `json:"history"`
-	Suggestions []string       `json:"suggestions,omitempty"`
-	Data        map[string]any `json:"data,omitempty"`
+	Message     string           `json:"message"`
+	Command     string           `json:"command,omitempty"`
+	OpenPanel   string           `json:"open_panel,omitempty"`
+	Config      Config           `json:"config"`
+	History     []Message        `json:"history"`
+	Activity    []ActivityRecord `json:"activity,omitempty"`
+	Suggestions []string         `json:"suggestions,omitempty"`
+	Data        map[string]any   `json:"data,omitempty"`
 }
 
 func New(config Config) *App {
 	logger := NewLogger(config)
 	logger.Info("app initialized", "app_dir", config.AppDir, "provider", config.Model.Provider, "model", config.Model.Model)
-	return &App{config: config, logger: logger}
+	return &App{config: config, logger: logger, sessionID: newSessionID()}
 }
 
 func (a *App) State() Reply {
@@ -100,21 +113,74 @@ func (a *App) SaveAPIKeys(keys APIKeys) error {
 }
 
 func (a *App) Submit(ctx context.Context, input string) Reply {
+	return a.SubmitWithActivity(ctx, input, nil)
+}
+
+func (a *App) SubmitWithActivity(ctx context.Context, input string, sink func(ActivityRecord)) Reply {
 	a.mu.Lock()
-	a.history = append(a.history, Message{Role: "user", Content: input, Time: time.Now().UTC()})
+	previousSink := a.activitySink
+	a.activitySink = sink
 	a.mu.Unlock()
+	defer func() {
+		a.mu.Lock()
+		a.activitySink = previousSink
+		a.mu.Unlock()
+	}()
+
+	uiOnly := isUIOnlyCommand(input)
+	userMessage := Message{Role: "user", Content: input, Time: time.Now().UTC()}
+	if !uiOnly {
+		a.mu.Lock()
+		a.history = append(a.history, userMessage)
+		a.mu.Unlock()
+		a.persistMessage(userMessage)
+	}
 	a.logInfo("submit", "input", input)
 
 	reply := a.Execute(ctx, input)
 
+	assistantMessage := Message{Role: "assistant", Content: reply.Message, Time: time.Now().UTC()}
 	a.mu.Lock()
-	a.history = append(a.history, Message{Role: "assistant", Content: reply.Message, Time: time.Now().UTC()})
+	if !uiOnly {
+		a.history = append(a.history, assistantMessage)
+	}
 	a.logs = append(a.logs, time.Now().UTC().Format(time.RFC3339)+" "+reply.Message)
 	reply.Config = a.config
 	reply.History = append([]Message{}, a.history...)
+	if sink == nil {
+		reply.Activity = a.drainActivityLocked()
+	} else {
+		a.activity = nil
+	}
 	a.mu.Unlock()
+	if !uiOnly {
+		a.persistMessage(assistantMessage)
+	}
 	a.logInfo("reply", "command", reply.Command, "panel", reply.OpenPanel, "message", reply.Message)
 	return reply
+}
+
+func isUIOnlyCommand(input string) bool {
+	return strings.EqualFold(strings.TrimSpace(input), "/help")
+}
+
+func (a *App) appendActivity(record ActivityRecord) {
+	a.mu.Lock()
+	a.activity = append(a.activity, record)
+	if len(a.activity) > 400 {
+		a.activity = a.activity[len(a.activity)-400:]
+	}
+	sink := a.activitySink
+	a.mu.Unlock()
+	if sink != nil {
+		sink(record)
+	}
+}
+
+func (a *App) drainActivityLocked() []ActivityRecord {
+	out := append([]ActivityRecord{}, a.activity...)
+	a.activity = nil
+	return out
 }
 
 func (a *App) Logs() []string {
@@ -150,6 +216,10 @@ func (a *App) SetPlan(plan string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.plan = plan
+}
+
+func (a *App) RequestPause() {
+	a.setPaused(true)
 }
 
 func (a *App) setPaused(paused bool) {

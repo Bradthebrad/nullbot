@@ -2,12 +2,15 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	tcagent "tinychain/agent"
 	"tinychain/anthropic"
+	"tinychain/callbacks"
 	"tinychain/lc"
 	"tinychain/mcp"
 	"tinychain/openai"
@@ -65,9 +68,43 @@ func (a *App) buildRuntime(ctx context.Context, skillHints []string) (*runtimeBu
 			Tools:         tools,
 			Skills:        skills,
 			MaxIterations: a.config.Agent.MaxIterations,
+			Callbacks:     callbacks.SinkFunc(a.handleAgentCallback),
 		}),
 		closers: closers,
 	}, nil
+}
+
+func (a *App) handleAgentCallback(event callbacks.Event) {
+	record := ActivityRecord{
+		Time: event.Time,
+		Kind: string(event.Event),
+		Name: event.Name,
+	}
+	if record.Time.IsZero() {
+		record.Time = time.Now().UTC()
+	}
+	switch event.Event {
+	case callbacks.EventChatModelStart:
+		record.Status = "model start"
+		record.Detail = "sending messages"
+	case callbacks.EventLLMEnd:
+		record.Status = "model done"
+	case callbacks.EventLLMError:
+		record.Status = "model error"
+		record.Detail = event.Data.Error
+	case callbacks.EventToolStart:
+		record.Status = "tool start"
+		record.Detail = compactAny(event.Data.Input, 120)
+	case callbacks.EventToolEnd:
+		record.Status = "tool done"
+		record.Detail = compactAny(event.Data.Output, 160)
+	case callbacks.EventToolError:
+		record.Status = "tool error"
+		record.Detail = event.Data.Error
+	default:
+		record.Status = string(event.Event)
+	}
+	a.appendActivity(record)
 }
 
 func modelFromConfig(config Config) (tcagent.Model, error) {
@@ -221,7 +258,7 @@ func baseSystemPrompt(config Config, skillHints []string, tools []tcagent.Tool, 
 	fmt.Fprintf(&b, "You are %s. %s\n", DisplayName(config), config.Tagline)
 	b.WriteString("Be direct about what you can and cannot do. Do not claim coding, shell, web, email, filesystem, browser, or elevated local capabilities unless an enabled tool explicitly provides them.\n")
 	b.WriteString("Slash commands are handled by the app UI. If the user references a skill token mid-sentence, treat it as a hint, not as a command execution request.\n")
-	b.WriteString("Available built-in tools are for NullBot metadata only: listing config-directory files, reading small config-directory text files, listing skills, listing configured MCP servers, listing cached market metadata, and summarizing recent chat history.\n")
+	b.WriteString("Available built-in tools are constrained to NullBot app data: listing config-directory files, reading small config-directory text files, listing skills, creating SKILL.md files under the configured skills directory, listing configured MCP servers, listing cached market metadata, summarizing recent visible chat history, reading compact persisted session history, and reading recent NullBot runtime log lines.\n")
 	if len(tools) > 0 {
 		b.WriteString("Current tool inventory:\n")
 		for _, tool := range tools {
@@ -269,6 +306,17 @@ func lcContentText(content lc.Content) string {
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+func compactAny(value any, limit int) string {
+	if value == nil {
+		return ""
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return truncate(fmt.Sprint(value), limit)
+	}
+	return truncate(string(data), limit)
 }
 
 func closeAll(closers []func() error) {

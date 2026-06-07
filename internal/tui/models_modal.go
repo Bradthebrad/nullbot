@@ -19,7 +19,7 @@ func (m *Model) openModelsModal() {
 	m.modelOptions = app.FlattenModelGroups(m.modelGroups)
 	m.modelIndex = app.CurrentModelIndexIn(m.app.Config(), m.modelOptions)
 	m.modal.SetContent(m.renderModelsModal())
-	m.modal.GotoTop()
+	m.syncModelsModalViewport()
 }
 
 func (m *Model) handleModelsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
@@ -51,19 +51,23 @@ func (m *Model) handleModelsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 		}
 	}
 	m.modal.SetContent(m.renderModelsModal())
+	m.syncModelsModalViewport()
 	return m, nil, true
 }
 
 func (m *Model) renderModelsModal() string {
 	var b strings.Builder
 	config := m.app.Config()
-	fmt.Fprintf(&b, "Current: %s / %s\n", config.Model.Provider, config.Model.Model)
-	b.WriteString("Use up/down. Enter or s selects and saves. Models refresh from providers when keys are set.\n\n")
+	b.WriteString(renderMarkdown(fmt.Sprintf("Current: `%s / %s`\n\nUse `up`/`down`. `Enter` or `s` selects and saves. Models refresh from providers when keys are set.", config.Model.Provider, config.Model.Model), m.modal.Width))
+	b.WriteString("\n\n")
 	flat := 0
 	for _, group := range m.modelGroups {
-		fmt.Fprintf(&b, "[%s]\n", strings.ToUpper(group.Provider))
+		b.WriteString(renderMarkdown("### "+strings.ToUpper(group.Provider), m.modal.Width))
+		b.WriteByte('\n')
 		if group.Error != "" {
-			fmt.Fprintf(&b, "  discovery failed: %s\n", group.Error)
+			for _, line := range wrapPlain("discovery failed: "+group.Error, max(12, m.modal.Width-4), "  ") {
+				fmt.Fprintf(&b, "%s\n", line)
+			}
 		}
 		for _, option := range group.Models {
 			cursor := "  "
@@ -74,15 +78,42 @@ func (m *Model) renderModelsModal() string {
 			if keyAvailable(m.app.Config(), option) {
 				keyState = "key set"
 			}
-			fmt.Fprintf(&b, "%s%-30s %s [%s]\n", cursor, option.Name, option.ID, keyState)
+			nameW := min(30, max(12, m.modal.Width/3))
+			fmt.Fprintf(&b, "%s%-*s %s [%s]\n", cursor, nameW, option.Name, option.ID, keyState)
 			if flat == m.modelIndex {
-				fmt.Fprintf(&b, "   %s\n", option.Description)
+				for _, line := range wrapPlain(option.Description, max(12, m.modal.Width-5), "   ") {
+					fmt.Fprintf(&b, "%s\n", mutedStyle.Render(line))
+				}
 			}
 			flat++
 		}
 		b.WriteByte('\n')
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+func (m *Model) syncModelsModalViewport() {
+	m.keepModalLineVisible(m.selectedModelLine())
+}
+
+func (m *Model) selectedModelLine() int {
+	line := 5
+	flat := 0
+	for _, group := range m.modelGroups {
+		line++
+		if group.Error != "" {
+			line++
+		}
+		for range group.Models {
+			if flat == m.modelIndex {
+				return line
+			}
+			line++
+			flat++
+		}
+		line++
+	}
+	return line
 }
 
 func keyAvailable(config app.Config, option app.ModelOption) bool {

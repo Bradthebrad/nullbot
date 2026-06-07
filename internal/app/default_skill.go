@@ -1,6 +1,9 @@
 package app
 
-import "os"
+import (
+	"os"
+	"path/filepath"
+)
 
 const defaultSkill = `---
 name: nullbot-basics
@@ -31,5 +34,12 @@ func ensureDefaultSkill(path string) error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
 	return os.WriteFile(path, []byte(defaultSkill), 0600)
+}
+
+func defaultSkillPath(config Config) string {
+	return filepath.Join(config.AppDir, "skills", "nullbot-basics", "SKILL.md")
 }

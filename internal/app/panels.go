@@ -92,8 +92,7 @@ func (a *App) compactSummary(focus string) string {
 
 func scanSkillFiles(config Config) []string {
 	var skills []string
-	candidates := append([]string{filepath.Join(config.AppDir, "SKILL.md")}, config.SkillDirs...)
-	for _, candidate := range candidates {
+	for _, candidate := range config.SkillDirs {
 		info, err := os.Stat(candidate)
 		if err != nil {
 			continue

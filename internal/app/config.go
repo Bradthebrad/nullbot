@@ -127,6 +127,7 @@ func LoadOrInitConfig() (Config, error) {
 }
 
 func loadOrInit(config Config) (Config, error) {
+	config = normalizeConfig(config)
 	if err := EnsureAppDir(config); err != nil {
 		return Config{}, err
 	}
@@ -144,6 +145,7 @@ func loadOrInit(config Config) (Config, error) {
 	if err := json.Unmarshal(data, &config); err != nil {
 		return Config{}, err
 	}
+	config = normalizeConfig(config)
 	if config.AppDir == "" {
 		config.AppDir = DefaultAppDir(config.BrandPrefix)
 	}
@@ -162,6 +164,7 @@ func SaveConfig(config Config) error {
 }
 
 func EnsureAppDir(config Config) error {
+	config = normalizeConfig(config)
 	dirs := []string{
 		config.AppDir,
 		filepath.Join(config.AppDir, "skills"),
@@ -177,7 +180,26 @@ func EnsureAppDir(config Config) error {
 			return fmt.Errorf("create %s: %w", dir, err)
 		}
 	}
-	return ensureDefaultSkill(filepath.Join(config.AppDir, "SKILL.md"))
+	return ensureDefaultSkill(defaultSkillPath(config))
+}
+
+func normalizeConfig(config Config) Config {
+	if strings.TrimSpace(config.BrandPrefix) == "" {
+		config.BrandPrefix = DefaultPrefix
+	}
+	if strings.TrimSpace(config.AppDir) == "" {
+		config.AppDir = DefaultAppDir(config.BrandPrefix)
+	}
+	if len(config.SkillDirs) == 0 {
+		config.SkillDirs = []string{filepath.Join(config.AppDir, "skills")}
+	}
+	if config.EnabledMCPServers == nil {
+		config.EnabledMCPServers = map[string]MCPEntry{}
+	}
+	if config.PermissionDefaults == nil {
+		config.PermissionDefaults = map[string]string{"coding": "deny", "shell": "ask", "network": "ask"}
+	}
+	return config
 }
 
 func DisplayName(config Config) string {

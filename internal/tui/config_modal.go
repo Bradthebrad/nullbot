@@ -48,7 +48,7 @@ func (m *Model) openConfigModal() {
 	m.configEditing = false
 	m.configEditValue = ""
 	m.modal.SetContent(m.renderConfigModal())
-	m.modal.GotoTop()
+	m.syncConfigModalViewport()
 }
 
 func (m *Model) handleConfigKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
@@ -72,6 +72,7 @@ func (m *Model) handleConfigKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 			}
 		}
 		m.modal.SetContent(m.renderConfigModal())
+		m.syncConfigModalViewport()
 		return m, nil, true
 	}
 	switch msg.String() {
@@ -94,12 +95,16 @@ func (m *Model) handleConfigKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 		}
 	}
 	m.modal.SetContent(m.renderConfigModal())
+	m.syncConfigModalViewport()
 	return m, nil, true
 }
 
 func (m *Model) renderConfigModal() string {
 	var b strings.Builder
-	b.WriteString("Edit config values. Enter/e edits. Enter accepts edit. Press s to save. Ctrl+S may be captured by some terminals. Esc closes.\n\n")
+	b.WriteString(renderMarkdown("Edit config values. `Enter`/`e` edits, `Enter` accepts edit, `s` saves. `Ctrl+S` may be captured by some terminals. `Esc` closes.", m.modal.Width))
+	b.WriteString("\n\n")
+	labelW := 18
+	valueW := max(12, m.modal.Width-labelW-5)
 	for i, field := range m.configFields {
 		cursor := "  "
 		value := field.Value
@@ -109,9 +114,25 @@ func (m *Model) renderConfigModal() string {
 				value = selectedInputStyle.Render(m.configEditValue)
 			}
 		}
-		fmt.Fprintf(&b, "%s%-18s %s\n", cursor, field.Label+":", value)
+		lines := wrapPlain(value, valueW, "")
+		if len(lines) == 0 {
+			lines = []string{""}
+		}
+		fmt.Fprintf(&b, "%s%-*s %s\n", cursor, labelW, field.Label+":", lines[0])
+		for _, line := range lines[1:] {
+			fmt.Fprintf(&b, "  %-*s %s\n", labelW, "", line)
+		}
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+func (m *Model) syncConfigModalViewport() {
+	selected := configModalHeaderLines() + m.configIndex
+	m.keepModalLineVisible(selected)
+}
+
+func configModalHeaderLines() int {
+	return 4
 }
 
 func (m *Model) saveConfigFields() error {

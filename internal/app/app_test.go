@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"tinychain/mcp"
 )
 
 func TestInlineSkillHints(t *testing.T) {
@@ -199,6 +201,49 @@ func TestLogsRecentToolReadsNullBotLogs(t *testing.T) {
 	if !strings.Contains(output, "diagnostic marker") || !strings.Contains(output, "logs_recent") {
 		t.Fatalf("logs output = %q", output)
 	}
+}
+
+func TestLoadMCPToolsDiscoversStdioServer(t *testing.T) {
+	config := DefaultConfig()
+	config.AppDir = t.TempDir()
+	config.EnabledMCPServers = map[string]MCPEntry{
+		"helper": {
+			Name:      "Helper",
+			Command:   os.Args[0],
+			Args:      []string{"-test.run=TestMCPHelperProcess", "--"},
+			Transport: "stdio",
+			Enabled:   true,
+		},
+	}
+	t.Setenv("NULLBOT_MCP_HELPER", "1")
+	app := New(config)
+	tools, closers := app.loadMCPTools(context.Background())
+	defer closeAll(closers)
+	if len(tools) != 1 || tools[0].Definition().Name != "helper_echo" {
+		t.Fatalf("tools = %#v", tools)
+	}
+}
+
+func TestMCPHelperProcess(t *testing.T) {
+	if os.Getenv("NULLBOT_MCP_HELPER") != "1" {
+		return
+	}
+	server := mcp.NewServer("helper")
+	server.AddTool(mcp.Tool{
+		Name:        "helper_echo",
+		Description: "Echo helper.",
+		InputSchema: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"text": map[string]any{"type": "string"}},
+		},
+		Handler: func(ctx context.Context, args map[string]any) (mcp.ToolResult, error) {
+			return mcp.Text("ok"), nil
+		},
+	})
+	if err := server.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	os.Exit(0)
 }
 
 func TestModelGroupsFlatten(t *testing.T) {

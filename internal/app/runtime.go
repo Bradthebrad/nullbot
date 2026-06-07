@@ -208,20 +208,32 @@ func (a *App) loadSkills() ([]tcagent.Skill, error) {
 func (a *App) loadMCPTools(ctx context.Context) ([]tcagent.Tool, []func() error) {
 	var tools []tcagent.Tool
 	var closers []func() error
-	for _, entry := range a.config.EnabledMCPServers {
+	for id, entry := range a.config.EnabledMCPServers {
 		if !entry.Enabled {
 			continue
 		}
-		client, err := mcpClientForEntry(ctx, entry)
+		loadCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		a.logInfo("mcp load start", "id", id, "transport", entry.Transport, "command", entry.Command)
+		client, err := mcpClientForEntry(loadCtx, entry)
 		if err != nil {
+			cancel()
+			a.logError("mcp connect failed", "id", id, "error", err)
 			continue
 		}
-		_, _ = client.Initialize(ctx)
-		discovered, err := mcp.AgentTools(ctx, client)
+		if _, err := client.Initialize(loadCtx); err != nil {
+			cancel()
+			_ = client.Close()
+			a.logError("mcp initialize failed", "id", id, "error", err)
+			continue
+		}
+		discovered, err := mcp.AgentTools(loadCtx, client)
+		cancel()
 		if err != nil {
 			_ = client.Close()
+			a.logError("mcp tools/list failed", "id", id, "error", err)
 			continue
 		}
+		a.logInfo("mcp load done", "id", id, "tools", len(discovered))
 		tools = append(tools, discovered...)
 		closers = append(closers, client.Close)
 	}

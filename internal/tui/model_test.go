@@ -122,10 +122,13 @@ func TestMarketModalRendersInteractiveRows(t *testing.T) {
 		}}},
 	})
 	rendered := stripANSI(model.modal.View())
-	if !strings.Contains(rendered, "[ ] nullbot-code-mcp") {
+	if !strings.Contains(rendered, "[ ]  nullbot-code-mcp") {
 		t.Fatalf("market modal missing selectable row:\n%s", rendered)
 	}
-	if !strings.Contains(rendered, "click rows") {
+	if !strings.Contains(rendered, "PACKAGE") || !strings.Contains(rendered, "DESCRIPTION") {
+		t.Fatalf("market modal missing table headers:\n%s", rendered)
+	}
+	if !strings.Contains(strings.ToLower(rendered), "click") {
 		t.Fatalf("market modal missing interaction hint:\n%s", rendered)
 	}
 }
@@ -149,7 +152,10 @@ func TestMCPModalRendersInteractiveRows(t *testing.T) {
 	if !strings.Contains(rendered, "nullbot-code-mcp") || !strings.Contains(rendered, "enabled") {
 		t.Fatalf("mcp modal missing interactive row:\n%s", rendered)
 	}
-	if !strings.Contains(rendered, "click rows") {
+	if !strings.Contains(rendered, "PACKAGE") || !strings.Contains(rendered, "DESCRIPTION") {
+		t.Fatalf("mcp modal missing table headers:\n%s", rendered)
+	}
+	if !strings.Contains(strings.ToLower(rendered), "click") {
 		t.Fatalf("mcp modal missing interaction hint:\n%s", rendered)
 	}
 }

@@ -86,6 +86,12 @@ var (
 				Background(lipgloss.Color("#24383B")).
 				Bold(true)
 
+	buttonStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#081113")).
+			Background(lipgloss.Color("#9DD9D2")).
+			Bold(true).
+			Padding(0, 1)
+
 	modalStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("#F4D35E")).

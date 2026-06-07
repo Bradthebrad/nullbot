@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -723,12 +724,100 @@ func renderModal(panel string, reply app.Reply, width int) string {
 		return renderHistoryModal(reply, width)
 	case "logs":
 		return renderLogsModal(reply, width)
+	case "market":
+		return renderMarketModal(reply, width)
+	case "mcp":
+		return renderMCPModal(reply, width)
 	}
 	if reply.Data != nil {
 		data, _ := json.MarshalIndent(reply.Data, "", "  ")
 		return renderMarkdown(reply.Message+"\n\n```json\n"+string(data)+"\n```", width)
 	}
 	return renderMarkdown(reply.Message, width)
+}
+
+func renderMarketModal(reply app.Reply, width int) string {
+	var b strings.Builder
+	b.WriteString(reply.Message)
+	b.WriteString("\n\n# Marketplace\n")
+	if summary, ok := reply.Data["summary"].(string); ok && summary != "" {
+		b.WriteString(summary)
+		b.WriteString("\n")
+	}
+	if packages, ok := reply.Data["packages"].([]app.MarketPackage); ok {
+		b.WriteString("\n## Packages\n")
+		if len(packages) == 0 {
+			b.WriteString("- none found\n")
+		}
+		for _, pkg := range packages {
+			state := pkg.Status
+			if pkg.Enabled {
+				state = "enabled"
+			} else if pkg.Installed {
+				state = "installed"
+			}
+			fmt.Fprintf(&b, "- `%s` [%s/%s] %s\n", pkg.ID, pkg.Kind, state, pkg.Description)
+			if len(pkg.Permissions) > 0 {
+				fmt.Fprintf(&b, "  permissions: `%s`\n", strings.Join(pkg.Permissions, "`, `"))
+			}
+			if pkg.Error != "" {
+				fmt.Fprintf(&b, "  error: %s\n", pkg.Error)
+			}
+		}
+	}
+	b.WriteString("\n## Commands\n")
+	b.WriteString("- `/market refresh`\n")
+	b.WriteString("- `/market install <package-id>`\n")
+	b.WriteString("- `/market install <package-id> small`\n")
+	b.WriteString("- `/market install <package-id> enable`\n")
+	b.WriteString("- `/mcp enable <server-id>`\n")
+	return renderMarkdown(b.String(), width)
+}
+
+func renderMCPModal(reply app.Reply, width int) string {
+	var b strings.Builder
+	b.WriteString(reply.Message)
+	b.WriteString("\n\n# MCP Servers\n")
+	if servers, ok := reply.Data["servers"].(map[string]app.MCPEntry); ok && len(servers) > 0 {
+		names := make([]string, 0, len(servers))
+		for name := range servers {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			server := servers[name]
+			state := "disabled"
+			if server.Enabled {
+				state = "enabled"
+			}
+			fmt.Fprintf(&b, "- `%s` [%s] %s `%s`\n", name, state, server.Transport, server.Command)
+		}
+	} else {
+		b.WriteString("- no enabled MCP servers\n")
+	}
+	if packages, ok := reply.Data["packages"].([]app.MarketPackage); ok {
+		b.WriteString("\n## Installed Packages\n")
+		found := false
+		for _, pkg := range packages {
+			if pkg.Kind != "mcp_server" || !pkg.Installed {
+				continue
+			}
+			found = true
+			state := "installed"
+			if pkg.Enabled {
+				state = "enabled"
+			}
+			fmt.Fprintf(&b, "- `%s` [%s] %s\n", pkg.ID, state, pkg.InstallDir)
+		}
+		if !found {
+			b.WriteString("- none installed\n")
+		}
+	}
+	b.WriteString("\n## Commands\n")
+	b.WriteString("- `/mcp enable <server-id>`\n")
+	b.WriteString("- `/mcp disable <server-id>`\n")
+	b.WriteString("- `/mcp remove <server-id>`\n")
+	return renderMarkdown(b.String(), width)
 }
 
 func renderHistoryModal(reply app.Reply, width int) string {

@@ -21,9 +21,9 @@ var commands = []Command{
 	{Name: "/plan", Usage: "/plan execute", Description: "Execute the current plan."},
 	{Name: "/also", Usage: "/also <message>", Description: "Inject additional guidance into the current workflow."},
 	{Name: "/pause", Usage: "/pause", Description: "Pause active work without discarding state."},
-	{Name: "/mcp", Usage: "/mcp [list|add|remove|config|status]", Description: "Manage MCP servers."},
+	{Name: "/mcp", Usage: "/mcp [enable|disable|remove <id>]", Description: "Manage MCP servers."},
 	{Name: "/models", Usage: "/models", Description: "Select provider and model."},
-	{Name: "/market", Usage: "/market", Description: "Browse installable MCP tool packages."},
+	{Name: "/market", Usage: "/market [refresh|install <id> [small] [enable]]", Description: "Browse and install MCP tool packages or skills."},
 	{Name: "/skills", Usage: "/skills [list|add|remove|open|reload]", Description: "Manage skills."},
 	{Name: "/analyze", Usage: "/analyze [focus]", Description: "Analyze the current session or a focused topic."},
 	{Name: "/compact", Usage: "/compact [focus]", Description: "Compact history with an optional focus."},
@@ -72,7 +72,7 @@ func (a *App) executeSlash(ctx context.Context, input string) Reply {
 	case "/models":
 		return a.modelsCommand()
 	case "/market":
-		return a.marketCommand()
+		return a.marketCommand(strings.TrimSpace(rest))
 	case "/skills":
 		return a.skillsCommand(strings.TrimSpace(rest))
 	case "/analyze":

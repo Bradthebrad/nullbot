@@ -8,17 +8,19 @@ import (
 )
 
 type App struct {
-	mu           sync.Mutex
-	config       Config
-	history      []Message
-	activity     []ActivityRecord
-	sessionID    string
-	logs         []string
-	logger       *Logger
-	plan         string
-	paused       bool
-	activeCancel context.CancelFunc
-	activitySink func(ActivityRecord)
+	mu                 sync.Mutex
+	config             Config
+	history            []Message
+	activity           []ActivityRecord
+	sessionID          string
+	logs               []string
+	logger             *Logger
+	plan               string
+	paused             bool
+	activeCancel       context.CancelFunc
+	activitySink       func(ActivityRecord)
+	runtimeDirty       bool
+	runtimeDirtyReason string
 }
 
 type Message struct {
@@ -90,6 +92,21 @@ func (a *App) UpdateConfig(update func(*Config)) error {
 	a.mu.Unlock()
 	a.logInfo("config saved", "app_dir", config.AppDir, "provider", config.Model.Provider, "model", config.Model.Model)
 	return nil
+}
+
+func (a *App) MarkRuntimeDirty(reason string) {
+	a.mu.Lock()
+	a.runtimeDirty = true
+	a.runtimeDirtyReason = reason
+	a.mu.Unlock()
+	a.appendActivity(ActivityRecord{
+		Time:   time.Now().UTC(),
+		Kind:   "runtime",
+		Name:   "runtime",
+		Status: "runtime dirty",
+		Detail: reason,
+	})
+	a.logInfo("runtime marked dirty", "reason", reason)
 }
 
 func (a *App) APIKeys() APIKeys {

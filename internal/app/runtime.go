@@ -46,6 +46,14 @@ func (a *App) runAgent(ctx context.Context, skillHints []string) Reply {
 }
 
 func (a *App) buildRuntime(ctx context.Context, skillHints []string) (*runtimeBundle, error) {
+	a.mu.Lock()
+	if a.runtimeDirty {
+		a.logInfo("runtime rebuild", "reason", a.runtimeDirtyReason)
+		a.runtimeDirty = false
+		a.runtimeDirtyReason = ""
+	}
+	a.mu.Unlock()
+
 	model, err := modelFromConfig(a.config)
 	if err != nil {
 		return nil, err
@@ -258,7 +266,7 @@ func baseSystemPrompt(config Config, skillHints []string, tools []tcagent.Tool, 
 	fmt.Fprintf(&b, "You are %s. %s\n", DisplayName(config), config.Tagline)
 	b.WriteString("Be direct about what you can and cannot do. Do not claim coding, shell, web, email, filesystem, browser, or elevated local capabilities unless an enabled tool explicitly provides them.\n")
 	b.WriteString("Slash commands are handled by the app UI. If the user references a skill token mid-sentence, treat it as a hint, not as a command execution request.\n")
-	b.WriteString("Available built-in tools are constrained to NullBot app data: listing config-directory files, reading small config-directory text files, listing skills, creating SKILL.md files under the configured skills directory, listing configured MCP servers, listing cached market metadata, summarizing recent visible chat history, reading compact persisted session history, and reading recent NullBot runtime log lines.\n")
+	b.WriteString("Available built-in tools are constrained to NullBot app data: listing config-directory files, reading small config-directory text files, listing skills, creating SKILL.md files under the configured skills directory, refreshing/listing/installing market packages, enabling/disabling/removing installed MCP servers, listing configured MCP servers, summarizing recent visible chat history, reading compact persisted session history, and reading recent NullBot runtime log lines.\n")
 	if len(tools) > 0 {
 		b.WriteString("Current tool inventory:\n")
 		for _, tool := range tools {

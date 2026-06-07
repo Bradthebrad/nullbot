@@ -1,7 +1,7 @@
 package app
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,15 +9,53 @@ import (
 )
 
 func (a *App) mcpCommand(sub string) Reply {
+	fields := strings.Fields(sub)
+	if len(fields) >= 2 {
+		id := fields[1]
+		switch fields[0] {
+		case "enable":
+			config, err := EnableMCPServer(a.config, id)
+			if err != nil {
+				return a.reply("MCP enable failed: "+err.Error(), "/mcp", "mcp")
+			}
+			a.mu.Lock()
+			a.config = config
+			a.mu.Unlock()
+			a.MarkRuntimeDirty("enabled MCP server " + id)
+			return a.mcpPanelReply("Enabled MCP server " + id + ".")
+		case "disable":
+			config, err := DisableMCPServer(a.config, id)
+			if err != nil {
+				return a.reply("MCP disable failed: "+err.Error(), "/mcp", "mcp")
+			}
+			a.mu.Lock()
+			a.config = config
+			a.mu.Unlock()
+			a.MarkRuntimeDirty("disabled MCP server " + id)
+			return a.mcpPanelReply("Disabled MCP server " + id + ".")
+		case "remove":
+			config, err := RemoveMCPServer(a.config, id)
+			if err != nil {
+				return a.reply("MCP remove failed: "+err.Error(), "/mcp", "mcp")
+			}
+			a.mu.Lock()
+			a.config = config
+			a.mu.Unlock()
+			a.MarkRuntimeDirty("removed MCP server " + id)
+			return a.mcpPanelReply("Removed MCP server " + id + ".")
+		}
+	}
+	return a.mcpPanelReply("MCP panel opened.")
+}
+
+func (a *App) mcpPanelReply(message string) Reply {
+	manifest, _ := LoadMarketManifest(a.config)
 	data := map[string]any{
-		"servers": a.config.EnabledMCPServers,
-		"dir":     filepath.Join(a.config.AppDir, "mcp"),
+		"servers":  a.config.EnabledMCPServers,
+		"dir":      filepath.Join(a.config.AppDir, "mcp"),
+		"packages": manifest.Packages,
 	}
-	msg := "MCP panel opened."
-	if sub != "" {
-		msg = "MCP " + sub + " panel opened."
-	}
-	reply := a.reply(msg, "/mcp", "mcp")
+	reply := a.reply(message, "/mcp", "mcp")
 	reply.Data = data
 	return reply
 }
@@ -40,13 +78,45 @@ func (a *App) planCommand(sub string) Reply {
 	return reply
 }
 
-func (a *App) marketCommand() Reply {
-	reply := a.reply("Market panel opened. Initial market support reads cached metadata from the app data market directory.", "/market", "market")
-	reply.Data = map[string]any{
-		"dir":      filepath.Join(a.config.AppDir, "market"),
-		"packages": readMarketCache(filepath.Join(a.config.AppDir, "market", "index.json")),
+func (a *App) marketCommand(sub string) Reply {
+	fields := strings.Fields(sub)
+	if len(fields) > 0 {
+		switch fields[0] {
+		case "refresh":
+			manifest, err := RefreshMarket(contextOrBackground(), a.config)
+			if err != nil {
+				return a.reply("Market refresh failed: "+err.Error(), "/market", "market")
+			}
+			return a.marketPanelReply("Market refreshed.", manifest)
+		case "install":
+			if len(fields) < 2 {
+				return a.reply("Usage: /market install <package-id> [small] [enable]", "/market", "market")
+			}
+			small := containsField(fields[2:], "small")
+			enable := containsField(fields[2:], "enable")
+			pkg, err := InstallMarketPackage(contextOrBackground(), a.config, fields[1], small)
+			if err != nil {
+				return a.reply("Market install failed: "+err.Error(), "/market", "market")
+			}
+			if enable && pkg.Kind == "mcp_server" {
+				config, err := EnableMCPServer(a.config, pkg.ID)
+				if err != nil {
+					return a.reply("Installed "+pkg.ID+" but enable failed: "+err.Error(), "/market", "market")
+				}
+				a.mu.Lock()
+				a.config = config
+				a.mu.Unlock()
+				a.MarkRuntimeDirty("installed and enabled MCP package " + pkg.ID)
+			}
+			manifest, _ := LoadMarketManifest(a.config)
+			return a.marketPanelReply("Installed "+pkg.ID+".", manifest)
+		}
 	}
-	return reply
+	manifest, err := LoadMarketManifest(a.config)
+	if err != nil {
+		return a.reply("Market panel failed: "+err.Error(), "/market", "market")
+	}
+	return a.marketPanelReply("Market panel opened.", manifest)
 }
 
 func (a *App) skillsCommand(sub string) Reply {
@@ -117,16 +187,29 @@ func scanSkillFiles(config Config) []string {
 	return skills
 }
 
-func readMarketCache(path string) []map[string]any {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil
+func (a *App) marketPanelReply(message string, manifest MarketManifest) Reply {
+	reply := a.reply(message, "/market", "market")
+	reply.Data = map[string]any{
+		"dir":       filepath.Join(a.config.AppDir, "market"),
+		"manifest":  manifest,
+		"packages":  manifest.Packages,
+		"summary":   MarketSummary(manifest),
+		"refreshed": manifest.UpdatedAt,
 	}
-	var packages []map[string]any
-	if err := json.Unmarshal(data, &packages); err != nil {
-		return nil
+	return reply
+}
+
+func containsField(fields []string, target string) bool {
+	for _, field := range fields {
+		if strings.EqualFold(field, target) {
+			return true
+		}
 	}
-	return packages
+	return false
+}
+
+func contextOrBackground() context.Context {
+	return context.Background()
 }
 
 func truncate(text string, limit int) string {

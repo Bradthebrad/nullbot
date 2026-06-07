@@ -2,10 +2,12 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"tinychain/agent"
 )
@@ -20,6 +22,14 @@ func BuiltinTools(config Config, state *App) []agent.Tool {
 		historySessionsTool(config),
 		historySessionReadTool(config),
 		logsRecentTool(state),
+		marketRefreshTool(state),
+		marketListAvailableTool(state),
+		marketReadPackageTool(state),
+		marketInstallPackageTool(state),
+		mcpListServersTool(state),
+		mcpEnableServerTool(state),
+		mcpDisableServerTool(state),
+		mcpRemoveServerTool(state),
 		marketListTool(config),
 		mcpListTool(config),
 	}
@@ -259,18 +269,175 @@ func logsRecentTool(state *App) agent.Tool {
 func marketListTool(config Config) agent.Tool {
 	return agent.ToolFunc{
 		Name:        "market_list",
-		Description: "List cached MCP market packages.",
+		Description: "List cached MCP market packages. Prefer market_list_available for richer package metadata.",
 		Schema:      agent.ToolSchema(map[string]any{}),
 		Func: func(ctx context.Context, args map[string]any) (string, error) {
-			packages := readMarketCache(filepath.Join(config.AppDir, "market", "index.json"))
-			if len(packages) == 0 {
-				return "No cached market packages found.", nil
+			manifest, err := LoadMarketManifest(config)
+			if err != nil {
+				return "", err
 			}
-			var b strings.Builder
-			for _, pkg := range packages {
-				fmt.Fprintf(&b, "- %v: %v\n", pkg["name"], pkg["description"])
+			return MarketSummary(manifest), nil
+		},
+	}
+}
+
+func marketRefreshTool(state *App) agent.Tool {
+	return agent.ToolFunc{
+		Name:        "market_refresh",
+		Description: "Refresh NullBot marketplace metadata from configured public GitHub release sources and rewrite the local market manifest.",
+		Schema:      agent.ToolSchema(map[string]any{}),
+		Func: func(ctx context.Context, args map[string]any) (string, error) {
+			state.mu.Lock()
+			config := state.config
+			state.mu.Unlock()
+			manifest, err := RefreshMarket(ctx, config)
+			if err != nil {
+				state.logError("market refresh failed", "error", err)
+				return "", err
 			}
-			return strings.TrimSpace(b.String()), nil
+			state.appendActivity(ActivityRecord{Time: time.Now().UTC(), Kind: "market", Name: "market_refresh", Status: "done", Detail: fmt.Sprintf("%d packages", len(manifest.Packages))})
+			return MarketSummary(manifest), nil
+		},
+	}
+}
+
+func marketListAvailableTool(state *App) agent.Tool {
+	return agent.ToolFunc{
+		Name:        "market_list_available",
+		Description: "List available market packages with descriptions, permissions, installed state, and enabled state.",
+		Schema:      agent.ToolSchema(map[string]any{}),
+		Func: func(ctx context.Context, args map[string]any) (string, error) {
+			state.mu.Lock()
+			config := state.config
+			state.mu.Unlock()
+			manifest, err := LoadMarketManifest(config)
+			if err != nil {
+				return "", err
+			}
+			return MarketSummary(manifest), nil
+		},
+	}
+}
+
+func marketReadPackageTool(state *App) agent.Tool {
+	return agent.ToolFunc{
+		Name:        "market_read_package",
+		Description: "Read detailed metadata, README excerpt, assets, and permissions for a marketplace package.",
+		Schema: agent.ToolSchema(map[string]any{
+			"package_id": agent.StringProperty("Marketplace package id, such as nullbot-code-mcp, nullbot-parsers-mcp, api-probe, or mcp-skill."),
+		}, "package_id"),
+		Func: func(ctx context.Context, args map[string]any) (string, error) {
+			state.mu.Lock()
+			config := state.config
+			state.mu.Unlock()
+			manifest, err := LoadMarketManifest(config)
+			if err != nil {
+				return "", err
+			}
+			pkg, _, err := findMarketPackage(manifest, stringArg(args, "package_id"))
+			if err != nil {
+				return "", err
+			}
+			return prettyJSON(pkg), nil
+		},
+	}
+}
+
+func marketInstallPackageTool(state *App) agent.Tool {
+	return agent.ToolFunc{
+		Name:        "market_install_package",
+		Description: "Download and install a marketplace package into NullBot app data. Set enable=true only when the user explicitly asked to enable that MCP server.",
+		Schema: agent.ToolSchema(map[string]any{
+			"package_id": agent.StringProperty("Marketplace package id to install."),
+			"small":      agent.BoolProperty("Install UPX-compressed small binary when available. Defaults to false."),
+			"enable":     agent.BoolProperty("Enable the installed MCP server immediately. Only valid for mcp_server packages."),
+		}, "package_id"),
+		Func: func(ctx context.Context, args map[string]any) (string, error) {
+			state.mu.Lock()
+			config := state.config
+			state.mu.Unlock()
+			pkg, err := InstallMarketPackage(ctx, config, stringArg(args, "package_id"), boolArg(args, "small"))
+			if err != nil {
+				return "", err
+			}
+			if boolArg(args, "enable") && pkg.Kind == "mcp_server" {
+				config, err = EnableMCPServer(config, pkg.ID)
+				if err != nil {
+					return "", err
+				}
+				state.mu.Lock()
+				state.config = config
+				state.mu.Unlock()
+				state.MarkRuntimeDirty("agent installed and enabled MCP package " + pkg.ID)
+			}
+			state.appendActivity(ActivityRecord{Time: time.Now().UTC(), Kind: "market", Name: "market_install_package", Status: "done", Detail: pkg.ID})
+			return prettyJSON(pkg), nil
+		},
+	}
+}
+
+func mcpListServersTool(state *App) agent.Tool {
+	return agent.ToolFunc{
+		Name:        "mcp_list_servers",
+		Description: "List installed and enabled MCP servers known to NullBot.",
+		Schema:      agent.ToolSchema(map[string]any{}),
+		Func: func(ctx context.Context, args map[string]any) (string, error) {
+			state.mu.Lock()
+			config := state.config
+			state.mu.Unlock()
+			manifest, err := LoadMarketManifest(config)
+			if err != nil {
+				return "", err
+			}
+			var servers []MarketPackage
+			for _, pkg := range manifest.Packages {
+				if pkg.Kind == "mcp_server" && (pkg.Installed || pkg.Enabled) {
+					servers = append(servers, pkg)
+				}
+			}
+			if len(servers) == 0 {
+				return "No MCP servers installed or enabled.", nil
+			}
+			return prettyJSON(servers), nil
+		},
+	}
+}
+
+func mcpEnableServerTool(state *App) agent.Tool {
+	return agent.ToolFunc{
+		Name:        "mcp_enable_server",
+		Description: "Enable an installed MCP server and refresh NullBot's runtime tools on the next run. Use only when the user explicitly asks to enable it.",
+		Schema: agent.ToolSchema(map[string]any{
+			"server_id": agent.StringProperty("Installed MCP server id."),
+		}, "server_id"),
+		Func: func(ctx context.Context, args map[string]any) (string, error) {
+			return state.mutateMCPServer(stringArg(args, "server_id"), "enable")
+		},
+	}
+}
+
+func mcpDisableServerTool(state *App) agent.Tool {
+	return agent.ToolFunc{
+		Name:        "mcp_disable_server",
+		Description: "Disable an enabled MCP server and refresh NullBot's runtime tools on the next run.",
+		Schema: agent.ToolSchema(map[string]any{
+			"server_id": agent.StringProperty("MCP server id."),
+		}, "server_id"),
+		Func: func(ctx context.Context, args map[string]any) (string, error) {
+			return state.mutateMCPServer(stringArg(args, "server_id"), "disable")
+		},
+	}
+}
+
+func mcpRemoveServerTool(state *App) agent.Tool {
+	return agent.ToolFunc{
+		Name:        "mcp_remove_server",
+		Description: "Disable and remove an installed MCP server from NullBot app data. Use only when the user explicitly asks to remove it.",
+		Schema: agent.ToolSchema(map[string]any{
+			"server_id": agent.StringProperty("MCP server id."),
+		}, "server_id"),
+		Func: func(ctx context.Context, args map[string]any) (string, error) {
+			return state.mutateMCPServer(stringArg(args, "server_id"), "remove")
 		},
 	}
 }
@@ -308,4 +475,42 @@ func safeConfigPath(root, rel string) (string, error) {
 func stringArg(args map[string]any, key string) string {
 	value, _ := args[key].(string)
 	return value
+}
+
+func boolArg(args map[string]any, key string) bool {
+	value, _ := args[key].(bool)
+	return value
+}
+
+func prettyJSON(value any) string {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return fmt.Sprint(value)
+	}
+	return string(data)
+}
+
+func (a *App) mutateMCPServer(id, action string) (string, error) {
+	a.mu.Lock()
+	config := a.config
+	a.mu.Unlock()
+	var err error
+	switch action {
+	case "enable":
+		config, err = EnableMCPServer(config, id)
+	case "disable":
+		config, err = DisableMCPServer(config, id)
+	case "remove":
+		config, err = RemoveMCPServer(config, id)
+	default:
+		err = fmt.Errorf("unsupported MCP action %q", action)
+	}
+	if err != nil {
+		return "", err
+	}
+	a.mu.Lock()
+	a.config = config
+	a.mu.Unlock()
+	a.MarkRuntimeDirty("agent " + action + "d MCP server " + id)
+	return fmt.Sprintf("%s %s.", action, id), nil
 }

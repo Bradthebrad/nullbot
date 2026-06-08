@@ -222,6 +222,7 @@ func (a *App) loadMCPTools(ctx context.Context, config Config) ([]tcagent.Tool, 
 		if !entry.Enabled {
 			continue
 		}
+		entry.Env = mcpRuntimeEnv(config, id, entry)
 		loadCtx, cancel := context.WithTimeout(ctx, mcpDiscoveryTimeout)
 		a.logInfo("mcp load start", "id", id, "transport", entry.Transport, "command", entry.Command)
 		client, err := mcpClientForEntry(ctx, entry)
@@ -250,10 +251,52 @@ func (a *App) loadMCPTools(ctx context.Context, config Config) ([]tcagent.Tool, 
 	return tools, closers
 }
 
+func mcpRuntimeEnv(config Config, id string, entry MCPEntry) map[string]string {
+	env := map[string]string{}
+	for key, value := range entry.Env {
+		env[key] = value
+	}
+	if !shouldPassVisionEnvToMCP(id, entry) {
+		if len(env) == 0 {
+			return nil
+		}
+		return env
+	}
+	keys, _ := LoadAPIKeys(config)
+	if key := keys.OpenAI; key != "" {
+		env["OPENAI_API_KEY"] = key
+	}
+	if key := keys.OpenRouter; key != "" {
+		env["OPENROUTER_API_KEY"] = key
+	}
+	if env["OPENAI_API_KEY"] == "" {
+		if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+			env["OPENAI_API_KEY"] = key
+		}
+	}
+	if env["OPENROUTER_API_KEY"] == "" {
+		if key := os.Getenv("OPENROUTER_API_KEY"); key != "" {
+			env["OPENROUTER_API_KEY"] = key
+		}
+	}
+	env["NULLBOT_VISION_PROVIDER"] = config.Model.Provider
+	env["NULLBOT_VISION_MODEL"] = config.Model.Model
+	if len(env) == 0 {
+		return nil
+	}
+	return env
+}
+
+func shouldPassVisionEnvToMCP(id string, entry MCPEntry) bool {
+	id = strings.ToLower(id)
+	command := strings.ToLower(entry.Command)
+	return strings.Contains(id, "parsers") || strings.Contains(command, "parsers")
+}
+
 func mcpClientForEntry(ctx context.Context, entry MCPEntry) (*mcp.Client, error) {
 	switch strings.ToLower(entry.Transport) {
 	case "", "stdio":
-		return mcp.NewStdioClient(ctx, entry.Command, entry.Args...)
+		return mcp.NewStdioClientWithEnv(ctx, entry.Command, entry.Args, entry.Env)
 	case "http", "streamable-http", "streamable_http":
 		return mcp.NewHTTPClient(entry.Command, nil), nil
 	case "sse":

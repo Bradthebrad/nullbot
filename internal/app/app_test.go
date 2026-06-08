@@ -74,10 +74,26 @@ func TestNormalizeConfigSyncsMCPWorkspaceArgs(t *testing.T) {
 	config.WorkspaceDir = workspace
 	config.EnabledMCPServers = map[string]MCPEntry{
 		"code": {Args: []string{"--workspace", "."}, Enabled: true},
+		"nullbot-parsers-mcp": {
+			Command: filepath.Join(t.TempDir(), "nullbot-parsers-mcp.exe"),
+			Enabled: true,
+		},
 	}
 	normalized := normalizeConfig(config)
 	if got := normalized.EnabledMCPServers["code"].Args[1]; got != workspace {
 		t.Fatalf("workspace arg = %q, want %q", got, workspace)
+	}
+	if got := normalized.EnabledMCPServers["nullbot-parsers-mcp"].Args; strings.Join(got, "|") != "--workspace|"+workspace {
+		t.Fatalf("parser args = %#v", got)
+	}
+}
+
+func TestNormalizeConfigMigratesLegacyIterationDefault(t *testing.T) {
+	config := DefaultConfig()
+	config.Agent.MaxIterations = 8
+	normalized := normalizeConfig(config)
+	if normalized.Agent.MaxIterations != defaultMaxIterations {
+		t.Fatalf("max iterations = %d, want %d", normalized.Agent.MaxIterations, defaultMaxIterations)
 	}
 }
 

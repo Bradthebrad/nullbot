@@ -10,6 +10,7 @@ import (
 )
 
 const DefaultPrefix = "Null"
+const defaultMaxIterations = 20
 
 type Config struct {
 	BrandPrefix         string              `json:"brand_prefix"`
@@ -79,7 +80,7 @@ func DefaultConfig() Config {
 			Model:    "gpt-4.1-mini",
 		},
 		Agent: AgentConfig{
-			MaxIterations: 8,
+			MaxIterations: defaultMaxIterations,
 			UseResponses:  true,
 		},
 		Compaction: CompactionConfig{
@@ -188,6 +189,9 @@ func EnsureAppDir(config Config) error {
 }
 
 func normalizeConfig(config Config) Config {
+	if config.Agent.MaxIterations <= 0 || config.Agent.MaxIterations == 8 {
+		config.Agent.MaxIterations = defaultMaxIterations
+	}
 	if strings.TrimSpace(config.BrandPrefix) == "" {
 		config.BrandPrefix = DefaultPrefix
 	}
@@ -220,6 +224,9 @@ func syncMCPWorkspaceArgs(servers map[string]MCPEntry, workspace string) map[str
 	out := make(map[string]MCPEntry, len(servers))
 	for id, entry := range servers {
 		entry.Args = append([]string{}, entry.Args...)
+		if shouldPassWorkspaceToMCP(id, entry) && !hasWorkspaceArg(entry.Args) {
+			entry.Args = append(entry.Args, "--workspace", workspace)
+		}
 		for i, arg := range entry.Args {
 			if arg == "{{workspace}}" {
 				entry.Args[i] = workspace
@@ -232,6 +239,24 @@ func syncMCPWorkspaceArgs(servers map[string]MCPEntry, workspace string) map[str
 		out[id] = entry
 	}
 	return out
+}
+
+func shouldPassWorkspaceToMCP(id string, entry MCPEntry) bool {
+	id = strings.ToLower(id)
+	command := strings.ToLower(filepath.Base(entry.Command))
+	return strings.Contains(id, "nullbot-code-mcp") ||
+		strings.Contains(id, "nullbot-parsers-mcp") ||
+		strings.Contains(command, "nullbot-code-mcp") ||
+		strings.Contains(command, "nullbot-parsers-mcp")
+}
+
+func hasWorkspaceArg(args []string) bool {
+	for _, arg := range args {
+		if arg == "--workspace" {
+			return true
+		}
+	}
+	return false
 }
 
 func DisplayName(config Config) string {

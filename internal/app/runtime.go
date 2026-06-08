@@ -119,6 +119,9 @@ func (a *App) handleAgentCallback(event callbacks.Event) {
 	default:
 		record.Status = string(event.Event)
 	}
+	if record.Status == "tool error" || record.Status == "model error" {
+		a.logError("agent callback error", "event", record.Kind, "name", record.Name, "detail", record.Detail)
+	}
 	a.appendActivity(record)
 }
 

@@ -176,6 +176,7 @@ func defaultMarketManifest(config Config) MarketManifest {
 				Repo:             "Bradthebrad/nullbot-parsers-mcp",
 				ReleaseTag:       "v0.1.0",
 				DefaultTransport: "stdio",
+				DefaultArgs:      []string{"--workspace", "{{workspace}}"},
 				Permissions:      []string{"document_parse", "workspace_read"},
 				Status:           "available",
 				Assets:           defaultReleaseAssets("Bradthebrad/nullbot-parsers-mcp", "v0.1.0", "nullbot-parsers-mcp"),

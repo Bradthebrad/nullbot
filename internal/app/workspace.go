@@ -122,21 +122,19 @@ func fileModeString(info os.FileInfo) string {
 	if info == nil {
 		return "-rw-r--r--"
 	}
-	mode := info.Mode()
-	chars := []byte("-rw-r--r--")
-	if mode&0111 != 0 {
-		chars[3] = 'x'
-		chars[6] = 'x'
-		chars[9] = 'x'
-	}
-	if mode&0200 == 0 {
-		chars[2] = '-'
-	}
-	if mode&0040 != 0 {
-		chars[5] = 'w'
-	}
-	if mode&0004 != 0 {
-		chars[8] = 'r'
+	perm := info.Mode().Perm()
+	chars := []byte("----------")
+	for i, bit := range []struct {
+		mask os.FileMode
+		char byte
+	}{
+		{0400, 'r'}, {0200, 'w'}, {0100, 'x'},
+		{0040, 'r'}, {0020, 'w'}, {0010, 'x'},
+		{0004, 'r'}, {0002, 'w'}, {0001, 'x'},
+	} {
+		if perm&bit.mask != 0 {
+			chars[i+1] = bit.char
+		}
 	}
 	return string(chars)
 }

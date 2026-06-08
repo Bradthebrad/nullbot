@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -145,6 +146,7 @@ func loadOrInit(config Config) (Config, error) {
 		}
 		return Config{}, err
 	}
+	data = bytes.TrimPrefix(data, []byte{0xEF, 0xBB, 0xBF})
 	if err := json.Unmarshal(data, &config); err != nil {
 		return Config{}, err
 	}

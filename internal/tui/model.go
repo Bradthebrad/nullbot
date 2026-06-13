@@ -365,15 +365,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.submit("/pause")
 	case "ctrl+v":
-		if text, err := clipboard.ReadAll(); err == nil {
-			if m.selectAll {
-				m.input.Reset()
-				m.selectAll = false
-			}
-			m.input.InsertString(text)
+		if pasted, err := m.pasteClipboard(); err == nil && pasted {
 			m.updateInlineSuggestion()
 		} else {
-			m.status = "Paste failed: " + err.Error()
+			if err != nil {
+				m.status = "Paste failed: " + err.Error()
+			} else {
+				m.status = "Nothing pasteable found on clipboard."
+			}
 		}
 		return m, nil
 	case "ctrl+a":

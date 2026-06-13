@@ -1,0 +1,123 @@
+package tui
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+
+	"github.com/atotto/clipboard"
+)
+
+type pastedAttachment struct {
+	Kind string `json:"kind"`
+	Path string `json:"path"`
+	Name string `json:"name"`
+}
+
+func (m *Model) pasteClipboard() (bool, error) {
+	if text, err := clipboard.ReadAll(); err == nil && strings.TrimSpace(text) != "" {
+		m.insertPastedText(text)
+		return true, nil
+	}
+	attachments, err := clipboardAttachments(m.app.Config().AppDir)
+	if err != nil {
+		return false, err
+	}
+	if len(attachments) == 0 {
+		return false, nil
+	}
+	var tokens []string
+	for _, attachment := range attachments {
+		if attachment.Path == "" {
+			continue
+		}
+		tokens = append(tokens, attachmentToken(attachment.Path))
+	}
+	if len(tokens) == 0 {
+		return false, nil
+	}
+	m.insertPastedText(strings.Join(tokens, " "))
+	m.status = fmt.Sprintf("Attached %d clipboard item(s).", len(tokens))
+	return true, nil
+}
+
+func (m *Model) insertPastedText(text string) {
+	if m.selectAll {
+		m.input.Reset()
+		m.selectAll = false
+	}
+	if tokens := attachmentTokensFromText(text); len(tokens) > 0 {
+		text = strings.Join(tokens, " ")
+	}
+	m.input.InsertString(text)
+}
+
+func attachmentTokensFromText(text string) []string {
+	var tokens []string
+	for _, raw := range strings.Fields(strings.TrimSpace(text)) {
+		path := strings.Trim(raw, "\"'")
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			tokens = append(tokens, attachmentToken(path))
+		}
+	}
+	return tokens
+}
+
+func attachmentToken(path string) string {
+	return fmt.Sprintf("@file(%q)", filepath.Clean(path))
+}
+
+func clipboardAttachments(appDir string) ([]pastedAttachment, error) {
+	if runtime.GOOS != "windows" {
+		return nil, nil
+	}
+	dir := filepath.Join(appDir, "artifacts", "clipboard")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return nil, err
+	}
+	script := windowsClipboardScript(dir)
+	out, err := exec.Command("powershell", "-NoProfile", "-STA", "-Command", script).Output()
+	if err != nil {
+		return nil, err
+	}
+	text := strings.TrimSpace(string(out))
+	if text == "" || text == "null" {
+		return nil, nil
+	}
+	var many []pastedAttachment
+	if err := json.Unmarshal([]byte(text), &many); err == nil {
+		return many, nil
+	}
+	var one pastedAttachment
+	if err := json.Unmarshal([]byte(text), &one); err != nil {
+		return nil, err
+	}
+	return []pastedAttachment{one}, nil
+}
+
+func windowsClipboardScript(dir string) string {
+	dir = strings.ReplaceAll(dir, "'", "''")
+	return `
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$out = @()
+if ([System.Windows.Forms.Clipboard]::ContainsFileDropList()) {
+  foreach ($p in [System.Windows.Forms.Clipboard]::GetFileDropList()) {
+    $out += [pscustomobject]@{ kind = 'file'; path = [string]$p; name = [System.IO.Path]::GetFileName([string]$p) }
+  }
+}
+if ([System.Windows.Forms.Clipboard]::ContainsImage()) {
+  $dir = '` + dir + `'
+  [System.IO.Directory]::CreateDirectory($dir) | Out-Null
+  $path = Join-Path $dir ('clipboard-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '.png')
+  $img = [System.Windows.Forms.Clipboard]::GetImage()
+  $img.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+  $out += [pscustomobject]@{ kind = 'image'; path = [string]$path; name = [System.IO.Path]::GetFileName([string]$path) }
+}
+if ($out.Count -gt 0) { $out | ConvertTo-Json -Compress }
+`
+}

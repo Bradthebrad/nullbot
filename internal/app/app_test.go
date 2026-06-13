@@ -26,6 +26,25 @@ func TestSplitMarketPackageIDs(t *testing.T) {
 	}
 }
 
+func TestHumanMessageWithImageAttachment(t *testing.T) {
+	dir := t.TempDir()
+	imagePath := filepath.Join(dir, "clipboard.png")
+	if err := os.WriteFile(imagePath, []byte("fake-png-bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	msg := humanMessageWithAttachments(`look at @file("` + imagePath + `")`)
+	if msg.Type != "human" {
+		t.Fatalf("message type = %q", msg.Type)
+	}
+	if len(msg.Content.Parts) != 2 {
+		t.Fatalf("parts = %#v", msg.Content.Parts)
+	}
+	image := msg.Content.Parts[1]
+	if image.Type != "image" || image.Source == nil || image.Source.MediaType != "image/png" || image.Source.Data == "" {
+		t.Fatalf("image part = %#v", image)
+	}
+}
+
 func TestConfigCommandUpdatesBrand(t *testing.T) {
 	config := DefaultConfig()
 	config.AppDir = t.TempDir()

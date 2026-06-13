@@ -248,6 +248,22 @@ func TestInlineHistorySuggestionCompletesFrequentCommand(t *testing.T) {
 	}
 }
 
+func TestAttachmentTokensFromPastedPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "report.pdf")
+	if err := os.WriteFile(path, []byte("pdf"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got := attachmentTokensFromText(path)
+	if len(got) != 1 {
+		t.Fatal("expected pasted path to become attachment token")
+	}
+	want := attachmentToken(path)
+	if got[0] != want {
+		t.Fatalf("token = %q, want %q", got, want)
+	}
+}
+
 func TestActivityToolRendererOmitsToolOutput(t *testing.T) {
 	events := []activityEvent{
 		{Time: now(), Command: "agent/read_file", Status: "tool start", Detail: `args: {"path":"README.md","max_bytes":2000}`},

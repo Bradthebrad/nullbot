@@ -470,7 +470,7 @@ func (a *App) langChainHistory() []lc.BaseMessage {
 		case "assistant":
 			messages = append(messages, lc.AI(msg.Content))
 		default:
-			messages = append(messages, lc.Human(msg.Content))
+			messages = append(messages, humanMessageWithAttachments(msg.Content))
 		}
 	}
 	return messages

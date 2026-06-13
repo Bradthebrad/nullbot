@@ -264,6 +264,21 @@ func TestAttachmentTokensFromPastedPath(t *testing.T) {
 	}
 }
 
+func TestNormalizeAttachmentTextPreservesQuestion(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wedding.jpg")
+	if err := os.WriteFile(path, []byte("jpg"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, count := normalizeAttachmentText(path + " what's this a picture of?")
+	if count != 1 {
+		t.Fatalf("count = %d, text = %q", count, got)
+	}
+	if !strings.Contains(got, attachmentToken(path)) || !strings.Contains(got, "what's this a picture of?") {
+		t.Fatalf("normalized = %q", got)
+	}
+}
+
 func TestActivityToolRendererOmitsToolOutput(t *testing.T) {
 	events := []activityEvent{
 		{Time: now(), Command: "agent/read_file", Status: "tool start", Detail: `args: {"path":"README.md","max_bytes":2000}`},

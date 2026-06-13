@@ -39,6 +39,9 @@ func TestHumanMessageWithImageAttachment(t *testing.T) {
 	if len(msg.Content.Parts) != 2 {
 		t.Fatalf("parts = %#v", msg.Content.Parts)
 	}
+	if text := lcContentText(msg.Content); strings.Contains(text, "@file(") || strings.Contains(text, imagePath) || !strings.Contains(text, "clipboard.png") {
+		t.Fatalf("model text = %q", text)
+	}
 	image := msg.Content.Parts[1]
 	if image.Type != "image" || image.Source == nil || image.Source.MediaType != "image/png" || image.Source.Data == "" {
 		t.Fatalf("image part = %#v", image)

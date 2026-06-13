@@ -19,9 +19,20 @@ type pastedAttachment struct {
 }
 
 func (m *Model) pasteClipboard() (bool, error) {
+	var attachmentErr error
+	if runtime.GOOS == "windows" {
+		if attachments, err := clipboardAttachments(m.app.Config().AppDir); err != nil {
+			attachmentErr = err
+		} else if m.insertAttachments(attachments) {
+			return true, nil
+		}
+	}
 	if text, err := clipboard.ReadAll(); err == nil && strings.TrimSpace(text) != "" {
 		m.insertPastedText(text)
 		return true, nil
+	}
+	if runtime.GOOS == "windows" {
+		return false, attachmentErr
 	}
 	attachments, err := clipboardAttachments(m.app.Config().AppDir)
 	if err != nil {
@@ -30,6 +41,10 @@ func (m *Model) pasteClipboard() (bool, error) {
 	if len(attachments) == 0 {
 		return false, nil
 	}
+	return m.insertAttachments(attachments), nil
+}
+
+func (m *Model) insertAttachments(attachments []pastedAttachment) bool {
 	var tokens []string
 	for _, attachment := range attachments {
 		if attachment.Path == "" {
@@ -38,11 +53,11 @@ func (m *Model) pasteClipboard() (bool, error) {
 		tokens = append(tokens, attachmentToken(attachment.Path))
 	}
 	if len(tokens) == 0 {
-		return false, nil
+		return false
 	}
 	m.insertPastedText(strings.Join(tokens, " "))
 	m.status = fmt.Sprintf("Attached %d clipboard item(s).", len(tokens))
-	return true, nil
+	return true
 }
 
 func (m *Model) insertPastedText(text string) {
@@ -58,13 +73,51 @@ func (m *Model) insertPastedText(text string) {
 
 func attachmentTokensFromText(text string) []string {
 	var tokens []string
-	for _, raw := range strings.Fields(strings.TrimSpace(text)) {
-		path := strings.Trim(raw, "\"'")
-		if info, err := os.Stat(path); err == nil && !info.IsDir() {
-			tokens = append(tokens, attachmentToken(path))
-		}
+	for _, path := range attachmentPathsFromText(text) {
+		tokens = append(tokens, attachmentToken(path))
 	}
 	return tokens
+}
+
+func normalizeAttachmentText(text string) (string, int) {
+	if strings.Contains(text, "@file(") {
+		return text, 0
+	}
+	paths := attachmentPathsFromText(text)
+	normalized := text
+	for _, path := range paths {
+		normalized = strings.Replace(normalized, path, attachmentToken(path), 1)
+	}
+	return normalized, len(paths)
+}
+
+func attachmentPathsFromText(text string) []string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+	if path, ok := attachmentPath(text); ok {
+		return []string{path}
+	}
+	var paths []string
+	for _, raw := range strings.Fields(text) {
+		path := strings.Trim(raw, "\"'`")
+		path = strings.TrimRight(path, ".,;:!?")
+		if found, ok := attachmentPath(path); ok {
+			paths = append(paths, found)
+		}
+	}
+	return paths
+}
+
+func attachmentPath(path string) (string, bool) {
+	if path == "" || strings.HasPrefix(path, "@file(") {
+		return "", false
+	}
+	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		return filepath.Clean(path), true
+	}
+	return "", false
 }
 
 func attachmentToken(path string) string {

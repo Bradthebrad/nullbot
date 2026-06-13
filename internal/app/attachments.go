@@ -13,8 +13,9 @@ import (
 var attachmentTokenPattern = regexp.MustCompile(`@file\("([^"]+)"\)|@file\(([^)]+)\)`)
 
 func humanMessageWithAttachments(text string) lc.BaseMessage {
-	parts := []lc.ContentPart{{Type: "text", Text: text}}
-	for _, path := range attachmentPaths(text) {
+	paths := attachmentPaths(text)
+	parts := []lc.ContentPart{{Type: "text", Text: attachmentPromptText(text, paths)}}
+	for _, path := range paths {
 		part, ok := attachmentContentPart(path)
 		if ok {
 			parts = append(parts, part)
@@ -24,6 +25,26 @@ func humanMessageWithAttachments(text string) lc.BaseMessage {
 		return lc.Human(text)
 	}
 	return lc.BaseMessage{Type: lc.RoleHuman, Content: lc.PartsContent(parts...)}
+}
+
+func attachmentPromptText(text string, paths []string) string {
+	clean := strings.TrimSpace(attachmentTokenPattern.ReplaceAllString(text, ""))
+	var names []string
+	for _, path := range paths {
+		names = append(names, filepath.Base(path))
+	}
+	if len(names) == 0 {
+		return text
+	}
+	attachmentLine := "Attached file"
+	if len(names) > 1 {
+		attachmentLine = "Attached files"
+	}
+	attachmentLine += ": " + strings.Join(names, ", ")
+	if clean == "" {
+		return attachmentLine + ". Please inspect the attachment."
+	}
+	return clean + "\n\n" + attachmentLine + "."
 }
 
 func attachmentPaths(text string) []string {

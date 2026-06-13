@@ -182,6 +182,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.KeyMsg:
+		if msg.Paste && len(msg.Runes) > 0 {
+			if m.mode == ModeChat {
+				m.insertPastedText(string(msg.Runes))
+				m.updateInlineSuggestion()
+				return m, nil
+			}
+		}
 		return m.handleKey(msg)
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
@@ -415,6 +422,22 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.closeCompletion()
 		value := m.input.Value()
+		if strings.TrimSpace(value) == "/paste" {
+			m.input.Reset()
+			m.selectAll = false
+			if pasted, err := m.pasteClipboard(); err == nil && pasted {
+				m.updateInlineSuggestion()
+			} else if err != nil {
+				m.status = "Paste failed: " + err.Error()
+			} else {
+				m.status = "Nothing pasteable found on clipboard."
+			}
+			return m, nil
+		}
+		if normalized, count := normalizeAttachmentText(value); count > 0 {
+			value = normalized
+			m.status = fmt.Sprintf("Attached %d file(s).", count)
+		}
 		m.rememberInput(value)
 		m.input.Reset()
 		m.selectAll = false

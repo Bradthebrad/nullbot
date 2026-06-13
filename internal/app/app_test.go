@@ -256,7 +256,20 @@ func TestHistorySessionToolsReadPersistedSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 2 || messages[0].Role != "user" || messages[1].Role != "assistant" {
+	if len(messages) != 1 || messages[0].Role != "assistant" || !messages[0].VisibleOnly {
+		t.Fatalf("messages = %#v", messages)
+	}
+}
+
+func TestLangChainHistorySkipsVisibleOnlySlashOutput(t *testing.T) {
+	app := New(DefaultConfig())
+	app.history = []Message{
+		{Role: "assistant", Content: "Files panel opened.", VisibleOnly: true},
+		{Role: "user", Content: "what is here?"},
+		{Role: "assistant", Content: "A repo."},
+	}
+	messages := app.langChainHistory()
+	if len(messages) != 2 || lcContentText(messages[0].Content) != "what is here?" || lcContentText(messages[1].Content) != "A repo." {
 		t.Fatalf("messages = %#v", messages)
 	}
 }

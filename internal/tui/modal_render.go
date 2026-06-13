@@ -71,24 +71,32 @@ func renderFullActivity(events []activityEvent, width int) string {
 }
 
 func activityLine(event activityEvent, width int) string {
-	var parts []string
+	label := "event"
 	if event.Input != "" {
-		parts = append(parts, "`input` "+quoteCompact(event.Input, max(16, width-18)))
+		label = "input"
 	}
 	if event.Command != "" {
-		parts = append(parts, "`"+event.Command+"`")
+		label = event.Command
+	}
+	status := event.Status
+	if status == "" {
+		status = "event"
+	}
+	header := fmt.Sprintf("`%s` `%s` %s", event.Time.Format("15:04:05"), label, status)
+	detail := event.Detail
+	if event.Input != "" {
+		detail = event.Input
 	}
 	if event.Panel != "" {
-		parts = append(parts, "`panel="+event.Panel+"`")
+		if detail != "" {
+			detail += " "
+		}
+		detail += "panel=" + event.Panel
 	}
-	if event.Status != "" {
-		parts = append(parts, event.Status)
+	if detail == "" {
+		return renderMarkdown(header, width)
 	}
-	if len(parts) == 0 {
-		parts = append(parts, "event")
-	}
-	text := fmt.Sprintf("`%s` %s", event.Time.Format("15:04:05"), strings.Join(parts, " "))
-	return renderMarkdown(text, width)
+	return renderMarkdown(header+"\n"+quoteCompact(detail, max(32, width*2)), width)
 }
 
 func compactStatus(text string) string {
@@ -105,6 +113,10 @@ func quoteCompact(text string, limit int) string {
 
 func renderModal(panel string, reply app.Reply, width int) string {
 	switch panel {
+	case "help":
+		return renderHelpModal(reply, width)
+	case "files":
+		return renderFilesModal(reply, width)
 	case "history":
 		return renderHistoryModal(reply, width)
 	case "logs":
@@ -119,6 +131,38 @@ func renderModal(panel string, reply app.Reply, width int) string {
 		return renderMarkdown(reply.Message+"\n\n```json\n"+string(data)+"\n```", width)
 	}
 	return renderMarkdown(reply.Message, width)
+}
+
+func renderHelpModal(reply app.Reply, width int) string {
+	return renderMarkdown(reply.Message, width)
+}
+
+func renderFilesModal(reply app.Reply, width int) string {
+	var b strings.Builder
+	b.WriteString("# Files\n\n")
+	b.WriteString(reply.Message)
+	if reply.Data == nil {
+		return renderMarkdown(b.String(), width)
+	}
+	if workspace, ok := reply.Data["workspace"].(string); ok && workspace != "" {
+		fmt.Fprintf(&b, "\n\n- **Workspace:** `%s`", workspace)
+	}
+	if editor, ok := reply.Data["editor"].(app.EditorConfig); ok && editor.Command != "" {
+		fmt.Fprintf(&b, "\n- **Editor:** `%s`", editor.Command)
+	}
+	if counts, ok := reply.Data["counts"].(map[string]int); ok {
+		fmt.Fprintf(&b, "\n- **Entries:** %d total, %d directories, %d files", counts["total"], counts["directories"], counts["files"])
+	}
+	b.WriteString("\n\n## Useful Commands\n\n")
+	b.WriteString("- `/files workspace <path>` sets the workspace.\n")
+	b.WriteString("- `/ls [path]` lists a directory in the output panel.\n")
+	b.WriteString("- `/rm <path>` removes a file; `/rmdir <path>` removes a directory.\n")
+	b.WriteString("- Enable code MCP tools for read/write/search/edit/run-command capabilities.\n")
+	if listing, ok := reply.Data["listing"].(string); ok && strings.TrimSpace(listing) != "" {
+		b.WriteString("\n\n## Top Level\n\n")
+		b.WriteString(listing)
+	}
+	return renderMarkdown(b.String(), width)
 }
 
 func renderMarketModal(reply app.Reply, width int) string {

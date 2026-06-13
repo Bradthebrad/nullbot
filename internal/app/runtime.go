@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -101,21 +102,22 @@ func (a *App) handleAgentCallback(event callbacks.Event) {
 	switch event.Event {
 	case callbacks.EventChatModelStart:
 		record.Status = "model start"
-		record.Detail = "sending messages"
+		record.Detail = fmt.Sprintf("messages=%d", callbackMessageCount(event))
 	case callbacks.EventLLMEnd:
 		record.Status = "model done"
+		record.Detail = callbackGenerationSummary(event)
 	case callbacks.EventLLMError:
 		record.Status = "model error"
 		record.Detail = event.Data.Error
 	case callbacks.EventToolStart:
 		record.Status = "tool start"
-		record.Detail = compactAny(event.Data.Input, 120)
+		record.Detail = "args: " + compactAny(event.Data.Input, 180)
 	case callbacks.EventToolEnd:
 		record.Status = "tool done"
-		record.Detail = compactAny(event.Data.Output, 160)
+		record.Detail = "output: " + compactAny(event.Data.Output, 220)
 	case callbacks.EventToolError:
 		record.Status = "tool error"
-		record.Detail = event.Data.Error
+		record.Detail = "error: " + event.Data.Error
 	default:
 		record.Status = string(event.Event)
 	}
@@ -316,6 +318,9 @@ func (a *App) langChainHistory() []lc.BaseMessage {
 	start := len(a.history) - limit
 	messages := make([]lc.BaseMessage, 0, limit)
 	for _, msg := range a.history[start:] {
+		if msg.VisibleOnly || strings.HasPrefix(strings.TrimSpace(msg.Content), "/") {
+			continue
+		}
 		switch msg.Role {
 		case "assistant":
 			messages = append(messages, lc.AI(msg.Content))
@@ -329,8 +334,14 @@ func (a *App) langChainHistory() []lc.BaseMessage {
 func baseSystemPrompt(config Config, skillHints []string, tools []tcagent.Tool, skills []tcagent.Skill) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "You are %s. %s\n", DisplayName(config), config.Tagline)
+	b.WriteString("Operate like a capable local agent: inspect the workspace and available tools, gather facts, choose the smallest useful next action, execute safe read-only/tool actions without asking, and then synthesize a concise result.\n")
+	b.WriteString("Ask permission only before destructive actions, credential exposure, network effects outside the user's request, long-running shell commands, package installs, or commands that modify files/processes. Do not ask permission merely to inspect, list, parse, read, search, or summarize when tools allow it.\n")
 	b.WriteString("Be direct about what you can and cannot do. Do not claim coding, shell, web, email, filesystem, browser, or elevated local capabilities unless an enabled tool explicitly provides them.\n")
-	b.WriteString("Slash commands are handled by the app UI. If the user references a skill token mid-sentence, treat it as a hint, not as a command execution request.\n")
+	b.WriteString("Slash commands are UI controls and are not part of the conversation. Never ask the user to run slash commands for you; use tools directly when available. If the user references a skill token mid-sentence, treat it as a hint, not as a command execution request.\n")
+	fmt.Fprintf(&b, "Runtime environment: %s\n", environmentPrompt())
+	if root, err := workspaceRoot(config); err == nil {
+		fmt.Fprintf(&b, "Configured workspace: %s\n", root)
+	}
 	b.WriteString("Available built-in tools are constrained to NullBot app data: listing config-directory files, reading small config-directory text files, listing skills, creating SKILL.md files under the configured skills directory, refreshing/listing/installing market packages, enabling/disabling/removing installed MCP servers, listing configured MCP servers, summarizing recent visible chat history, reading compact persisted session history, and reading recent NullBot runtime log lines.\n")
 	if len(tools) > 0 {
 		b.WriteString("Current tool inventory:\n")
@@ -366,6 +377,66 @@ func baseSystemPrompt(config Config, skillHints []string, tools []tcagent.Tool, 
 		fmt.Fprintf(&b, "Active skill hints from user text: %s.\n", strings.Join(skillHints, ", "))
 	}
 	return strings.TrimSpace(b.String())
+}
+
+func callbackMessageCount(event callbacks.Event) int {
+	total := 0
+	for _, batch := range event.Data.Messages {
+		total += len(batch)
+	}
+	return total
+}
+
+func callbackGenerationSummary(event callbacks.Event) string {
+	if event.Data.Response == nil {
+		return "completed"
+	}
+	count := 0
+	for _, batch := range event.Data.Response.Generations {
+		count += len(batch)
+	}
+	if count == 0 {
+		return "completed"
+	}
+	return fmt.Sprintf("generations=%d", count)
+}
+
+func environmentPrompt() string {
+	switch runtime.GOOS {
+	case "windows":
+		return "Windows. Use PowerShell syntax for shell commands (`Get-ChildItem`, `Set-Location`, `Remove-Item`, `Select-String`) unless a tool specifically requests cmd.exe. Do not suggest apt/dnf/pacman/yum on Windows."
+	case "linux":
+		return "Linux. Use bash-compatible shell syntax. Package manager hint: " + linuxPackageManagerHint() + "."
+	case "darwin":
+		return "macOS. Use zsh/bash-compatible shell syntax. Package manager hint: Homebrew (`brew`) when installed."
+	default:
+		return runtime.GOOS + ". Use POSIX-style shell syntax only if available; inspect before assuming package managers."
+	}
+}
+
+func linuxPackageManagerHint() string {
+	data, err := os.ReadFile("/etc/os-release")
+	text := strings.ToLower(string(data))
+	if err == nil {
+		switch {
+		case strings.Contains(text, "ubuntu"), strings.Contains(text, "debian"):
+			return "apt"
+		case strings.Contains(text, "fedora"):
+			return "dnf"
+		case strings.Contains(text, "rhel"), strings.Contains(text, "centos"):
+			return "dnf or yum"
+		case strings.Contains(text, "arch"):
+			return "pacman"
+		case strings.Contains(text, "suse"):
+			return "zypper"
+		}
+	}
+	for _, candidate := range []string{"apt", "dnf", "pacman", "yum", "zypper", "apk"} {
+		if _, err := os.Stat("/usr/bin/" + candidate); err == nil {
+			return candidate
+		}
+	}
+	return "unknown; inspect OS before suggesting installs"
 }
 
 func lcContentText(content lc.Content) string {

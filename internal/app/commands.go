@@ -63,7 +63,8 @@ func (a *App) executeSlash(ctx context.Context, input string) Reply {
 		if strings.TrimSpace(rest) == "" {
 			return a.reply("Usage: /also <message>", name, "")
 		}
-		return a.reply("Added guidance: "+strings.TrimSpace(rest), name, "")
+		a.StartAlsoObserver(rest)
+		return a.reply("Captured background note without interrupting the active run.", name, "")
 	case "/pause":
 		a.setPaused(true)
 		return a.reply("Paused. Tool calls and results remain in session state.", name, "")
@@ -135,11 +136,13 @@ func (a *App) reply(message, command, panel string, data ...map[string]any) Repl
 
 func formatHelp() string {
 	var b strings.Builder
-	b.WriteString("Available commands:\n")
+	b.WriteString("# Help\n\n")
+	b.WriteString("NullBot slash commands are UI controls. They are not sent to the agent as chat instructions.\n\n")
+	b.WriteString("## Commands\n\n")
 	for _, cmd := range commands {
-		fmt.Fprintf(&b, "%s - %s\n", cmd.Usage, cmd.Description)
+		fmt.Fprintf(&b, "- `%s` - %s\n", cmd.Usage, cmd.Description)
 	}
-	b.WriteString("\nKeybinds:\n")
+	b.WriteString("\n## Keybinds\n\n")
 	for _, line := range []string{
 		"F1 - open help",
 		"Ctrl+Q - quit",
@@ -158,8 +161,17 @@ func formatHelp() string {
 		"Up/Down or k/j - move modal selection or scroll modal",
 		"Esc/q - close modal",
 	} {
-		fmt.Fprintf(&b, "%s\n", line)
+		key, desc, ok := strings.Cut(line, " - ")
+		if ok {
+			fmt.Fprintf(&b, "- `%s` - %s\n", key, desc)
+		} else {
+			fmt.Fprintf(&b, "- %s\n", line)
+		}
 	}
+	b.WriteString("\n## Notes\n\n")
+	b.WriteString("- Use `/files workspace <path>` to set the current workspace.\n")
+	b.WriteString("- Use `/market` to install optional MCP tool packs.\n")
+	b.WriteString("- Use `/also <note>` during a run to record side guidance in activity without interrupting the active model call.\n")
 	return strings.TrimSpace(b.String())
 }
 

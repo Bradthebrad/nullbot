@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -24,9 +25,10 @@ type App struct {
 }
 
 type Message struct {
-	Role    string    `json:"role"`
-	Content string    `json:"content"`
-	Time    time.Time `json:"time"`
+	Role        string    `json:"role"`
+	Content     string    `json:"content"`
+	Time        time.Time `json:"time"`
+	VisibleOnly bool      `json:"visible_only,omitempty"`
 }
 
 type ActivityRecord struct {
@@ -145,9 +147,10 @@ func (a *App) SubmitWithActivity(ctx context.Context, input string, sink func(Ac
 		a.mu.Unlock()
 	}()
 
-	uiOnly := isUIOnlyCommand(input)
+	trimmed := strings.TrimSpace(input)
+	isSlash := strings.HasPrefix(trimmed, "/")
 	userMessage := Message{Role: "user", Content: input, Time: time.Now().UTC()}
-	if !uiOnly {
+	if !isSlash {
 		a.mu.Lock()
 		a.history = append(a.history, userMessage)
 		a.mu.Unlock()
@@ -157,9 +160,10 @@ func (a *App) SubmitWithActivity(ctx context.Context, input string, sink func(Ac
 
 	reply := a.Execute(ctx, input)
 
-	assistantMessage := Message{Role: "assistant", Content: reply.Message, Time: time.Now().UTC()}
+	assistantMessage := Message{Role: "assistant", Content: reply.Message, Time: time.Now().UTC(), VisibleOnly: isSlash}
+	recordAssistant := !isSlash || shouldDisplaySlashReply(trimmed, reply)
 	a.mu.Lock()
-	if !uiOnly {
+	if recordAssistant {
 		a.history = append(a.history, assistantMessage)
 	}
 	a.logs = append(a.logs, time.Now().UTC().Format(time.RFC3339)+" "+reply.Message)
@@ -171,15 +175,21 @@ func (a *App) SubmitWithActivity(ctx context.Context, input string, sink func(Ac
 		a.activity = nil
 	}
 	a.mu.Unlock()
-	if !uiOnly {
+	if recordAssistant {
 		a.persistMessage(assistantMessage)
 	}
 	a.logInfo("reply", "command", reply.Command, "panel", reply.OpenPanel, "message", reply.Message)
 	return reply
 }
 
-func isUIOnlyCommand(input string) bool {
-	return strings.EqualFold(strings.TrimSpace(input), "/help")
+func shouldDisplaySlashReply(input string, reply Reply) bool {
+	name, _, _ := strings.Cut(strings.TrimSpace(input), " ")
+	switch name {
+	case "/ls", "/dir", "/rm", "/rmdir":
+		return true
+	default:
+		return reply.OpenPanel == "" && reply.Message != "" && name == "/pause"
+	}
 }
 
 func (a *App) appendActivity(record ActivityRecord) {
@@ -217,11 +227,44 @@ func (a *App) LastOutput() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for i := len(a.history) - 1; i >= 0; i-- {
-		if a.history[i].Role == "assistant" {
+		if a.history[i].Role == "assistant" && !a.history[i].VisibleOnly {
 			return a.history[i].Content
 		}
 	}
 	return ""
+}
+
+func (a *App) StartAlsoObserver(note string) {
+	note = strings.TrimSpace(note)
+	a.mu.Lock()
+	active := a.activeCancel != nil
+	recent := append([]ActivityRecord{}, a.activity...)
+	if len(recent) > 12 {
+		recent = recent[len(recent)-12:]
+	}
+	a.mu.Unlock()
+
+	a.appendActivity(ActivityRecord{
+		Time:   time.Now().UTC(),
+		Kind:   "also",
+		Name:   "/also",
+		Status: "note captured",
+		Detail: note,
+	})
+	if !active {
+		return
+	}
+	go func(snapshot []ActivityRecord) {
+		time.Sleep(250 * time.Millisecond)
+		a.appendActivity(ActivityRecord{
+			Time:   time.Now().UTC(),
+			Kind:   "also",
+			Name:   "background observer",
+			Status: "watching active run",
+			Detail: fmt.Sprintf("note=%q recent_activity=%d", note, len(snapshot)),
+		})
+		a.logInfo("also observer", "note", note, "recent_activity", len(snapshot))
+	}(recent)
 }
 
 func (a *App) Plan() string {

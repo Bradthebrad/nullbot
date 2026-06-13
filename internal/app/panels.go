@@ -172,16 +172,42 @@ func (a *App) filesCommand(sub string) Reply {
 		message = "Files panel opened, but workspace is invalid: " + err.Error()
 	}
 	reply := a.reply(message, "/files", "files")
-	reply.Data = map[string]any{"subcommand": sub, "editor": a.config.Editor, "workspace": root}
+	summary := map[string]any{"subcommand": sub, "editor": a.config.Editor, "workspace": root}
+	if err == nil {
+		if counts, countErr := workspaceCounts(root); countErr == nil {
+			summary["counts"] = counts
+		}
+		if listing, listErr := listWorkspaceDir(a.config, ".", 40); listErr == nil {
+			summary["listing"] = listing
+		}
+	}
+	reply.Data = summary
 	return reply
 }
 
 func (a *App) listFilesCommand(command, path string) Reply {
 	output, err := listWorkspaceDir(a.config, path, 200)
 	if err != nil {
-		return a.reply("List failed: "+err.Error(), command, "files")
+		return a.reply("List failed: "+err.Error(), command, "")
 	}
-	return a.reply(output, command, "files", map[string]any{"workspace": a.config.WorkspaceDir, "path": path})
+	return a.reply(output, command, "", map[string]any{"workspace": a.config.WorkspaceDir, "path": path})
+}
+
+func workspaceCounts(root string) (map[string]int, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	counts := map[string]int{"files": 0, "directories": 0}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			counts["directories"]++
+		} else {
+			counts["files"]++
+		}
+	}
+	counts["total"] = len(entries)
+	return counts, nil
 }
 
 func (a *App) removeFileCommand(command, sub string, dirsOnly bool) Reply {

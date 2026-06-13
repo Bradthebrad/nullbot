@@ -279,6 +279,20 @@ func TestNormalizeAttachmentTextPreservesQuestion(t *testing.T) {
 	}
 }
 
+func TestNormalizeInputAttachmentsConvertsDroppedPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "drop.png")
+	if err := os.WriteFile(path, []byte("png"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	model := New(app.New(app.DefaultConfig()))
+	model.input.SetValue(path)
+	model.normalizeInputAttachments()
+	if got := model.input.Value(); got != attachmentToken(path) {
+		t.Fatalf("input = %q, want %q", got, attachmentToken(path))
+	}
+}
+
 func TestActivityToolRendererOmitsToolOutput(t *testing.T) {
 	events := []activityEvent{
 		{Time: now(), Command: "agent/read_file", Status: "tool start", Detail: `args: {"path":"README.md","max_bytes":2000}`},

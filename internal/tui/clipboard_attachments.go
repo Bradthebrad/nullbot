@@ -65,10 +65,12 @@ func (m *Model) insertPastedText(text string) {
 		m.input.Reset()
 		m.selectAll = false
 	}
-	if tokens := attachmentTokensFromText(text); len(tokens) > 0 {
-		text = strings.Join(tokens, " ")
+	if normalized, count := normalizeAttachmentText(text); count > 0 {
+		text = normalized
+		m.status = fmt.Sprintf("Attached %d file(s).", count)
 	}
 	m.input.InsertString(text)
+	m.normalizeInputAttachments()
 }
 
 func attachmentTokensFromText(text string) []string {
@@ -89,6 +91,17 @@ func normalizeAttachmentText(text string) (string, int) {
 		normalized = strings.Replace(normalized, path, attachmentToken(path), 1)
 	}
 	return normalized, len(paths)
+}
+
+func (m *Model) normalizeInputAttachments() {
+	value := m.input.Value()
+	normalized, count := normalizeAttachmentText(value)
+	if count == 0 || normalized == value {
+		return
+	}
+	m.input.SetValue(normalized)
+	m.input.CursorEnd()
+	m.status = fmt.Sprintf("Attached %d file(s).", count)
 }
 
 func attachmentPathsFromText(text string) []string {

@@ -138,7 +138,7 @@ func New(a *app.App) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(textarea.Blink, tea.SetWindowTitle(app.DisplayName(m.app.Config())))
+	return tea.Batch(textarea.Blink, tea.EnableBracketedPaste, tea.SetWindowTitle(app.DisplayName(m.app.Config())))
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -182,9 +182,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.KeyMsg:
-		if msg.Paste && len(msg.Runes) > 0 {
+		if msg.Paste {
 			if m.mode == ModeChat {
-				m.insertPastedText(string(msg.Runes))
+				if len(msg.Runes) > 0 {
+					m.insertPastedText(string(msg.Runes))
+				} else if msg.String() == "enter" {
+					m.input.InsertString("\n")
+				}
 				m.updateInlineSuggestion()
 				return m, nil
 			}
@@ -492,6 +496,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.closeCompletion()
 	}
 	m.input, cmd = m.input.Update(msg)
+	m.normalizeInputAttachments()
 	m.updateInlineSuggestion()
 	return m, cmd
 }

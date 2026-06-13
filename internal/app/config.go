@@ -230,6 +230,9 @@ func normalizeConfig(config Config) Config {
 	if config.PermissionDefaults == nil {
 		config.PermissionDefaults = map[string]string{"coding": "deny", "shell": "ask", "network": "ask"}
 	}
+	if strings.TrimSpace(config.UI.Theme) == "" {
+		config.UI.Theme = "steel"
+	}
 	return config
 }
 

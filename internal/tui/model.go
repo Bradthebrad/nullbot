@@ -75,6 +75,8 @@ type Model struct {
 	usage            app.UsageSnapshot
 	usageTab         int
 	usageModelFilter string
+	themeIndex       int
+	themeDetails     bool
 
 	completionOpen    bool
 	completionPrefix  string
@@ -106,6 +108,7 @@ type activityEvent struct {
 }
 
 func New(a *app.App) Model {
+	applyTheme(a.Config().UI.Theme)
 	input := textarea.New()
 	input.Placeholder = "Message NullBot or type /help"
 	input.Prompt = "| "
@@ -137,8 +140,9 @@ func New(a *app.App) Model {
 			{Time: time.Now(), Status: "NullBot started", Detail: "Press /help for commands."},
 			{Time: time.Now(), Status: "Shortcuts ready", Detail: "Ctrl+Q quit, Ctrl+O full activity, Ctrl+J newline."},
 		},
-		status:  "ready",
-		spinner: spin,
+		status:     "ready",
+		spinner:    spin,
+		themeIndex: themeIndexByID(a.Config().UI.Theme),
 	}
 }
 
@@ -340,6 +344,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return next, cmd
 		}
 		if next, cmd, handled := m.handleUsageKey(msg); handled {
+			return next, cmd
+		}
+		if next, cmd, handled := m.handleThemesKey(msg); handled {
 			return next, cmd
 		}
 		switch msg.String() {
@@ -728,6 +735,10 @@ func (m *Model) openModal(panel string, reply app.Reply) {
 		m.openUsageModal(reply)
 		return
 	}
+	if panel == "themes" {
+		m.openThemesModal()
+		return
+	}
 	m.mode = ModeModal
 	m.panel = panel
 	m.input.Blur()
@@ -856,6 +867,9 @@ func (m Model) modalView() string {
 	}
 	if m.panel == "usage" {
 		footer += " | tab/left/right tabs | f model filter | c clear | r refresh"
+	}
+	if m.panel == "themes" {
+		footer += " | up/down move | d details | enter/Ctrl+S apply"
 	}
 	if m.mode == ModePlanEdit {
 		title = modalTitleStyle.Render("EDIT PLAN")

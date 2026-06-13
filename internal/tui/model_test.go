@@ -398,6 +398,32 @@ func TestUsageModalRendersTabsAndChart(t *testing.T) {
 	}
 }
 
+func TestThemesModalRendersAndAppliesTheme(t *testing.T) {
+	if len(themes) != 20 {
+		t.Fatalf("theme count = %d", len(themes))
+	}
+	config := app.DefaultConfig()
+	config.AppDir = t.TempDir()
+	model := New(app.New(config))
+	model.width = 120
+	model.height = 40
+	model.resize()
+	model.openThemesModal()
+	rendered := stripANSI(model.renderThemesModal())
+	if !strings.Contains(rendered, "Steel Signal") || !strings.Contains(rendered, "Neon Noir") {
+		t.Fatalf("themes missing:\n%s", rendered)
+	}
+	model.themeIndex = themeIndexByID("neon")
+	next, _, handled := model.handleThemesKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if !handled {
+		t.Fatal("theme key was not handled")
+	}
+	updated := next.(*Model)
+	if got := updated.app.Config().UI.Theme; got != "neon" {
+		t.Fatalf("theme = %q", got)
+	}
+}
+
 func stripANSI(text string) string {
 	return regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(text, "")
 }

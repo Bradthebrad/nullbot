@@ -308,6 +308,20 @@ func TestPasteProtectedEnterCapturesBlock(t *testing.T) {
 	}
 }
 
+func TestPasteProtectedEnterCapturesSingleInjectedLine(t *testing.T) {
+	model := New(app.New(app.DefaultConfig()))
+	model.input.SetValue("first pasted line")
+	model.pasteProtectUntil = time.Now().Add(time.Second)
+	next, _ := model.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	updated := next.(Model)
+	if updated.input.Value() != "" || !strings.Contains(updated.pendingPaste, "first pasted line") {
+		t.Fatalf("input=%q pending=%q", updated.input.Value(), updated.pendingPaste)
+	}
+	if len(updated.messages) != 0 {
+		t.Fatalf("line submitted during paste guard: %#v", updated.messages)
+	}
+}
+
 func TestCapturePasteShowsChipWithoutInputText(t *testing.T) {
 	model := New(app.New(app.DefaultConfig()))
 	model.capturePaste("alpha\nbeta\ngamma")

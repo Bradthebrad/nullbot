@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/atotto/clipboard"
 )
@@ -132,6 +133,19 @@ func (m *Model) captureInputAsPasteIfNeeded() bool {
 	}
 	m.input.Reset()
 	m.capturePaste(value)
+	return true
+}
+
+func (m *Model) capturePastedLineIfNeeded() bool {
+	value := m.input.Value()
+	if strings.TrimSpace(value) == "" || !m.pasteProtected() {
+		return false
+	}
+	m.input.Reset()
+	m.pendingPaste = appendPendingPaste(m.pendingPaste, value+"\n")
+	m.pasteNotice = m.pasteSummary()
+	m.status = "Paste captured. Press Enter after paste completes to send."
+	m.pasteProtectUntil = time.Now().Add(350 * time.Millisecond)
 	return true
 }
 

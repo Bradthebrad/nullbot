@@ -439,6 +439,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.status = "Activity panel cleared."
 		return m, nil
 	case "enter":
+		if m.capturePastedLineIfNeeded() {
+			m.updateInlineSuggestion()
+			return m, nil
+		}
 		if m.captureInputAsPasteIfNeeded() {
 			m.updateInlineSuggestion()
 			return m, nil
@@ -514,6 +518,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	var cmd tea.Cmd
+	before := m.input.Value()
 	if m.selectAll && isReplacingKey(msg) {
 		m.input.Reset()
 		m.pendingPaste = ""
@@ -526,8 +531,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	m.input, cmd = m.input.Update(msg)
 	m.normalizeInputAttachments()
+	pasteCmd := m.observePossiblePaste(msg, before)
 	m.updateInlineSuggestion()
-	return m, cmd
+	return m, tea.Batch(cmd, pasteCmd)
 }
 
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
@@ -930,7 +936,7 @@ func (m *Model) observePossiblePaste(msg tea.KeyMsg, before string) tea.Cmd {
 	}
 	now := time.Now()
 	batched := len(msg.Runes) > 1
-	rapid := !m.lastInputAt.IsZero() && now.Sub(m.lastInputAt) <= 12*time.Millisecond
+	rapid := !m.lastInputAt.IsZero() && now.Sub(m.lastInputAt) <= 35*time.Millisecond
 	m.lastInputAt = now
 	if !batched && !rapid {
 		return nil

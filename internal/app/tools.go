@@ -24,6 +24,9 @@ func BuiltinToolsFor(config Config, state *App, includeSpawner bool) []agent.Too
 		createSkillTool(config),
 		workspaceInfoTool(config),
 		workspaceListDirTool(config),
+		plansListTool(state),
+		planReadTool(state),
+		planUpdateStepTool(state),
 		historyRecentTool(state),
 		historySessionsTool(config),
 		historySessionReadTool(config),
@@ -43,6 +46,75 @@ func BuiltinToolsFor(config Config, state *App, includeSpawner bool) []agent.Too
 		tools = append(tools, spawnSubagentTool(state))
 	}
 	return tools
+}
+
+func plansListTool(state *App) agent.Tool {
+	return agent.ToolFunc{
+		Name:        "plans_list",
+		Description: "List saved NullBot plans from the plans directory with progress and current step.",
+		Schema:      agent.ToolSchema(map[string]any{}),
+		Func: func(ctx context.Context, args map[string]any) (string, error) {
+			state.mu.Lock()
+			config := state.config
+			state.mu.Unlock()
+			return prettyJSON(listPlans(config)), nil
+		},
+	}
+}
+
+func planReadTool(state *App) agent.Tool {
+	return agent.ToolFunc{
+		Name:        "plan_read",
+		Description: "Read a saved plan JSON by id. Use plans_list first if the id is unknown.",
+		Schema: agent.ToolSchema(map[string]any{
+			"plan_id": agent.StringProperty("Plan id without .json."),
+		}, "plan_id"),
+		Func: func(ctx context.Context, args map[string]any) (string, error) {
+			state.mu.Lock()
+			config := state.config
+			state.mu.Unlock()
+			plan, err := loadPlan(config, stringArg(args, "plan_id"))
+			if err != nil {
+				return "", err
+			}
+			return planJSON(plan), nil
+		},
+	}
+}
+
+func planUpdateStepTool(state *App) agent.Tool {
+	return agent.ToolFunc{
+		Name:        "plan_update_step",
+		Description: "Update a plan step status after completing or starting work. Valid statuses are pending, in_progress, blocked, and complete.",
+		Schema: agent.ToolSchema(map[string]any{
+			"plan_id": agent.StringProperty("Plan id without .json."),
+			"step_id": agent.StringProperty("Step id such as 1 or 2.3."),
+			"status":  agent.StringProperty("New status: pending, in_progress, blocked, or complete."),
+			"note":    agent.StringProperty("Optional evidence or note for the step update."),
+		}, "plan_id", "step_id", "status"),
+		Func: func(ctx context.Context, args map[string]any) (string, error) {
+			state.mu.Lock()
+			config := state.config
+			state.mu.Unlock()
+			plan, err := loadPlan(config, stringArg(args, "plan_id"))
+			if err != nil {
+				return "", err
+			}
+			status := strings.ToLower(strings.TrimSpace(stringArg(args, "status")))
+			switch status {
+			case "pending", "in_progress", "blocked", "complete", "completed", "done":
+			default:
+				return "", fmt.Errorf("unsupported step status %q", status)
+			}
+			if !updatePlanStepStatus(&plan, stringArg(args, "step_id"), status, stringArg(args, "note")) {
+				return "", fmt.Errorf("step %q not found", stringArg(args, "step_id"))
+			}
+			if err := savePlan(config, plan); err != nil {
+				return "", err
+			}
+			return planJSON(plan), nil
+		},
+	}
 }
 
 func workspaceInfoTool(config Config) agent.Tool {

@@ -61,20 +61,51 @@ func (a *App) mcpPanelReply(message string) Reply {
 }
 
 func (a *App) planCommand(sub string) Reply {
+	sub = strings.TrimSpace(sub)
 	if strings.HasPrefix(sub, "focus ") {
-		focus := strings.TrimSpace(strings.TrimPrefix(sub, "focus "))
-		a.SetPlan("Focus: " + focus + "\n\n1. Clarify the goal.\n2. Gather available tools.\n3. Execute the smallest useful next step.\n4. Report results.")
-		reply := a.reply("Plan focus updated.", "/plan", "plan")
-		reply.Data = map[string]any{"plan": a.Plan()}
+		sub = strings.TrimSpace(strings.TrimPrefix(sub, "focus "))
+	}
+	if strings.HasPrefix(sub, "execute") {
+		id := strings.TrimSpace(strings.TrimPrefix(sub, "execute"))
+		plan, err := a.runPlanExecutor(contextOrBackground(), id)
+		if err != nil {
+			reply := a.planPanelReply("Plan execution failed: " + err.Error())
+			reply.Data["error"] = err.Error()
+			return reply
+		}
+		reply := a.planPanelReply("Plan execution complete for " + plan.ID + ".")
+		reply.Data["selected"] = plan
 		return reply
 	}
-	if sub == "execute" {
-		reply := a.reply("Plan execution requested. Agent execution wiring will use the current plan as workflow guidance.", "/plan", "plan")
-		reply.Data = map[string]any{"plan": a.Plan()}
+	if sub != "" {
+		plan, err := a.runPlanner(contextOrBackground(), sub)
+		if err != nil {
+			reply := a.planPanelReply("Plan creation failed: " + err.Error())
+			reply.Data["error"] = err.Error()
+			return reply
+		}
+		reply := a.planPanelReply("Created plan " + plan.ID + ".")
+		reply.Data["selected"] = plan
 		return reply
 	}
-	reply := a.reply(focused("Plan panel opened", sub), "/plan", "plan")
-	reply.Data = map[string]any{"plan": a.Plan()}
+	return a.planPanelReply("Plan panel opened.")
+}
+
+func (a *App) planPanelReply(message string) Reply {
+	a.mu.Lock()
+	config := a.config
+	a.mu.Unlock()
+	plans := listPlans(config)
+	reply := a.reply(message, "/plan", "plan")
+	reply.Data = map[string]any{
+		"plans": plans,
+		"dir":   plansDir(config),
+	}
+	if len(plans) > 0 {
+		if plan, err := loadPlan(config, plans[0].ID); err == nil {
+			reply.Data["selected"] = plan
+		}
+	}
 	return reply
 }
 

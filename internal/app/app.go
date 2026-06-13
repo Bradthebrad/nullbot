@@ -361,12 +361,26 @@ func (a *App) RequestPause() {
 }
 
 func (a *App) setPaused(paused bool) {
+	var fallbackCancel context.CancelFunc
 	a.mu.Lock()
 	a.paused = paused
 	if paused && a.activeCancel != nil {
 		a.activeCancel()
+	} else if paused {
+		for id, task := range a.tasks {
+			if task.Status == TaskRunning && a.taskCancels[id] != nil {
+				fallbackCancel = a.taskCancels[id]
+				task.Status = TaskCanceling
+				task.Current = "cancel requested"
+				task.UpdatedAt = time.Now().UTC()
+				break
+			}
+		}
 	}
 	a.mu.Unlock()
+	if fallbackCancel != nil {
+		fallbackCancel()
+	}
 	if paused {
 		a.logInfo("pause requested")
 	}

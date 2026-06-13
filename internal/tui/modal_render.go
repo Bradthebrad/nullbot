@@ -127,6 +127,10 @@ func renderModal(panel string, reply app.Reply, width int) string {
 		return renderMarketModal(reply, width)
 	case "mcp":
 		return renderMCPModal(reply, width)
+	case "plan":
+		if plans, ok := reply.Data["plans"].([]app.PlanSummary); ok {
+			return renderMarkdown(planSummaryMarkdown(plans), width)
+		}
 	case "tasks":
 		if tasks, ok := reply.Data["tasks"].([]app.AgentTask); ok {
 			return renderMarkdown(taskSummaryMarkdown(tasks), width)
@@ -137,6 +141,18 @@ func renderModal(panel string, reply app.Reply, width int) string {
 		return renderMarkdown(reply.Message+"\n\n```json\n"+string(data)+"\n```", width)
 	}
 	return renderMarkdown(reply.Message, width)
+}
+
+func planSummaryMarkdown(plans []app.PlanSummary) string {
+	if len(plans) == 0 {
+		return "No plans yet. Create one with `/plan <goal>`."
+	}
+	var b strings.Builder
+	b.WriteString("# Plans\n\n")
+	for _, plan := range plans {
+		fmt.Fprintf(&b, "- `%s` [%s] %s - %s\n", plan.ID, plan.Progress, plan.Name, quoteCompact(plan.Goal, 140))
+	}
+	return b.String()
 }
 
 func taskSummaryMarkdown(tasks []app.AgentTask) string {

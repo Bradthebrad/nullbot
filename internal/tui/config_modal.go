@@ -96,6 +96,9 @@ func (m *Model) handleConfigKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 			m.status = "Config saved."
 			m.events = append(m.events, activityEvent{Time: now(), Command: "/config", Status: "saved"})
 			m.configFields = configFields(m.app.Config())
+			m.modal.SetContent(m.renderConfigModal())
+			m.syncConfigModalViewport()
+			return m, tea.SetWindowTitle(app.DisplayName(m.app.Config())), true
 		}
 	}
 	m.modal.SetContent(m.renderConfigModal())

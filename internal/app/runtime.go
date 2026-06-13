@@ -482,7 +482,7 @@ func baseSystemPrompt(config Config, skillHints []string, tools []tcagent.Tool, 
 		fmt.Fprintf(&b, "Configured workspace: %s\n", root)
 	}
 	fmt.Fprintf(&b, "You may spawn up to %d concurrent named subagents with `spawn_subagent` when decomposition helps. Give each subagent a narrow task and synthesize their results yourself. Subagents use `%s/%s` unless configured otherwise.\n", config.Agent.MaxSubagents, config.SubagentModel.Provider, config.SubagentModel.Model)
-	b.WriteString("Available built-in tools are constrained to NullBot app data: listing config-directory files, reading small config-directory text files, listing skills, creating SKILL.md files under the configured skills directory, refreshing/listing/installing market packages, enabling/disabling/removing installed MCP servers, listing configured MCP servers, summarizing recent visible chat history, reading compact persisted session history, and reading recent NullBot runtime log lines.\n")
+	b.WriteString("Available built-in tools are constrained to NullBot app data and configured workspace browsing: listing config-directory files, reading small config-directory text files, listing skills, creating SKILL.md files under the configured skills directory, listing/reading/updating saved JSON plans, refreshing/listing/installing market packages, enabling/disabling/removing installed MCP servers, listing configured MCP servers, summarizing recent visible chat history, reading compact persisted session history, and reading recent NullBot runtime log lines.\n")
 	if len(tools) > 0 {
 		b.WriteString("Current tool inventory:\n")
 		for _, tool := range tools {

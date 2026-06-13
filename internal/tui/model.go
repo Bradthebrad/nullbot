@@ -44,6 +44,7 @@ type Model struct {
 	busy      bool
 	spinner   spinner.Model
 	planEdit  textarea.Model
+	planID    string
 
 	configFields    []configField
 	configIndex     int
@@ -66,6 +67,10 @@ type Model struct {
 	tasks       []app.AgentTask
 	taskIndex   int
 	taskDetails bool
+
+	plans       []app.PlanSummary
+	planIndex   int
+	planDetails bool
 }
 
 type replyMsg app.Reply
@@ -123,7 +128,7 @@ func New(a *app.App) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return textarea.Blink
+	return tea.Batch(textarea.Blink, tea.SetWindowTitle(app.DisplayName(m.app.Config())))
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -249,6 +254,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.input.Focus()
 			return m, nil
 		case "ctrl+s":
+			if m.panel == "plan" && m.planID != "" {
+				if err := m.app.SavePlanJSON(m.planID, m.planEdit.Value()); err != nil {
+					m.status = "Plan save failed: " + err.Error()
+					return m, nil
+				}
+				m.status = "Plan saved."
+				reply := m.app.Execute(context.Background(), "/plan")
+				m.mode = ModeModal
+				m.openPlanModal(reply)
+				return m, nil
+			}
 			m.app.SetPlan(m.planEdit.Value())
 			m.mode = ModeModal
 			reply := app.Reply{Message: "Plan saved.", OpenPanel: "plan", Data: map[string]any{"plan": m.app.Plan()}}
@@ -276,6 +292,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if next, cmd, handled := m.handleTasksKey(msg); handled {
 			return next, cmd
 		}
+		if next, cmd, handled := m.handlePlanKey(msg); handled {
+			return next, cmd
+		}
 		switch msg.String() {
 		case "esc", "q":
 			m.mode = ModeChat
@@ -295,10 +314,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "e":
 			if m.panel == "plan" {
-				m.mode = ModePlanEdit
-				m.planEdit.SetValue(m.app.Plan())
-				m.planEdit.Focus()
-				return m, textarea.Blink
+				next, cmd, _ := m.startPlanEdit()
+				return next, cmd
 			}
 		case "ctrl+o":
 			m.openActivityModal()
@@ -593,6 +610,10 @@ func (m *Model) openModal(panel string, reply app.Reply) {
 		m.openTasksModal(reply)
 		return
 	}
+	if panel == "plan" {
+		m.openPlanModal(reply)
+		return
+	}
 	m.mode = ModeModal
 	m.panel = panel
 	m.input.Blur()
@@ -698,7 +719,7 @@ func (m Model) modalView() string {
 	title := modalTitleStyle.Render(strings.ToUpper(m.panel))
 	footer := "Esc close"
 	if m.panel == "plan" && m.mode == ModeModal {
-		footer += " | e edit | /plan focus <topic> | /plan execute"
+		footer += " | up/down move | enter details | e edit | x execute | r refresh"
 	}
 	if m.panel == "market" {
 		footer += " | up/down move | space select | i install | s small | e install+enable | r refresh | d details"

@@ -63,8 +63,7 @@ func (a *App) executeSlash(ctx context.Context, input string) Reply {
 		if strings.TrimSpace(rest) == "" {
 			return a.reply("Usage: /also <message>", name, "")
 		}
-		a.StartAlsoObserver(rest)
-		return a.reply("Captured background note without interrupting the active run.", name, "")
+		return a.RunAlsoObserver(ctx, rest)
 	case "/pause":
 		a.setPaused(true)
 		return a.reply("Paused. Tool calls and results remain in session state.", name, "")

@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +21,16 @@ type App struct {
 	activitySink       func(ActivityRecord)
 	runtimeDirty       bool
 	runtimeDirtyReason string
+}
+
+type AlsoSnapshot struct {
+	Question   string
+	Active     bool
+	Config     Config
+	Messages   []Message
+	Activity   []ActivityRecord
+	Runtime    map[string]any
+	CapturedAt time.Time
 }
 
 type Message struct {
@@ -182,6 +191,85 @@ func (a *App) SubmitWithActivity(ctx context.Context, input string, sink func(Ac
 	return reply
 }
 
+func (a *App) RunAlsoObserver(ctx context.Context, question string) Reply {
+	question = strings.TrimSpace(question)
+	if question == "" {
+		return a.reply("Usage: /also <question>", "/also", "also")
+	}
+	snapshot := a.alsoSnapshot(question)
+	var records []ActivityRecord
+	record := ActivityRecord{
+		Time:   time.Now().UTC(),
+		Kind:   "also",
+		Name:   "/also",
+		Status: "observer start",
+		Detail: question,
+	}
+	records = append(records, record)
+	a.appendActivity(record)
+	answer, err := a.invokeAlsoObserver(ctx, snapshot)
+	if err != nil {
+		record = ActivityRecord{
+			Time:   time.Now().UTC(),
+			Kind:   "also",
+			Name:   "/also",
+			Status: "observer error",
+			Detail: err.Error(),
+		}
+		records = append(records, record)
+		a.appendActivity(record)
+		a.logError("also observer failed", "error", err)
+		reply := a.reply("Also observer error: "+err.Error(), "/also", "also", map[string]any{"question": question, "activity": snapshot.Activity})
+		if !snapshot.Active {
+			reply.Activity = records
+		}
+		return reply
+	}
+	record = ActivityRecord{
+		Time:   time.Now().UTC(),
+		Kind:   "also",
+		Name:   "/also",
+		Status: "observer done",
+		Detail: truncate(answer, 220),
+	}
+	records = append(records, record)
+	a.appendActivity(record)
+	a.logInfo("also observer response", "chars", len(answer))
+	reply := a.reply(answer, "/also", "also", map[string]any{
+		"question": question,
+		"active":   snapshot.Active,
+		"activity": snapshot.Activity,
+	})
+	if !snapshot.Active {
+		reply.Activity = records
+	}
+	return reply
+}
+
+func (a *App) alsoSnapshot(question string) AlsoSnapshot {
+	a.mu.Lock()
+	config := a.config
+	active := a.activeCancel != nil
+	messages := append([]Message{}, a.history...)
+	activity := append([]ActivityRecord{}, a.activity...)
+	a.mu.Unlock()
+	if len(messages) > 12 {
+		messages = messages[len(messages)-12:]
+	}
+	if len(activity) > 40 {
+		activity = activity[len(activity)-40:]
+	}
+	return AlsoSnapshot{
+		Question:   question,
+		Active:     active,
+		Config:     config,
+		Messages:   messages,
+		Activity:   activity,
+		Runtime:    RuntimeStatus(config),
+		CapturedAt: time.Now().UTC(),
+	}
+}
+
 func shouldDisplaySlashReply(input string, reply Reply) bool {
 	name, _, _ := strings.Cut(strings.TrimSpace(input), " ")
 	switch name {
@@ -235,36 +323,7 @@ func (a *App) LastOutput() string {
 }
 
 func (a *App) StartAlsoObserver(note string) {
-	note = strings.TrimSpace(note)
-	a.mu.Lock()
-	active := a.activeCancel != nil
-	recent := append([]ActivityRecord{}, a.activity...)
-	if len(recent) > 12 {
-		recent = recent[len(recent)-12:]
-	}
-	a.mu.Unlock()
-
-	a.appendActivity(ActivityRecord{
-		Time:   time.Now().UTC(),
-		Kind:   "also",
-		Name:   "/also",
-		Status: "note captured",
-		Detail: note,
-	})
-	if !active {
-		return
-	}
-	go func(snapshot []ActivityRecord) {
-		time.Sleep(250 * time.Millisecond)
-		a.appendActivity(ActivityRecord{
-			Time:   time.Now().UTC(),
-			Kind:   "also",
-			Name:   "background observer",
-			Status: "watching active run",
-			Detail: fmt.Sprintf("note=%q recent_activity=%d", note, len(snapshot)),
-		})
-		a.logInfo("also observer", "note", note, "recent_activity", len(snapshot))
-	}(recent)
+	_ = a.RunAlsoObserver(context.Background(), note)
 }
 
 func (a *App) Plan() string {

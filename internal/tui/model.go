@@ -64,6 +64,7 @@ type Model struct {
 }
 
 type replyMsg app.Reply
+type alsoReplyMsg app.Reply
 type liveActivityMsg struct {
 	Record app.ActivityRecord
 	Ch     <-chan app.ActivityRecord
@@ -130,23 +131,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case replyMsg:
 		reply := app.Reply(msg)
 		m.busy = false
-		m.messages = reply.History
-		m.status = reply.Message
-		for _, record := range reply.Activity {
-			m.events = append(m.events, activityEvent{
-				Time:    record.Time,
-				Command: record.Name,
-				Status:  record.Status,
-				Detail:  record.Detail,
-			})
-		}
-		m.events = append(m.events, activityEvent{
-			Time:    time.Now(),
-			Command: reply.Command,
-			Panel:   reply.OpenPanel,
-			Status:  compactStatus(reply.Message),
-			Detail:  reply.Message,
-		})
+		m.applyReply(reply)
 		if text, ok := reply.Data["copy"].(string); ok {
 			if err := clipboard.WriteAll(text); err != nil {
 				m.status = "Copy failed: " + err.Error()
@@ -156,6 +141,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if reply.OpenPanel != "" {
 			m.openModal(reply.OpenPanel, reply)
 		}
+		return m, nil
+	case alsoReplyMsg:
+		reply := app.Reply(msg)
+		m.applyReply(reply)
+		m.refreshContent(reply)
+		m.openModal("also", reply)
 		return m, nil
 	case liveActivityMsg:
 		m.events = append(m.events, activityEventFromRecord(msg.Record))
@@ -489,6 +480,9 @@ func (m *Model) refreshContent(reply app.Reply) {
 }
 
 func (m *Model) submit(input string) tea.Cmd {
+	if question, ok := alsoQuestion(input); ok {
+		return m.submitAlso(question)
+	}
 	m.busy = true
 	ch := make(chan app.ActivityRecord, 64)
 	m.events = append(m.events, activityEvent{
@@ -507,6 +501,48 @@ func (m *Model) submit(input string) tea.Cmd {
 		close(ch)
 		return replyMsg(reply)
 	})
+}
+
+func (m *Model) submitAlso(question string) tea.Cmd {
+	m.events = append(m.events, activityEvent{
+		Time:    time.Now(),
+		Command: "/also",
+		Status:  "observer submitted",
+		Detail:  question,
+	})
+	m.status = "Also observer working..."
+	m.refreshContent(app.Reply{})
+	return func() tea.Msg {
+		return alsoReplyMsg(m.app.RunAlsoObserver(context.Background(), question))
+	}
+}
+
+func (m *Model) applyReply(reply app.Reply) {
+	if reply.Command != "/also" || len(reply.History) > 0 {
+		m.messages = reply.History
+	}
+	m.status = reply.Message
+	for _, record := range reply.Activity {
+		m.events = append(m.events, activityEventFromRecord(record))
+	}
+	m.events = append(m.events, activityEvent{
+		Time:    time.Now(),
+		Command: reply.Command,
+		Panel:   reply.OpenPanel,
+		Status:  compactStatus(reply.Message),
+		Detail:  reply.Message,
+	})
+}
+
+func alsoQuestion(input string) (string, bool) {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "/also" {
+		return "", true
+	}
+	if strings.HasPrefix(trimmed, "/also ") {
+		return strings.TrimSpace(strings.TrimPrefix(trimmed, "/also")), true
+	}
+	return "", false
 }
 
 func waitActivity(ch <-chan app.ActivityRecord) tea.Cmd {

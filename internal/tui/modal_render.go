@@ -113,6 +113,8 @@ func quoteCompact(text string, limit int) string {
 
 func renderModal(panel string, reply app.Reply, width int) string {
 	switch panel {
+	case "also":
+		return renderAlsoModal(reply, width)
 	case "help":
 		return renderHelpModal(reply, width)
 	case "files":
@@ -135,6 +137,26 @@ func renderModal(panel string, reply app.Reply, width int) string {
 
 func renderHelpModal(reply app.Reply, width int) string {
 	return renderMarkdown(reply.Message, width)
+}
+
+func renderAlsoModal(reply app.Reply, width int) string {
+	var b strings.Builder
+	b.WriteString("# Also\n\n")
+	if question, ok := reply.Data["question"].(string); ok && question != "" {
+		fmt.Fprintf(&b, "**Question:** %s\n\n", question)
+	}
+	if active, ok := reply.Data["active"].(bool); ok {
+		fmt.Fprintf(&b, "**Main run active when captured:** `%t`\n\n", active)
+	}
+	b.WriteString(reply.Message)
+	if activity, ok := reply.Data["activity"].([]app.ActivityRecord); ok && len(activity) > 0 {
+		b.WriteString("\n\n## Snapshot Activity\n\n")
+		start := max(0, len(activity)-8)
+		for _, record := range activity[start:] {
+			fmt.Fprintf(&b, "- `%s` `%s` %s - %s\n", record.Time.Format("15:04:05"), record.Name, record.Status, quoteCompact(record.Detail, 120))
+		}
+	}
+	return renderMarkdown(b.String(), width)
 }
 
 func renderFilesModal(reply app.Reply, width int) string {

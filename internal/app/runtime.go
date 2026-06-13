@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -46,6 +47,72 @@ func (a *App) runAgent(ctx context.Context, skillHints []string) Reply {
 	}
 	a.logInfo("agent response", "chars", len(lcContentText(result.Output.Content)))
 	return a.reply(lcContentText(result.Output.Content), "", "")
+}
+
+func (a *App) invokeAlsoObserver(ctx context.Context, snapshot AlsoSnapshot) (string, error) {
+	model, err := modelFromConfig(snapshot.Config)
+	if err != nil {
+		return "", err
+	}
+	system := strings.Join([]string{
+		"You are NullBot's side-channel observer agent.",
+		"Answer the user's /also question using only the provided snapshot of the active run, recent visible messages, runtime status, and activity log.",
+		"Do not steer, modify, cancel, or instruct the main agent. Do not ask the user to run slash commands.",
+		"If the question is unrelated to the active run, answer it normally from the available snapshot and clearly say when information is not available.",
+		"Be concise and practical.",
+	}, "\n")
+	messages := []lc.BaseMessage{
+		lc.System(system),
+		lc.Human(formatAlsoSnapshot(snapshot)),
+	}
+	msg, err := model.Call(ctx, messages, nil)
+	if err != nil {
+		return "", err
+	}
+	return lcContentText(msg.Content), nil
+}
+
+func formatAlsoSnapshot(snapshot AlsoSnapshot) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Question: %s\n", snapshot.Question)
+	fmt.Fprintf(&b, "Captured: %s\n", snapshot.CapturedAt.Format(time.RFC3339))
+	fmt.Fprintf(&b, "Main agent active: %t\n", snapshot.Active)
+	fmt.Fprintf(&b, "Provider/model: %v / %v\n", snapshot.Runtime["provider"], snapshot.Runtime["model"])
+	if root, err := workspaceRoot(snapshot.Config); err == nil {
+		fmt.Fprintf(&b, "Workspace: %s\n", root)
+	}
+	if len(snapshot.Config.EnabledMCPServers) > 0 {
+		b.WriteString("\nEnabled/configured MCP servers:\n")
+		names := make([]string, 0, len(snapshot.Config.EnabledMCPServers))
+		for name := range snapshot.Config.EnabledMCPServers {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			server := snapshot.Config.EnabledMCPServers[name]
+			state := "disabled"
+			if server.Enabled {
+				state = "enabled"
+			}
+			fmt.Fprintf(&b, "- %s: %s (%s)\n", name, server.Transport, state)
+		}
+	}
+	if len(snapshot.Messages) > 0 {
+		b.WriteString("\nRecent visible messages:\n")
+		for _, msg := range snapshot.Messages {
+			if msg.VisibleOnly {
+				continue
+			}
+			fmt.Fprintf(&b, "- %s: %s\n", msg.Role, truncate(strings.ReplaceAll(msg.Content, "\n", " "), 500))
+		}
+	}
+	if len(snapshot.Activity) > 0 {
+		b.WriteString("\nRecent activity:\n")
+		for _, record := range snapshot.Activity {
+			fmt.Fprintf(&b, "- %s %s %s: %s\n", record.Time.Format("15:04:05"), record.Name, record.Status, truncate(record.Detail, 500))
+		}
+	}
+	return b.String()
 }
 
 func (a *App) buildRuntime(ctx context.Context, skillHints []string) (*runtimeBundle, error) {

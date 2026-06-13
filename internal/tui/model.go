@@ -84,6 +84,7 @@ type Model struct {
 	lastInputAt       time.Time
 	pasteProtectUntil time.Time
 	pasteNotice       string
+	pendingPaste      string
 }
 
 type replyMsg app.Reply
@@ -194,7 +195,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Paste {
 			if m.mode == ModeChat {
 				if len(msg.Runes) > 0 {
-					m.insertPastedText(string(msg.Runes))
+					m.capturePaste(string(msg.Runes))
 				} else if msg.String() == "enter" {
 					m.input.InsertString("\n")
 				}
@@ -271,6 +272,9 @@ func bannerTooWide(lines []string, width int) bool {
 func (m Model) inputView() string {
 	if !m.selectAll {
 		base := m.input.View()
+		if m.pendingPaste != "" {
+			base += "\n" + m.pasteChip()
+		}
 		if m.pasteNotice != "" {
 			base += "\n" + mutedStyle.Render(m.pasteNotice)
 		}
@@ -412,6 +416,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "ctrl+z":
 		m.input.Reset()
+		m.pendingPaste = ""
+		m.pasteNotice = ""
 		m.selectAll = false
 		m.closeCompletion()
 		m.updateInlineSuggestion()
@@ -433,18 +439,21 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.status = "Activity panel cleared."
 		return m, nil
 	case "enter":
-		if m.pasteProtected() {
-			m.input.InsertString("\n")
-			m.pasteNotice = "[Pasted text detected. Press Enter again to submit.]"
-			m.pasteProtectUntil = time.Now().Add(250 * time.Millisecond)
+		if m.captureInputAsPasteIfNeeded() {
 			m.updateInlineSuggestion()
-			return m, clearPasteNoticeAfter(300 * time.Millisecond)
+			return m, nil
 		}
-		if m.input.Value() == "" {
+		if m.input.Value() == "" && m.pendingPaste == "" {
 			return m, nil
 		}
 		m.closeCompletion()
 		value := m.input.Value()
+		if m.pendingPaste != "" {
+			value = combineInputAndPaste(value, m.pendingPaste)
+			m.pendingPaste = ""
+			m.pasteNotice = ""
+			m.pasteProtectUntil = time.Time{}
+		}
 		if strings.TrimSpace(value) == "/paste" {
 			m.input.Reset()
 			m.selectAll = false
@@ -505,9 +514,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	var cmd tea.Cmd
-	before := m.input.Value()
 	if m.selectAll && isReplacingKey(msg) {
 		m.input.Reset()
+		m.pendingPaste = ""
 		m.selectAll = false
 	}
 	if isReplacingKey(msg) {
@@ -517,9 +526,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	m.input, cmd = m.input.Update(msg)
 	m.normalizeInputAttachments()
-	pasteCmd := m.observePossiblePaste(msg, before)
 	m.updateInlineSuggestion()
-	return m, tea.Batch(cmd, pasteCmd)
+	return m, cmd
 }
 
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {

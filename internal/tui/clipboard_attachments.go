@@ -28,7 +28,7 @@ func (m *Model) pasteClipboard() (bool, error) {
 		}
 	}
 	if text, err := clipboard.ReadAll(); err == nil && strings.TrimSpace(text) != "" {
-		m.insertPastedText(text)
+		m.capturePaste(text)
 		return true, nil
 	}
 	if runtime.GOOS == "windows" {
@@ -73,6 +73,27 @@ func (m *Model) insertPastedText(text string) {
 	m.normalizeInputAttachments()
 }
 
+func (m *Model) capturePaste(text string) {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.TrimRight(text, "\x00")
+	if text == "" {
+		return
+	}
+	if normalized, count := normalizeAttachmentText(text); count > 0 {
+		m.insertPastedText(normalized)
+		m.status = fmt.Sprintf("Attached %d file(s).", count)
+		return
+	}
+	if m.selectAll {
+		m.input.Reset()
+		m.pendingPaste = ""
+		m.selectAll = false
+	}
+	m.pendingPaste = appendPendingPaste(m.pendingPaste, text)
+	m.pasteNotice = m.pasteSummary()
+	m.status = "Paste captured. Press Enter to send or keep typing."
+}
+
 func attachmentTokensFromText(text string) []string {
 	var tokens []string
 	for _, path := range attachmentPathsFromText(text) {
@@ -102,6 +123,56 @@ func (m *Model) normalizeInputAttachments() {
 	m.input.SetValue(normalized)
 	m.input.CursorEnd()
 	m.status = fmt.Sprintf("Attached %d file(s).", count)
+}
+
+func (m *Model) captureInputAsPasteIfNeeded() bool {
+	value := m.input.Value()
+	if m.pendingPaste != "" || !looksLikePastedBlock(value) {
+		return false
+	}
+	m.input.Reset()
+	m.capturePaste(value)
+	return true
+}
+
+func looksLikePastedBlock(value string) bool {
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	return strings.Count(value, "\n") >= 1 && len(value) >= 24
+}
+
+func appendPendingPaste(existing, incoming string) string {
+	if strings.TrimSpace(existing) == "" {
+		return incoming
+	}
+	if strings.TrimSpace(incoming) == "" {
+		return existing
+	}
+	return strings.TrimRight(existing, "\n") + "\n" + incoming
+}
+
+func combineInputAndPaste(input, paste string) string {
+	input = strings.TrimSpace(input)
+	paste = strings.TrimSpace(paste)
+	if input == "" {
+		return paste
+	}
+	if paste == "" {
+		return input
+	}
+	return input + "\n\n" + paste
+}
+
+func (m Model) pasteSummary() string {
+	lines := strings.Count(strings.TrimRight(m.pendingPaste, "\n"), "\n") + 1
+	bytes := len(m.pendingPaste)
+	if lines > 1 {
+		return fmt.Sprintf("[Pasted +%d lines, %d bytes. Press Enter to send.]", lines, bytes)
+	}
+	return fmt.Sprintf("[Pasted text, %d bytes. Press Enter to send.]", bytes)
+}
+
+func (m Model) pasteChip() string {
+	return selectedInputStyle.Render(m.pasteSummary()) + " " + mutedStyle.Render("Ctrl+Z clears")
 }
 
 func attachmentPathsFromText(text string) []string {

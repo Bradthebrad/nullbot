@@ -33,6 +33,7 @@ var commands = []Command{
 	{Name: "/files", Usage: "/files [workspace <path>|open|view|recent]", Description: "View and configure workspace files."},
 	{Name: "/clear", Usage: "/clear", Description: "Clear visible chat history."},
 	{Name: "/copy", Usage: "/copy", Description: "Copy the last assistant output to the clipboard."},
+	{Name: "/paste", Usage: "/paste", Description: "Attach images or files from the system clipboard when terminal Ctrl+V cannot."},
 	{Name: "/history", Usage: "/history", Description: "Open recent session history."},
 	{Name: "/logs", Usage: "/logs", Description: "Open runtime logs."},
 	{Name: "/reset", Usage: "/reset", Description: "Reset current session state."},
@@ -175,6 +176,7 @@ func formatHelp() string {
 	}
 	b.WriteString("\n## Notes\n\n")
 	b.WriteString("- Use `/files workspace <path>` to set the current workspace.\n")
+	b.WriteString("- Use `/paste` to attach clipboard images/files when your terminal only supports text paste.\n")
 	b.WriteString("- Use `/market` to install optional MCP tool packs.\n")
 	b.WriteString("- Use `/also <question>` during a run to ask a side-channel observer without steering the active model call.\n")
 	b.WriteString("- Use `/tasks` to inspect the primary agent, side observers, and spawned subagents.\n")

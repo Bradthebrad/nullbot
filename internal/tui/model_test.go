@@ -294,17 +294,38 @@ func TestNormalizeInputAttachmentsConvertsDroppedPath(t *testing.T) {
 	}
 }
 
-func TestPasteProtectedEnterInsertsNewline(t *testing.T) {
+func TestPasteProtectedEnterCapturesBlock(t *testing.T) {
 	model := New(app.New(app.DefaultConfig()))
-	model.input.SetValue("first line")
+	model.input.SetValue("first line\nsecond line that is long enough")
 	model.pasteProtectUntil = time.Now().Add(time.Second)
 	next, _ := model.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
 	updated := next.(Model)
-	if got := updated.input.Value(); got != "first line\n" {
-		t.Fatalf("input = %q", got)
+	if updated.input.Value() != "" || !strings.Contains(updated.pendingPaste, "second line") {
+		t.Fatalf("input=%q pending=%q", updated.input.Value(), updated.pendingPaste)
 	}
 	if len(updated.messages) != 0 {
 		t.Fatalf("enter submitted during paste guard: %#v", updated.messages)
+	}
+}
+
+func TestCapturePasteShowsChipWithoutInputText(t *testing.T) {
+	model := New(app.New(app.DefaultConfig()))
+	model.capturePaste("alpha\nbeta\ngamma")
+	if model.input.Value() != "" {
+		t.Fatalf("paste rendered in input: %q", model.input.Value())
+	}
+	if !strings.Contains(model.pasteChip(), "Pasted +3 lines") {
+		t.Fatalf("paste chip = %q", model.pasteChip())
+	}
+}
+
+func TestEnterConvertsPastedBlockBeforeSubmit(t *testing.T) {
+	model := New(app.New(app.DefaultConfig()))
+	model.input.SetValue("alpha\nbeta\ngamma delta epsilon zeta")
+	next, _ := model.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	updated := next.(Model)
+	if updated.pendingPaste == "" || updated.input.Value() != "" {
+		t.Fatalf("pending=%q input=%q", updated.pendingPaste, updated.input.Value())
 	}
 }
 

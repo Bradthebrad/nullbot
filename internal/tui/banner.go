@@ -154,7 +154,9 @@ func renderRetroTitle(text string, glyphs map[rune][bannerHeight]string) string 
 		for x := 0; x < width; x++ {
 			switch {
 			case fill[y][x]:
-				if y >= bannerHeight-2 {
+				if y <= 1 {
+					b.WriteString(bannerTopStyle.Render("█"))
+				} else if y >= bannerHeight-2 {
 					b.WriteString(bannerFaceLowStyle.Render("█"))
 				} else {
 					b.WriteString(bannerFaceHighStyle.Render("█"))

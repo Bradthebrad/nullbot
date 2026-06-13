@@ -402,6 +402,11 @@ func TestThemesModalRendersAndAppliesTheme(t *testing.T) {
 	if len(themes) != 20 {
 		t.Fatalf("theme count = %d", len(themes))
 	}
+	for _, theme := range themes {
+		if theme.BannerTop == "" {
+			t.Fatalf("theme %s missing banner top color", theme.ID)
+		}
+	}
 	config := app.DefaultConfig()
 	config.AppDir = t.TempDir()
 	model := New(app.New(config))
@@ -410,7 +415,7 @@ func TestThemesModalRendersAndAppliesTheme(t *testing.T) {
 	model.resize()
 	model.openThemesModal()
 	rendered := stripANSI(model.renderThemesModal())
-	if !strings.Contains(rendered, "Steel Signal") || !strings.Contains(rendered, "Neon Noir") {
+	if !strings.Contains(rendered, "Classic NullBot") || !strings.Contains(rendered, "Neon Noir") {
 		t.Fatalf("themes missing:\n%s", rendered)
 	}
 	model.themeIndex = themeIndexByID("neon")

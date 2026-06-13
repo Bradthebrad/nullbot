@@ -212,6 +212,42 @@ func TestPathCompletionForWorkspaceListCommand(t *testing.T) {
 	}
 }
 
+func TestPathCompletionPickerForMultipleDirectories(t *testing.T) {
+	parent := t.TempDir()
+	for _, name := range []string{"Users", "Windows"} {
+		if err := os.Mkdir(filepath.Join(parent, name), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	model := New(app.New(app.DefaultConfig()))
+	model.input.SetValue("/files workspace " + parent + string(os.PathSeparator))
+
+	model.completeInput()
+	if !model.completionOpen {
+		t.Fatal("completion picker did not open")
+	}
+	model.completionIndex = 0
+	model.applyCompletion()
+	if got := model.input.Value(); !strings.HasPrefix(got, "/files workspace "+parent) || !strings.HasSuffix(got, string(os.PathSeparator)) {
+		t.Fatalf("selected completion = %q", got)
+	}
+}
+
+func TestInlineHistorySuggestionCompletesFrequentCommand(t *testing.T) {
+	model := New(app.New(app.DefaultConfig()))
+	model.rememberInput("/files workspace C:\\Users\\brada")
+	model.rememberInput("/files workspace C:\\Users\\brada")
+	model.input.SetValue("/files")
+	model.updateInlineSuggestion()
+	if got := model.inlineSuggestion; got != "/files workspace C:\\Users\\brada" {
+		t.Fatalf("suggestion = %q", got)
+	}
+	model.completeInput()
+	if got := model.input.Value(); got != "/files workspace C:\\Users\\brada" {
+		t.Fatalf("completed = %q", got)
+	}
+}
+
 func stripANSI(text string) string {
 	return regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(text, "")
 }

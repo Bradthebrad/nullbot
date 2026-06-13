@@ -33,6 +33,7 @@ func (m *Model) historyPrev() {
 		m.historyAt--
 	}
 	m.setInputValue(m.history[m.historyAt])
+	m.updateInlineSuggestion()
 }
 
 func (m *Model) historyNext() {
@@ -42,11 +43,13 @@ func (m *Model) historyNext() {
 	if m.historyAt < len(m.history)-1 {
 		m.historyAt++
 		m.setInputValue(m.history[m.historyAt])
+		m.updateInlineSuggestion()
 		return
 	}
 	m.historyAt = len(m.history)
 	m.setInputValue(m.draft)
 	m.draft = ""
+	m.updateInlineSuggestion()
 }
 
 func (m *Model) setInputValue(value string) {
@@ -68,6 +71,7 @@ func (m *Model) completePathInput() bool {
 		return false
 	}
 	m.setInputValue(prefix + completed)
+	m.updateInlineSuggestion()
 	return true
 }
 

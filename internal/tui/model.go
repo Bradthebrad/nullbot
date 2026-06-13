@@ -71,6 +71,12 @@ type Model struct {
 	plans       []app.PlanSummary
 	planIndex   int
 	planDetails bool
+
+	completionOpen    bool
+	completionPrefix  string
+	completionOptions []completionOption
+	completionIndex   int
+	inlineSuggestion  string
 }
 
 type replyMsg app.Reply
@@ -195,6 +201,9 @@ func (m Model) View() string {
 	status := m.statusView()
 	input := inputBoxStyle.Width(max(1, m.width-2)).Render(m.inputView())
 	view := lipgloss.JoinVertical(lipgloss.Left, header, main, status, input)
+	if m.completionOpen && m.mode == ModeChat {
+		view = placeCompletion(m.width, m.height, view, m.completionView())
+	}
 	if m.mode == ModeModal || m.mode == ModePlanEdit {
 		return placeModal(m.width, m.height, view, m.modalView())
 	}
@@ -237,7 +246,11 @@ func bannerTooWide(lines []string, width int) bool {
 
 func (m Model) inputView() string {
 	if !m.selectAll {
-		return m.input.View()
+		base := m.input.View()
+		if m.inlineSuggestion != "" && m.input.Value() != "" && !m.completionOpen {
+			base += "\n" + mutedStyle.Render("→ "+m.inlineSuggestion)
+		}
+		return base
 	}
 	value := m.input.Value()
 	if value == "" {
@@ -326,6 +339,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
+	if m.completionOpen {
+		if next, cmd, handled := m.handleCompletionKey(msg); handled {
+			return next, cmd
+		}
+	}
+
 	switch msg.String() {
 	case "f1":
 		return m, m.submit("/help")
@@ -345,6 +364,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.selectAll = false
 			}
 			m.input.InsertString(text)
+			m.updateInlineSuggestion()
 		} else {
 			m.status = "Paste failed: " + err.Error()
 		}
@@ -364,6 +384,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+z":
 		m.input.Reset()
 		m.selectAll = false
+		m.closeCompletion()
+		m.updateInlineSuggestion()
 		m.status = "Input cleared."
 		return m, nil
 	case "ctrl+q":
@@ -385,6 +407,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.input.Value() == "" {
 			return m, nil
 		}
+		m.closeCompletion()
 		value := m.input.Value()
 		m.rememberInput(value)
 		m.input.Reset()
@@ -401,11 +424,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "up":
 		if m.input.Line() == 0 {
+			m.closeCompletion()
 			m.historyPrev()
 			return m, nil
 		}
 	case "down":
 		if m.input.Line() >= m.input.LineCount()-1 {
+			m.closeCompletion()
 			m.historyNext()
 			return m, nil
 		}
@@ -435,8 +460,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if isReplacingKey(msg) {
 		m.historyAt = len(m.history)
 		m.draft = ""
+		m.closeCompletion()
 	}
 	m.input, cmd = m.input.Update(msg)
+	m.updateInlineSuggestion()
 	return m, cmd
 }
 
@@ -630,17 +657,27 @@ func (m *Model) openActivityModal() {
 }
 
 func (m *Model) completeInput() {
-	if m.completePathInput() {
+	if m.completionOpen {
+		m.applyCompletion()
+		return
+	}
+	if m.openPathCompletionPicker() {
 		return
 	}
 	value := m.input.Value()
 	if value == "" {
 		return
 	}
+	if m.inlineSuggestion != "" && strings.HasPrefix(m.inlineSuggestion, value) && m.inlineSuggestion != value {
+		m.setInputValue(m.inlineSuggestion)
+		m.updateInlineSuggestion()
+		return
+	}
 	for _, candidate := range completions(m.app.State()) {
 		if strings.HasPrefix(candidate, value) && candidate != value {
 			m.input.SetValue(candidate)
 			m.input.SetCursor(len(candidate))
+			m.updateInlineSuggestion()
 			return
 		}
 	}

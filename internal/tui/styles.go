@@ -133,4 +133,11 @@ var (
 
 	mutedStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#92A0A6"))
+
+	completionStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#9DD9D2")).
+			Foreground(lipgloss.Color("#F4F7F5")).
+			Background(lipgloss.Color("#102A2A")).
+			Padding(0, 1)
 )

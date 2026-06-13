@@ -391,7 +391,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, m.submit("/pause")
-	case "ctrl+v":
+	case "ctrl+v", "alt+v":
 		if pasted, err := m.pasteClipboard(); err == nil && pasted {
 			m.updateInlineSuggestion()
 		} else {
@@ -829,7 +829,7 @@ func (m Model) statusTopLine() string {
 	runtime, _ := state.Data["runtime"].(map[string]any)
 	provider := fmt.Sprint(runtime["provider"])
 	model := fmt.Sprint(runtime["model"])
-	return fmt.Sprintf(" %s | %s | F1 /help | Ctrl+O activity | Ctrl+Q quit | Ctrl+J newline ", provider, model)
+	return fmt.Sprintf(" %s | %s | F1 /help | Alt+V paste | Ctrl+O activity | Ctrl+Q quit | Ctrl+J newline ", provider, model)
 }
 
 func (m Model) statusWorkLine() string {

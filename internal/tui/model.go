@@ -52,6 +52,7 @@ type Model struct {
 	modelOptions    []app.ModelOption
 	modelGroups     []app.ModelGroup
 	modelIndex      int
+	modelTarget     string
 
 	marketPackages []app.MarketPackage
 	marketIndex    int
@@ -61,6 +62,10 @@ type Model struct {
 	mcpPackages []app.MarketPackage
 	mcpIndex    int
 	mcpDetails  bool
+
+	tasks       []app.AgentTask
+	taskIndex   int
+	taskDetails bool
 }
 
 type replyMsg app.Reply
@@ -266,6 +271,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return next, cmd
 		}
 		if next, cmd, handled := m.handleMCPKey(msg); handled {
+			return next, cmd
+		}
+		if next, cmd, handled := m.handleTasksKey(msg); handled {
 			return next, cmd
 		}
 		switch msg.String() {
@@ -581,6 +589,10 @@ func (m *Model) openModal(panel string, reply app.Reply) {
 		m.openMCPModal(reply)
 		return
 	}
+	if panel == "tasks" {
+		m.openTasksModal(reply)
+		return
+	}
 	m.mode = ModeModal
 	m.panel = panel
 	m.input.Blur()
@@ -693,6 +705,9 @@ func (m Model) modalView() string {
 	}
 	if m.panel == "mcp" {
 		footer += " | up/down move | e enable | x disable | r remove | d details"
+	}
+	if m.panel == "tasks" {
+		footer += " | up/down move | enter details | c cancel | r refresh | d details"
 	}
 	if m.mode == ModePlanEdit {
 		title = modalTitleStyle.Render("EDIT PLAN")

@@ -27,10 +27,13 @@ func configFields(config app.Config) []configField {
 		{Label: "Tagline", Key: "tagline", Value: config.Tagline},
 		{Label: "Provider", Key: "provider", Value: config.Model.Provider},
 		{Label: "Model", Key: "model", Value: config.Model.Model},
+		{Label: "Subagent Provider", Key: "subagent_provider", Value: config.SubagentModel.Provider},
+		{Label: "Subagent Model", Key: "subagent_model", Value: config.SubagentModel.Model},
 		{Label: "Reasoning Effort", Key: "reasoning_effort", Value: config.Model.ReasoningEffort},
 		{Label: "Temperature", Key: "temperature", Value: fmt.Sprintf("%g", config.Model.Temperature)},
 		{Label: "Max Tokens", Key: "max_tokens", Value: strconv.Itoa(config.Model.MaxTokens)},
 		{Label: "Max Iterations", Key: "max_iterations", Value: strconv.Itoa(config.Agent.MaxIterations)},
+		{Label: "Max Subagents", Key: "max_subagents", Value: strconv.Itoa(config.Agent.MaxSubagents)},
 		{Label: "Use Responses", Key: "use_responses", Value: strconv.FormatBool(config.Agent.UseResponses)},
 		{Label: "Auto Compact", Key: "compact_enabled", Value: strconv.FormatBool(config.Compaction.Enabled)},
 		{Label: "Token Threshold", Key: "compact_tokens", Value: strconv.Itoa(config.Compaction.ApproxTokenLimit)},
@@ -162,10 +165,13 @@ func (m *Model) saveConfigFields() error {
 		config.Tagline = values["tagline"]
 		config.Model.Provider = values["provider"]
 		config.Model.Model = values["model"]
+		config.SubagentModel.Provider = values["subagent_provider"]
+		config.SubagentModel.Model = values["subagent_model"]
 		config.Model.ReasoningEffort = values["reasoning_effort"]
 		config.Model.Temperature = parseFloat(values["temperature"])
 		config.Model.MaxTokens = parseInt(values["max_tokens"])
 		config.Agent.MaxIterations = parseIntDefault(values["max_iterations"], config.Agent.MaxIterations)
+		config.Agent.MaxSubagents = parseIntDefault(values["max_subagents"], config.Agent.MaxSubagents)
 		config.Agent.UseResponses = parseBool(values["use_responses"])
 		config.Compaction.Enabled = parseBool(values["compact_enabled"])
 		config.Compaction.ApproxTokenLimit = parseIntDefault(values["compact_tokens"], config.Compaction.ApproxTokenLimit)

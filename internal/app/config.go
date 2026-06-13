@@ -18,6 +18,7 @@ type Config struct {
 	Tagline             string              `json:"tagline"`
 	AppDir              string              `json:"app_dir"`
 	Model               ModelConfig         `json:"model"`
+	SubagentModel       ModelConfig         `json:"subagent_model,omitempty"`
 	Agent               AgentConfig         `json:"agent"`
 	Compaction          CompactionConfig    `json:"compaction"`
 	Editor              EditorConfig        `json:"editor"`
@@ -40,6 +41,7 @@ type ModelConfig struct {
 
 type AgentConfig struct {
 	MaxIterations int  `json:"max_iterations"`
+	MaxSubagents  int  `json:"max_subagents"`
 	UseResponses  bool `json:"use_responses"`
 }
 
@@ -82,6 +84,7 @@ func DefaultConfig() Config {
 		},
 		Agent: AgentConfig{
 			MaxIterations: defaultMaxIterations,
+			MaxSubagents:  3,
 			UseResponses:  true,
 		},
 		Compaction: CompactionConfig{
@@ -193,6 +196,15 @@ func EnsureAppDir(config Config) error {
 func normalizeConfig(config Config) Config {
 	if config.Agent.MaxIterations <= 0 || config.Agent.MaxIterations == 8 {
 		config.Agent.MaxIterations = defaultMaxIterations
+	}
+	if config.Agent.MaxSubagents <= 0 {
+		config.Agent.MaxSubagents = 3
+	}
+	if strings.TrimSpace(config.SubagentModel.Provider) == "" {
+		config.SubagentModel = config.Model
+	}
+	if strings.TrimSpace(config.SubagentModel.Model) == "" {
+		config.SubagentModel.Model = config.Model.Model
 	}
 	if strings.TrimSpace(config.BrandPrefix) == "" {
 		config.BrandPrefix = DefaultPrefix

@@ -127,12 +127,28 @@ func renderModal(panel string, reply app.Reply, width int) string {
 		return renderMarketModal(reply, width)
 	case "mcp":
 		return renderMCPModal(reply, width)
+	case "tasks":
+		if tasks, ok := reply.Data["tasks"].([]app.AgentTask); ok {
+			return renderMarkdown(taskSummaryMarkdown(tasks), width)
+		}
 	}
 	if reply.Data != nil {
 		data, _ := json.MarshalIndent(reply.Data, "", "  ")
 		return renderMarkdown(reply.Message+"\n\n```json\n"+string(data)+"\n```", width)
 	}
 	return renderMarkdown(reply.Message, width)
+}
+
+func taskSummaryMarkdown(tasks []app.AgentTask) string {
+	if len(tasks) == 0 {
+		return "No tasks recorded yet."
+	}
+	var b strings.Builder
+	b.WriteString("# Tasks\n\n")
+	for _, task := range tasks {
+		fmt.Fprintf(&b, "- `%s` [%s/%s] %s - %s\n", task.ID, task.Role, task.Status, task.Name, quoteCompact(task.Current, 120))
+	}
+	return b.String()
 }
 
 func renderHelpModal(reply app.Reply, width int) string {

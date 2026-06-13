@@ -13,7 +13,11 @@ import (
 )
 
 func BuiltinTools(config Config, state *App) []agent.Tool {
-	return []agent.Tool{
+	return BuiltinToolsFor(config, state, true)
+}
+
+func BuiltinToolsFor(config Config, state *App, includeSpawner bool) []agent.Tool {
+	tools := []agent.Tool{
 		configDirListTool(config),
 		configDirReadTool(config),
 		skillsListTool(config),
@@ -35,6 +39,10 @@ func BuiltinTools(config Config, state *App) []agent.Tool {
 		marketListTool(config),
 		mcpListTool(config),
 	}
+	if includeSpawner {
+		tools = append(tools, spawnSubagentTool(state))
+	}
+	return tools
 }
 
 func workspaceInfoTool(config Config) agent.Tool {
@@ -490,6 +498,37 @@ func mcpListTool(config Config) agent.Tool {
 				fmt.Fprintf(&b, "- %s (%s): %s\n", name, server.Transport, server.Command)
 			}
 			return strings.TrimSpace(b.String()), nil
+		},
+	}
+}
+
+func spawnSubagentTool(state *App) agent.Tool {
+	return agent.ToolFunc{
+		Name:        "spawn_subagent",
+		Description: "Spawn a named subagent for a focused task. The subagent gets the same built-in non-spawn tools and enabled MCP tools as the primary agent. It runs synchronously and returns its result.",
+		Schema: agent.ToolSchema(map[string]any{
+			"name": agent.StringProperty("Short human-readable subagent name, such as PDF Inspector or API Scout."),
+			"task": agent.StringProperty("Concrete task for the subagent to perform. Include relevant context and expected output."),
+		}, "name", "task"),
+		Func: func(ctx context.Context, args map[string]any) (string, error) {
+			name := strings.TrimSpace(stringArg(args, "name"))
+			task := strings.TrimSpace(stringArg(args, "task"))
+			if name == "" {
+				name = "Subagent"
+			}
+			if task == "" {
+				return "", fmt.Errorf("task is required")
+			}
+			state.mu.Lock()
+			maxSubagents := state.config.Agent.MaxSubagents
+			state.mu.Unlock()
+			if maxSubagents <= 0 {
+				maxSubagents = 1
+			}
+			if state.runningSubagentCount() >= maxSubagents {
+				return "", fmt.Errorf("subagent limit reached (%d running)", maxSubagents)
+			}
+			return state.runSubagent(ctx, name, task)
 		},
 	}
 }

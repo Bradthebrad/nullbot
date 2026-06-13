@@ -18,9 +18,13 @@ type App struct {
 	plan               string
 	paused             bool
 	activeCancel       context.CancelFunc
+	activeTaskID       string
 	activitySink       func(ActivityRecord)
 	runtimeDirty       bool
 	runtimeDirtyReason string
+	tasks              map[string]*AgentTask
+	taskCancels        map[string]context.CancelFunc
+	taskSeq            int
 }
 
 type AlsoSnapshot struct {
@@ -62,7 +66,13 @@ type Reply struct {
 func New(config Config) *App {
 	logger := NewLogger(config)
 	logger.Info("app initialized", "app_dir", config.AppDir, "provider", config.Model.Provider, "model", config.Model.Model)
-	return &App{config: config, logger: logger, sessionID: newSessionID()}
+	return &App{
+		config:      config,
+		logger:      logger,
+		sessionID:   newSessionID(),
+		tasks:       map[string]*AgentTask{},
+		taskCancels: map[string]context.CancelFunc{},
+	}
 }
 
 func (a *App) State() Reply {
@@ -73,7 +83,7 @@ func (a *App) State() Reply {
 		Config:      a.config,
 		History:     append([]Message{}, a.history...),
 		Suggestions: commandNames(),
-		Data:        map[string]any{"runtime": RuntimeStatus(a.config)},
+		Data:        map[string]any{"runtime": RuntimeStatus(a.config), "tasks": a.taskSnapshotsLocked()},
 	}
 }
 
@@ -197,6 +207,9 @@ func (a *App) RunAlsoObserver(ctx context.Context, question string) Reply {
 		return a.reply("Usage: /also <question>", "/also", "also")
 	}
 	snapshot := a.alsoSnapshot(question)
+	observeCtx, cancel := context.WithCancel(ctx)
+	taskID := a.startTask("Also Observer", "also", question, cancel)
+	defer cancel()
 	var records []ActivityRecord
 	record := ActivityRecord{
 		Time:   time.Now().UTC(),
@@ -207,7 +220,8 @@ func (a *App) RunAlsoObserver(ctx context.Context, question string) Reply {
 	}
 	records = append(records, record)
 	a.appendActivity(record)
-	answer, err := a.invokeAlsoObserver(ctx, snapshot)
+	a.recordTaskActivity(taskID, record)
+	answer, err := a.invokeAlsoObserver(observeCtx, snapshot)
 	if err != nil {
 		record = ActivityRecord{
 			Time:   time.Now().UTC(),
@@ -218,6 +232,8 @@ func (a *App) RunAlsoObserver(ctx context.Context, question string) Reply {
 		}
 		records = append(records, record)
 		a.appendActivity(record)
+		a.recordTaskActivity(taskID, record)
+		a.finishTask(taskID, "", err)
 		a.logError("also observer failed", "error", err)
 		reply := a.reply("Also observer error: "+err.Error(), "/also", "also", map[string]any{"question": question, "activity": snapshot.Activity})
 		if !snapshot.Active {
@@ -234,6 +250,8 @@ func (a *App) RunAlsoObserver(ctx context.Context, question string) Reply {
 	}
 	records = append(records, record)
 	a.appendActivity(record)
+	a.recordTaskActivity(taskID, record)
+	a.finishTask(taskID, answer, nil)
 	a.logInfo("also observer response", "chars", len(answer))
 	reply := a.reply(answer, "/also", "also", map[string]any{
 		"question": question,
@@ -361,19 +379,26 @@ func (a *App) clearHistory() {
 	a.logInfo("visible history cleared")
 }
 
-func (a *App) beginWork(parent context.Context) context.Context {
+func (a *App) beginWork(parent context.Context) (context.Context, string) {
 	ctx, cancel := context.WithCancel(parent)
 	a.mu.Lock()
+	name := DisplayName(a.config)
 	a.paused = false
 	a.activeCancel = cancel
 	a.mu.Unlock()
-	return ctx
+	taskID := a.startTask(name, "primary", "Primary agent turn", cancel)
+	a.mu.Lock()
+	a.activeTaskID = taskID
+	a.mu.Unlock()
+	return ctx, taskID
 }
 
-func (a *App) endWork() {
+func (a *App) endWork(taskID string, result string, err error) {
+	a.finishTask(taskID, result, err)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.activeCancel = nil
+	a.activeTaskID = ""
 }
 
 func (a *App) logInfo(message string, fields ...any) {

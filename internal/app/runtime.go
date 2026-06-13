@@ -26,11 +26,14 @@ type runtimeBundle struct {
 const mcpDiscoveryTimeout = 5 * time.Second
 
 func (a *App) runAgent(ctx context.Context, skillHints []string) Reply {
-	workCtx := a.beginWork(ctx)
-	defer a.endWork()
+	workCtx, taskID := a.beginWork(ctx)
+	var final string
+	var finalErr error
+	defer func() { a.endWork(taskID, final, finalErr) }()
 
 	bundle, err := a.buildRuntime(workCtx, skillHints)
 	if err != nil {
+		finalErr = err
 		a.logError("runtime build failed", "error", err)
 		return a.reply(err.Error(), "", "config")
 	}
@@ -38,6 +41,7 @@ func (a *App) runAgent(ctx context.Context, skillHints []string) Reply {
 
 	result, err := bundle.agent.InvokeMessages(workCtx, a.langChainHistory())
 	if err != nil {
+		finalErr = err
 		if workCtx.Err() != nil {
 			a.logInfo("agent paused")
 			return a.reply("Paused.", "", "")
@@ -45,8 +49,9 @@ func (a *App) runAgent(ctx context.Context, skillHints []string) Reply {
 		a.logError("agent execution failed", "error", err)
 		return a.reply("Agent error: "+err.Error(), "", "")
 	}
-	a.logInfo("agent response", "chars", len(lcContentText(result.Output.Content)))
-	return a.reply(lcContentText(result.Output.Content), "", "")
+	final = lcContentText(result.Output.Content)
+	a.logInfo("agent response", "chars", len(final))
+	return a.reply(final, "", "")
 }
 
 func (a *App) invokeAlsoObserver(ctx context.Context, snapshot AlsoSnapshot) (string, error) {
@@ -139,7 +144,7 @@ func (a *App) buildRuntime(ctx context.Context, skillHints []string) (*runtimeBu
 		return nil, err
 	}
 
-	tools := BuiltinTools(config, a)
+	tools := BuiltinToolsFor(config, a, true)
 	mcpTools, closers := a.loadMCPTools(ctx, config)
 	tools = append(tools, mcpTools...)
 	systemPrompt := baseSystemPrompt(config, skillHints, tools, skills)
@@ -157,56 +162,120 @@ func (a *App) buildRuntime(ctx context.Context, skillHints []string) (*runtimeBu
 	}, nil
 }
 
+func (a *App) runSubagent(ctx context.Context, name, task string) (string, error) {
+	subCtx, cancel := context.WithCancel(ctx)
+	taskID := a.startTask(name, "subagent", task, cancel)
+	defer cancel()
+
+	a.mu.Lock()
+	config := a.config
+	a.mu.Unlock()
+
+	model, err := subagentModelFromConfig(config)
+	if err != nil {
+		a.finishTask(taskID, "", err)
+		return "", err
+	}
+	skills, err := loadSkills(config)
+	if err != nil {
+		a.finishTask(taskID, "", err)
+		return "", err
+	}
+	tools := BuiltinToolsFor(config, a, false)
+	mcpTools, closers := a.loadMCPTools(subCtx, config)
+	defer closeAll(closers)
+	tools = append(tools, mcpTools...)
+
+	system := subagentSystemPrompt(config, name, task, tools, skills)
+	sub := tcagent.New(tcagent.Config{
+		Model:         model,
+		SystemPrompt:  system,
+		Tools:         tools,
+		Skills:        skills,
+		MaxIterations: config.Agent.MaxIterations,
+		Callbacks: callbacks.SinkFunc(func(event callbacks.Event) {
+			record := activityRecordFromCallback(event)
+			record.Name = name + "/" + record.Name
+			a.recordTaskCallback(taskID, event)
+			a.appendActivity(record)
+		}),
+	})
+	result, err := sub.InvokeMessages(subCtx, lcMessagesWithTask(task))
+	if err != nil {
+		a.finishTask(taskID, "", err)
+		return "", err
+	}
+	output := lcContentText(result.Output.Content)
+	a.finishTask(taskID, output, nil)
+	return output, nil
+}
+
+func subagentSystemPrompt(config Config, name, task string, tools []tcagent.Tool, skills []tcagent.Skill) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "You are %s, a focused subagent spawned by %s.\n", name, DisplayName(config))
+	fmt.Fprintf(&b, "Assigned task: %s\n", task)
+	b.WriteString("Work independently on only this task. Use available tools directly for safe inspection and parsing. Do not ask the user for slash commands. Return a concise result with evidence, paths, or tool outputs that matter.\n")
+	b.WriteString("You cannot spawn additional subagents. If the task needs more decomposition, summarize what remains for the primary agent.\n")
+	fmt.Fprintf(&b, "Runtime environment: %s\n", environmentPrompt())
+	if root, err := workspaceRoot(config); err == nil {
+		fmt.Fprintf(&b, "Configured workspace: %s\n", root)
+	}
+	if len(tools) > 0 {
+		b.WriteString("Available tools:\n")
+		for _, tool := range tools {
+			def := tool.Definition()
+			fmt.Fprintf(&b, "- %s: %s\n", def.Name, def.Description)
+		}
+	}
+	if len(skills) > 0 {
+		b.WriteString("Installed skills:\n")
+		for _, skill := range skills {
+			fmt.Fprintf(&b, "- %s: %s\n", skill.Name, skill.Description)
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
 func (a *App) handleAgentCallback(event callbacks.Event) {
-	record := ActivityRecord{
-		Time: event.Time,
-		Kind: string(event.Event),
-		Name: event.Name,
-	}
-	if record.Time.IsZero() {
-		record.Time = time.Now().UTC()
-	}
-	switch event.Event {
-	case callbacks.EventChatModelStart:
-		record.Status = "model start"
-		record.Detail = fmt.Sprintf("messages=%d", callbackMessageCount(event))
-	case callbacks.EventLLMEnd:
-		record.Status = "model done"
-		record.Detail = callbackGenerationSummary(event)
-	case callbacks.EventLLMError:
-		record.Status = "model error"
-		record.Detail = event.Data.Error
-	case callbacks.EventToolStart:
-		record.Status = "tool start"
-		record.Detail = "args: " + compactAny(event.Data.Input, 180)
-	case callbacks.EventToolEnd:
-		record.Status = "tool done"
-		record.Detail = "output: " + compactAny(event.Data.Output, 220)
-	case callbacks.EventToolError:
-		record.Status = "tool error"
-		record.Detail = "error: " + event.Data.Error
-	default:
-		record.Status = string(event.Event)
-	}
+	record := activityRecordFromCallback(event)
 	if record.Status == "tool error" || record.Status == "model error" {
 		a.logError("agent callback error", "event", record.Kind, "name", record.Name, "detail", record.Detail)
+	}
+	a.mu.Lock()
+	taskID := a.activeTaskID
+	a.recordTaskActivityLocked(taskID, record)
+	a.mu.Unlock()
+	if event.Event == callbacks.EventLLMEnd {
+		a.addTaskUsage(taskID, usageFromLLMEnd(event))
 	}
 	a.appendActivity(record)
 }
 
 func modelFromConfig(config Config) (tcagent.Model, error) {
-	maxTokens := config.Model.MaxTokens
+	return modelFromModelConfig(config, config.Model)
+}
+
+func subagentModelFromConfig(config Config) (tcagent.Model, error) {
+	modelConfig := config.SubagentModel
+	if strings.TrimSpace(modelConfig.Provider) == "" || strings.TrimSpace(modelConfig.Model) == "" {
+		modelConfig = config.Model
+	}
+	return modelFromModelConfig(config, modelConfig)
+}
+
+func modelFromModelConfig(config Config, modelConfig ModelConfig) (tcagent.Model, error) {
+	maxTokens := modelConfig.MaxTokens
 	var maxTokensPtr *int
 	if maxTokens > 0 {
 		maxTokensPtr = &maxTokens
 	}
 	var tempPtr *float64
-	if config.Model.Temperature != 0 {
-		temp := config.Model.Temperature
+	if modelConfig.Temperature != 0 {
+		temp := modelConfig.Temperature
 		tempPtr = &temp
 	}
 
-	switch strings.ToLower(config.Model.Provider) {
+	switch strings.ToLower(modelConfig.Provider) {
 	case "openai", "":
 		apiKey := apiKeyForProvider(config, "openai", "OPENAI_API_KEY")
 		if apiKey == "" {
@@ -214,7 +283,7 @@ func modelFromConfig(config Config) (tcagent.Model, error) {
 		}
 		return tcagent.OpenAIModel{
 			Client:       openai.Client{APIKey: apiKey},
-			Model:        config.Model.Model,
+			Model:        modelConfig.Model,
 			UseResponses: config.Agent.UseResponses,
 			Temperature:  tempPtr,
 			MaxTokens:    maxTokensPtr,
@@ -226,7 +295,7 @@ func modelFromConfig(config Config) (tcagent.Model, error) {
 		}
 		return tcagent.AnthropicModel{
 			Client:      anthropic.Client{APIKey: apiKey},
-			Model:       config.Model.Model,
+			Model:       modelConfig.Model,
 			MaxTokens:   maxTokens,
 			Temperature: tempPtr,
 		}, nil
@@ -237,13 +306,13 @@ func modelFromConfig(config Config) (tcagent.Model, error) {
 		}
 		return tcagent.OpenAIModel{
 			Client:       openai.Client{APIKey: apiKey, BaseURL: "https://openrouter.ai/api/v1"},
-			Model:        config.Model.Model,
+			Model:        modelConfig.Model,
 			UseResponses: false,
 			Temperature:  tempPtr,
 			MaxTokens:    maxTokensPtr,
 		}, nil
 	default:
-		return nil, fmt.Errorf("unsupported provider %q", config.Model.Provider)
+		return nil, fmt.Errorf("unsupported provider %q", modelConfig.Provider)
 	}
 }
 
@@ -252,6 +321,9 @@ func RuntimeStatus(config Config) map[string]any {
 	return map[string]any{
 		"provider":               config.Model.Provider,
 		"model":                  config.Model.Model,
+		"subagent_provider":      config.SubagentModel.Provider,
+		"subagent_model":         config.SubagentModel.Model,
+		"max_subagents":          config.Agent.MaxSubagents,
 		"openai_api_key_set":     keys.OpenAI != "" || os.Getenv("OPENAI_API_KEY") != "",
 		"anthropic_api_key_set":  keys.Anthropic != "" || os.Getenv("ANTHROPIC_API_KEY") != "",
 		"openrouter_api_key_set": keys.OpenRouter != "" || os.Getenv("OPENROUTER_API_KEY") != "",
@@ -409,6 +481,7 @@ func baseSystemPrompt(config Config, skillHints []string, tools []tcagent.Tool, 
 	if root, err := workspaceRoot(config); err == nil {
 		fmt.Fprintf(&b, "Configured workspace: %s\n", root)
 	}
+	fmt.Fprintf(&b, "You may spawn up to %d concurrent named subagents with `spawn_subagent` when decomposition helps. Give each subagent a narrow task and synthesize their results yourself. Subagents use `%s/%s` unless configured otherwise.\n", config.Agent.MaxSubagents, config.SubagentModel.Provider, config.SubagentModel.Model)
 	b.WriteString("Available built-in tools are constrained to NullBot app data: listing config-directory files, reading small config-directory text files, listing skills, creating SKILL.md files under the configured skills directory, refreshing/listing/installing market packages, enabling/disabling/removing installed MCP servers, listing configured MCP servers, summarizing recent visible chat history, reading compact persisted session history, and reading recent NullBot runtime log lines.\n")
 	if len(tools) > 0 {
 		b.WriteString("Current tool inventory:\n")

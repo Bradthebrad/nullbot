@@ -317,8 +317,8 @@ func activityRecordFromCallback(event callbacks.Event) ActivityRecord {
 		record.Status = "model start"
 		record.Detail = fmt.Sprintf("messages=%d", callbackMessageCount(event))
 	case callbacks.EventLLMEnd:
-		record.Status = "model done"
-		record.Detail = callbackGenerationSummary(event)
+		record.Status = "agent complete"
+		record.Detail = "Agent completed task."
 	case callbacks.EventLLMError:
 		record.Status = "model error"
 		record.Detail = event.Data.Error
@@ -326,8 +326,8 @@ func activityRecordFromCallback(event callbacks.Event) ActivityRecord {
 		record.Status = "tool start"
 		record.Detail = "args: " + compactAny(event.Data.Input, 180)
 	case callbacks.EventToolEnd:
-		record.Status = "tool done"
-		record.Detail = "output: " + compactAny(event.Data.Output, 220)
+		record.Status = "tool complete"
+		record.Detail = "Tool call complete."
 	case callbacks.EventToolError:
 		record.Status = "tool error"
 		record.Detail = "error: " + event.Data.Error

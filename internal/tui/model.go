@@ -581,9 +581,23 @@ func (m *Model) applyReply(reply app.Reply) {
 		Time:    time.Now(),
 		Command: reply.Command,
 		Panel:   reply.OpenPanel,
-		Status:  compactStatus(reply.Message),
-		Detail:  reply.Message,
+		Status:  replyActivityStatus(reply),
+		Detail:  replyActivityDetail(reply),
 	})
+}
+
+func replyActivityStatus(reply app.Reply) string {
+	if reply.Command == "" && reply.OpenPanel == "" {
+		return "Agent completed task."
+	}
+	return compactStatus(reply.Message)
+}
+
+func replyActivityDetail(reply app.Reply) string {
+	if reply.Command == "" && reply.OpenPanel == "" {
+		return ""
+	}
+	return reply.Message
 }
 
 func alsoQuestion(input string) (string, bool) {

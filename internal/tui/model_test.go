@@ -248,6 +248,23 @@ func TestInlineHistorySuggestionCompletesFrequentCommand(t *testing.T) {
 	}
 }
 
+func TestActivityToolRendererOmitsToolOutput(t *testing.T) {
+	events := []activityEvent{
+		{Time: now(), Command: "agent/read_file", Status: "tool start", Detail: `args: {"path":"README.md","max_bytes":2000}`},
+		{Time: now(), Command: "agent/read_file", Status: "tool complete", Detail: `output: very noisy file contents`},
+		{Time: now(), Command: "agent", Status: "agent complete", Detail: "Agent completed task."},
+	}
+	rendered := stripANSI(renderActivity(events, app.Reply{}, 80))
+	if strings.Contains(rendered, "very noisy file contents") || strings.Contains(rendered, "output:") {
+		t.Fatalf("activity leaked tool output:\n%s", rendered)
+	}
+	for _, want := range []string{"called", "read_file", "complete", "Agent completed task"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("activity missing %q:\n%s", want, rendered)
+		}
+	}
+}
+
 func stripANSI(text string) string {
 	return regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(text, "")
 }

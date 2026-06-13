@@ -71,6 +71,9 @@ func renderFullActivity(events []activityEvent, width int) string {
 }
 
 func activityLine(event activityEvent, width int) string {
+	if strings.Contains(event.Status, "tool") || event.Status == "agent complete" || event.Status == "model start" || event.Status == "model error" {
+		return renderToolActivityLine(event, width)
+	}
 	label := "event"
 	if event.Input != "" {
 		label = "input"
@@ -97,6 +100,48 @@ func activityLine(event activityEvent, width int) string {
 		return renderMarkdown(header, width)
 	}
 	return renderMarkdown(header+"\n"+quoteCompact(detail, max(32, width*2)), width)
+}
+
+func renderToolActivityLine(event activityEvent, width int) string {
+	agentName, toolName := splitAgentTool(event.Command)
+	switch event.Status {
+	case "tool start":
+		args := strings.TrimPrefix(event.Detail, "args: ")
+		header := fmt.Sprintf("`%s` `%s` called `%s`", event.Time.Format("15:04:05"), agentName, toolName)
+		if args == "" {
+			return renderMarkdown(header, width)
+		}
+		return renderMarkdown(header+"\nargs: `"+quoteCompact(args, max(48, width*2))+"`", width)
+	case "tool complete":
+		return renderMarkdown(fmt.Sprintf("`%s` `%s` `%s` complete", event.Time.Format("15:04:05"), agentName, toolName), width)
+	case "tool error":
+		detail := strings.TrimPrefix(event.Detail, "error: ")
+		return renderMarkdown(fmt.Sprintf("`%s` `%s` `%s` error\n%s", event.Time.Format("15:04:05"), agentName, toolName, quoteCompact(detail, max(48, width*2))), width)
+	case "agent complete":
+		return renderMarkdown(fmt.Sprintf("`%s` `%s` Agent completed task.", event.Time.Format("15:04:05"), agentName), width)
+	case "model start":
+		return renderMarkdown(fmt.Sprintf("`%s` `%s` Agent started.", event.Time.Format("15:04:05"), agentName), width)
+	case "model error":
+		return renderMarkdown(fmt.Sprintf("`%s` `%s` Agent error.\n%s", event.Time.Format("15:04:05"), agentName, quoteCompact(event.Detail, max(48, width*2))), width)
+	default:
+		return renderMarkdown(fmt.Sprintf("`%s` `%s` %s", event.Time.Format("15:04:05"), agentName, event.Status), width)
+	}
+}
+
+func splitAgentTool(command string) (agentName, toolName string) {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return "agent", "tool"
+	}
+	if before, after, ok := strings.Cut(command, "/"); ok {
+		if before != "" && after != "" {
+			return before, after
+		}
+	}
+	if command == "agent" {
+		return "agent", "model"
+	}
+	return "agent", command
 }
 
 func compactStatus(text string) string {

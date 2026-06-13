@@ -15,9 +15,12 @@ func (m *Model) openModelsModal() {
 	m.panel = "models"
 	m.mode = ModeModal
 	m.input.Blur()
+	if m.modelTarget == "" {
+		m.modelTarget = "main"
+	}
 	m.modelGroups = app.DiscoverModelGroups(context.Background(), m.app.Config())
 	m.modelOptions = app.FlattenModelGroups(m.modelGroups)
-	m.modelIndex = app.CurrentModelIndexIn(m.app.Config(), m.modelOptions)
+	m.modelIndex = m.currentModelIndexForTarget()
 	m.modal.SetContent(m.renderModelsModal())
 	m.syncModelsModalViewport()
 }
@@ -33,21 +36,35 @@ func (m *Model) handleModelsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 		m.modelIndex = max(0, m.modelIndex-1)
 	case "down", "j":
 		m.modelIndex = min(len(m.modelOptions)-1, m.modelIndex+1)
+	case "m":
+		m.modelTarget = "main"
+		m.modelIndex = m.currentModelIndexForTarget()
+	case "a", "A":
+		m.modelTarget = "subagent"
+		m.modelIndex = m.currentModelIndexForTarget()
+	case "S", "shift+s":
+		m.modelTarget = "subagent"
+		m.modelIndex = m.currentModelIndexForTarget()
 	case "enter", "s":
 		if len(m.modelOptions) == 0 {
 			return m, nil, true
 		}
 		option := m.modelOptions[m.modelIndex]
 		err := m.app.UpdateConfig(func(config *app.Config) {
-			config.Model.Provider = option.Provider
-			config.Model.Model = option.ID
-			config.Agent.UseResponses = option.Responses
+			if m.modelTarget == "subagent" {
+				config.SubagentModel.Provider = option.Provider
+				config.SubagentModel.Model = option.ID
+			} else {
+				config.Model.Provider = option.Provider
+				config.Model.Model = option.ID
+				config.Agent.UseResponses = option.Responses
+			}
 		})
 		if err != nil {
 			m.status = "Model save failed: " + err.Error()
 		} else {
-			m.status = "Model set to " + option.Name
-			m.events = append(m.events, activityEvent{Time: now(), Command: "/models", Status: "selected " + option.ID})
+			m.status = fmt.Sprintf("%s model set to %s", m.modelTarget, option.Name)
+			m.events = append(m.events, activityEvent{Time: now(), Command: "/models", Status: m.modelTarget + " selected " + option.ID})
 		}
 	}
 	m.modal.SetContent(m.renderModelsModal())
@@ -58,7 +75,11 @@ func (m *Model) handleModelsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 func (m *Model) renderModelsModal() string {
 	var b strings.Builder
 	config := m.app.Config()
-	b.WriteString(renderMarkdown(fmt.Sprintf("Current: `%s / %s`\n\nUse `up`/`down`. `Enter` or `s` selects and saves. Models refresh from providers when keys are set.", config.Model.Provider, config.Model.Model), m.modal.Width))
+	target := "main"
+	if m.modelTarget == "subagent" {
+		target = "subagent"
+	}
+	b.WriteString(renderMarkdown(fmt.Sprintf("Main: `%s / %s`\n\nSubagents: `%s / %s`\n\nTarget: `%s`\n\nUse `M` for main, `A` or `S` for subagents. `Enter` saves selected model to the target. Models refresh from providers when keys are set.", config.Model.Provider, config.Model.Model, config.SubagentModel.Provider, config.SubagentModel.Model, target), m.modal.Width))
 	b.WriteString("\n\n")
 	flat := 0
 	for _, group := range m.modelGroups {
@@ -90,6 +111,16 @@ func (m *Model) renderModelsModal() string {
 		b.WriteByte('\n')
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+func (m *Model) currentModelIndexForTarget() int {
+	config := m.app.Config()
+	if m.modelTarget == "subagent" {
+		target := config
+		target.Model = config.SubagentModel
+		return app.CurrentModelIndexIn(target, m.modelOptions)
+	}
+	return app.CurrentModelIndexIn(config, m.modelOptions)
 }
 
 func (m *Model) syncModelsModalViewport() {

@@ -6,12 +6,45 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"tinychain/mcp"
 )
 
 func TestInlineSkillHints(t *testing.T) {
 	hints := inlineSkillHints("check /email for anything new and then /calendar.")
 	if len(hints) != 2 || hints[0] != "/email" || hints[1] != "/calendar" {
 		t.Fatalf("hints = %#v", hints)
+	}
+}
+
+func TestSplitMarketPackageIDs(t *testing.T) {
+	ids := splitMarketPackageIDs("nullbot-code-mcp, nullbot-parsers-mcp,,api-probe")
+	want := []string{"nullbot-code-mcp", "nullbot-parsers-mcp", "api-probe"}
+	if strings.Join(ids, "|") != strings.Join(want, "|") {
+		t.Fatalf("ids = %#v, want %#v", ids, want)
+	}
+}
+
+func TestHumanMessageWithImageAttachment(t *testing.T) {
+	dir := t.TempDir()
+	imagePath := filepath.Join(dir, "clipboard.png")
+	if err := os.WriteFile(imagePath, []byte("fake-png-bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	msg := humanMessageWithAttachments(`look at @file("` + imagePath + `")`)
+	if msg.Type != "human" {
+		t.Fatalf("message type = %q", msg.Type)
+	}
+	if len(msg.Content.Parts) != 2 {
+		t.Fatalf("parts = %#v", msg.Content.Parts)
+	}
+	if text := lcContentText(msg.Content); strings.Contains(text, "@file(") || strings.Contains(text, imagePath) || !strings.Contains(text, "clipboard.png") {
+		t.Fatalf("model text = %q", text)
+	}
+	image := msg.Content.Parts[1]
+	if image.Type != "image" || image.Source == nil || image.Source.MediaType != "image/png" || image.Source.Data == "" {
+		t.Fatalf("image part = %#v", image)
 	}
 }
 
@@ -22,6 +55,114 @@ func TestConfigCommandUpdatesBrand(t *testing.T) {
 	reply := app.Submit(context.Background(), "/config brand_prefix=Brad")
 	if reply.Config.BrandPrefix != "Brad" {
 		t.Fatalf("brand = %q, message = %s", reply.Config.BrandPrefix, reply.Message)
+	}
+}
+
+func TestUsageSnapshotAggregatesSessionAndModels(t *testing.T) {
+	config := DefaultConfig()
+	config.AppDir = t.TempDir()
+	if err := EnsureAppDir(config); err != nil {
+		t.Fatal(err)
+	}
+	app := New(config)
+	if err := app.appendUsageRecord(UsageRecord{
+		Time:         time.Now().UTC(),
+		SessionID:    app.sessionID,
+		Provider:     "openai",
+		Model:        "gpt-5-mini",
+		Agent:        "test",
+		InputTokens:  1000,
+		OutputTokens: 500,
+		TotalTokens:  1500,
+		CostUSD:      0.00125,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := app.UsageSnapshot()
+	if snapshot.Session.TotalTokens != 1500 || snapshot.Total.TotalTokens != 1500 {
+		t.Fatalf("usage totals = session %#v total %#v", snapshot.Session, snapshot.Total)
+	}
+	if len(snapshot.ByModel) != 1 || snapshot.ByModel[0].Model != "gpt-5-mini" {
+		t.Fatalf("by model = %#v", snapshot.ByModel)
+	}
+	reply := app.Submit(context.Background(), "/usage")
+	if reply.OpenPanel != "usage" {
+		t.Fatalf("/usage panel = %q", reply.OpenPanel)
+	}
+}
+
+func TestWorkspaceSlashCommands(t *testing.T) {
+	config := DefaultConfig()
+	config.AppDir = t.TempDir()
+	config.SkillDirs = []string{filepath.Join(config.AppDir, "skills")}
+	workspace := t.TempDir()
+	config.WorkspaceDir = workspace
+	if err := EnsureAppDir(config); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "hello.txt"), []byte("hi"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	app := New(config)
+	reply := app.Submit(context.Background(), "/dir")
+	if !strings.Contains(reply.Message, "hello.txt") || !strings.Contains(reply.Message, "```text") || !strings.Contains(reply.Message, "-rw-") || strings.Contains(reply.Message, "disabled") {
+		t.Fatalf("/dir reply = %q", reply.Message)
+	}
+	reply = app.Submit(context.Background(), "/files workspace "+config.AppDir)
+	if !strings.Contains(reply.Message, "Files panel opened") || app.Config().WorkspaceDir != config.AppDir {
+		t.Fatalf("/files workspace reply = %q workspace=%q", reply.Message, app.Config().WorkspaceDir)
+	}
+}
+
+func TestWorkspacePathRejectsEscape(t *testing.T) {
+	config := DefaultConfig()
+	config.AppDir = t.TempDir()
+	config.WorkspaceDir = t.TempDir()
+	if _, err := safeWorkspacePath(config, filepath.Join("..", "outside.txt")); err == nil {
+		t.Fatal("expected workspace escape error")
+	}
+}
+
+func TestNormalizeConfigSyncsMCPWorkspaceArgs(t *testing.T) {
+	config := DefaultConfig()
+	workspace := t.TempDir()
+	config.WorkspaceDir = workspace
+	config.EnabledMCPServers = map[string]MCPEntry{
+		"code": {Args: []string{"--workspace", "."}, Enabled: true},
+		"nullbot-parsers-mcp": {
+			Command: filepath.Join(t.TempDir(), "nullbot-parsers-mcp.exe"),
+			Enabled: true,
+		},
+	}
+	normalized := normalizeConfig(config)
+	if got := normalized.EnabledMCPServers["code"].Args[1]; got != workspace {
+		t.Fatalf("workspace arg = %q, want %q", got, workspace)
+	}
+	if got := normalized.EnabledMCPServers["nullbot-parsers-mcp"].Args; strings.Join(got, "|") != "--workspace|"+workspace {
+		t.Fatalf("parser args = %#v", got)
+	}
+}
+
+func TestNormalizeConfigMigratesLegacyIterationDefault(t *testing.T) {
+	config := DefaultConfig()
+	config.Agent.MaxIterations = 8
+	normalized := normalizeConfig(config)
+	if normalized.Agent.MaxIterations != defaultMaxIterations {
+		t.Fatalf("max iterations = %d, want %d", normalized.Agent.MaxIterations, defaultMaxIterations)
+	}
+}
+
+func TestNormalizeWorkspaceDirTreatsProjectDistAsParent(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module test\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	dist := filepath.Join(root, "dist")
+	if err := os.Mkdir(dist, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if got := normalizeWorkspaceDir(dist); got != root {
+		t.Fatalf("workspace = %q, want %q", got, root)
 	}
 }
 
@@ -170,7 +311,20 @@ func TestHistorySessionToolsReadPersistedSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 2 || messages[0].Role != "user" || messages[1].Role != "assistant" {
+	if len(messages) != 1 || messages[0].Role != "assistant" || !messages[0].VisibleOnly {
+		t.Fatalf("messages = %#v", messages)
+	}
+}
+
+func TestLangChainHistorySkipsVisibleOnlySlashOutput(t *testing.T) {
+	app := New(DefaultConfig())
+	app.history = []Message{
+		{Role: "assistant", Content: "Files panel opened.", VisibleOnly: true},
+		{Role: "user", Content: "what is here?"},
+		{Role: "assistant", Content: "A repo."},
+	}
+	messages := app.langChainHistory()
+	if len(messages) != 2 || lcContentText(messages[0].Content) != "what is here?" || lcContentText(messages[1].Content) != "A repo." {
 		t.Fatalf("messages = %#v", messages)
 	}
 }
@@ -191,6 +345,86 @@ func TestLogsRecentToolReadsNullBotLogs(t *testing.T) {
 	if !strings.Contains(output, "diagnostic marker") || !strings.Contains(output, "logs_recent") {
 		t.Fatalf("logs output = %q", output)
 	}
+}
+
+func TestLoadMCPToolsDiscoversStdioServer(t *testing.T) {
+	config := DefaultConfig()
+	config.AppDir = t.TempDir()
+	config.EnabledMCPServers = map[string]MCPEntry{
+		"helper": {
+			Name:      "Helper",
+			Command:   os.Args[0],
+			Args:      []string{"-test.run=TestMCPHelperProcess", "--"},
+			Transport: "stdio",
+			Enabled:   true,
+		},
+	}
+	t.Setenv("NULLBOT_MCP_HELPER", "1")
+	app := New(config)
+	tools, closers := app.loadMCPTools(context.Background(), config)
+	defer closeAll(closers)
+	if len(tools) != 1 || tools[0].Definition().Name != "helper_echo" {
+		t.Fatalf("tools = %#v", tools)
+	}
+	output, err := tools[0].Call(context.Background(), map[string]any{"text": "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output != "ok" {
+		t.Fatalf("tool output = %q", output)
+	}
+}
+
+func TestBuildRuntimeAfterDirtyDoesNotDeadlock(t *testing.T) {
+	config := DefaultConfig()
+	config.AppDir = t.TempDir()
+	config.SkillDirs = []string{filepath.Join(config.AppDir, "skills")}
+	if err := EnsureAppDir(config); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveAPIKeys(config, APIKeys{OpenAI: "sk-test"}); err != nil {
+		t.Fatal(err)
+	}
+	app := New(config)
+	app.MarkRuntimeDirty("test dirty rebuild")
+	done := make(chan error, 1)
+	go func() {
+		bundle, err := app.buildRuntime(context.Background(), nil)
+		if bundle != nil {
+			closeAll(bundle.closers)
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("dirty runtime rebuild deadlocked")
+	}
+}
+
+func TestMCPHelperProcess(t *testing.T) {
+	if os.Getenv("NULLBOT_MCP_HELPER") != "1" {
+		return
+	}
+	server := mcp.NewServer("helper")
+	server.AddTool(mcp.Tool{
+		Name:        "helper_echo",
+		Description: "Echo helper.",
+		InputSchema: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"text": map[string]any{"type": "string"}},
+		},
+		Handler: func(ctx context.Context, args map[string]any) (mcp.ToolResult, error) {
+			return mcp.Text("ok"), nil
+		},
+	})
+	if err := server.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	os.Exit(0)
 }
 
 func TestModelGroupsFlatten(t *testing.T) {

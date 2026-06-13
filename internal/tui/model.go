@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -29,6 +28,9 @@ type Model struct {
 	app       *app.App
 	input     textarea.Model
 	selectAll bool
+	history   []string
+	historyAt int
+	draft     string
 	output    viewport.Model
 	activity  viewport.Model
 	modal     viewport.Model
@@ -42,6 +44,7 @@ type Model struct {
 	busy      bool
 	spinner   spinner.Model
 	planEdit  textarea.Model
+	planID    string
 
 	configFields    []configField
 	configIndex     int
@@ -50,14 +53,51 @@ type Model struct {
 	modelOptions    []app.ModelOption
 	modelGroups     []app.ModelGroup
 	modelIndex      int
+	modelTarget     string
+
+	marketPackages []app.MarketPackage
+	marketIndex    int
+	marketSelected map[string]bool
+	marketDetails  bool
+
+	mcpPackages []app.MarketPackage
+	mcpIndex    int
+	mcpDetails  bool
+
+	tasks       []app.AgentTask
+	taskIndex   int
+	taskDetails bool
+
+	plans       []app.PlanSummary
+	planIndex   int
+	planDetails bool
+
+	usage            app.UsageSnapshot
+	usageTab         int
+	usageModelFilter string
+	themeIndex       int
+	themeDetails     bool
+
+	completionOpen    bool
+	completionPrefix  string
+	completionOptions []completionOption
+	completionIndex   int
+	inlineSuggestion  string
+	lastInputAt       time.Time
+	rapidInputCount   int
+	pasteProtectUntil time.Time
+	pasteNotice       string
+	pendingPaste      string
 }
 
 type replyMsg app.Reply
+type alsoReplyMsg app.Reply
 type liveActivityMsg struct {
 	Record app.ActivityRecord
 	Ch     <-chan app.ActivityRecord
 }
 type liveActivityDoneMsg struct{}
+type pasteNoticeDoneMsg struct{}
 
 type activityEvent struct {
 	Time    time.Time
@@ -69,6 +109,7 @@ type activityEvent struct {
 }
 
 func New(a *app.App) Model {
+	applyTheme(a.Config().UI.Theme)
 	input := textarea.New()
 	input.Placeholder = "Message NullBot or type /help"
 	input.Prompt = "| "
@@ -88,24 +129,26 @@ func New(a *app.App) Model {
 		FPS:    time.Second / 8,
 	}), spinner.WithStyle(spinnerStyle))
 	return Model{
-		app:      a,
-		input:    input,
-		output:   viewport.New(20, 10),
-		activity: viewport.New(20, 10),
-		modal:    viewport.New(20, 10),
-		planEdit: planEdit,
-		messages: state.History,
+		app:       a,
+		input:     input,
+		historyAt: -1,
+		output:    viewport.New(20, 10),
+		activity:  viewport.New(20, 10),
+		modal:     viewport.New(20, 10),
+		planEdit:  planEdit,
+		messages:  state.History,
 		events: []activityEvent{
 			{Time: time.Now(), Status: "NullBot started", Detail: "Press /help for commands."},
 			{Time: time.Now(), Status: "Shortcuts ready", Detail: "Ctrl+Q quit, Ctrl+O full activity, Ctrl+J newline."},
 		},
-		status:  "ready",
-		spinner: spin,
+		status:     "ready",
+		spinner:    spin,
+		themeIndex: themeIndexByID(a.Config().UI.Theme),
 	}
 }
 
 func (m Model) Init() tea.Cmd {
-	return textarea.Blink
+	return tea.Batch(textarea.Blink, tea.EnableBracketedPaste, tea.SetWindowTitle(app.DisplayName(m.app.Config())))
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -118,23 +161,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case replyMsg:
 		reply := app.Reply(msg)
 		m.busy = false
-		m.messages = reply.History
-		m.status = reply.Message
-		for _, record := range reply.Activity {
-			m.events = append(m.events, activityEvent{
-				Time:    record.Time,
-				Command: record.Name,
-				Status:  record.Status,
-				Detail:  record.Detail,
-			})
-		}
-		m.events = append(m.events, activityEvent{
-			Time:    time.Now(),
-			Command: reply.Command,
-			Panel:   reply.OpenPanel,
-			Status:  compactStatus(reply.Message),
-			Detail:  reply.Message,
-		})
+		m.applyReply(reply)
 		if text, ok := reply.Data["copy"].(string); ok {
 			if err := clipboard.WriteAll(text); err != nil {
 				m.status = "Copy failed: " + err.Error()
@@ -145,11 +172,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.openModal(reply.OpenPanel, reply)
 		}
 		return m, nil
+	case alsoReplyMsg:
+		reply := app.Reply(msg)
+		m.applyReply(reply)
+		m.refreshContent(reply)
+		m.openModal("also", reply)
+		return m, nil
 	case liveActivityMsg:
 		m.events = append(m.events, activityEventFromRecord(msg.Record))
 		m.refreshContent(app.Reply{})
 		return m, waitActivity(msg.Ch)
 	case liveActivityDoneMsg:
+		return m, nil
+	case pasteNoticeDoneMsg:
+		if time.Now().After(m.pasteProtectUntil) {
+			m.pasteNotice = ""
+		}
 		return m, nil
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -159,6 +197,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.KeyMsg:
+		if msg.Paste {
+			if m.mode == ModeChat {
+				if len(msg.Runes) > 0 {
+					m.capturePaste(string(msg.Runes))
+				} else if msg.String() == "enter" {
+					m.input.InsertString("\n")
+				}
+				m.updateInlineSuggestion()
+				return m, nil
+			}
+		}
 		return m.handleKey(msg)
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
@@ -182,6 +231,9 @@ func (m Model) View() string {
 	status := m.statusView()
 	input := inputBoxStyle.Width(max(1, m.width-2)).Render(m.inputView())
 	view := lipgloss.JoinVertical(lipgloss.Left, header, main, status, input)
+	if m.completionOpen && m.mode == ModeChat {
+		view = placeCompletion(m.width, m.height, view, m.completionView())
+	}
 	if m.mode == ModeModal || m.mode == ModePlanEdit {
 		return placeModal(m.width, m.height, view, m.modalView())
 	}
@@ -224,7 +276,17 @@ func bannerTooWide(lines []string, width int) bool {
 
 func (m Model) inputView() string {
 	if !m.selectAll {
-		return m.input.View()
+		base := m.input.View()
+		if m.pendingPaste != "" {
+			base += "\n" + m.pasteChip()
+		}
+		if m.pasteNotice != "" {
+			base += "\n" + mutedStyle.Render(m.pasteNotice)
+		}
+		if m.inlineSuggestion != "" && m.input.Value() != "" && !m.completionOpen {
+			base += "\n" + mutedStyle.Render("→ "+m.inlineSuggestion)
+		}
+		return base
 	}
 	value := m.input.Value()
 	if value == "" {
@@ -241,6 +303,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.input.Focus()
 			return m, nil
 		case "ctrl+s":
+			if m.panel == "plan" && m.planID != "" {
+				if err := m.app.SavePlanJSON(m.planID, m.planEdit.Value()); err != nil {
+					m.status = "Plan save failed: " + err.Error()
+					return m, nil
+				}
+				m.status = "Plan saved."
+				reply := m.app.Execute(context.Background(), "/plan")
+				m.mode = ModeModal
+				m.openPlanModal(reply)
+				return m, nil
+			}
 			m.app.SetPlan(m.planEdit.Value())
 			m.mode = ModeModal
 			reply := app.Reply{Message: "Plan saved.", OpenPanel: "plan", Data: map[string]any{"plan": m.app.Plan()}}
@@ -257,6 +330,24 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return next, cmd
 		}
 		if next, cmd, handled := m.handleModelsKey(msg); handled {
+			return next, cmd
+		}
+		if next, cmd, handled := m.handleMarketKey(msg); handled {
+			return next, cmd
+		}
+		if next, cmd, handled := m.handleMCPKey(msg); handled {
+			return next, cmd
+		}
+		if next, cmd, handled := m.handleTasksKey(msg); handled {
+			return next, cmd
+		}
+		if next, cmd, handled := m.handlePlanKey(msg); handled {
+			return next, cmd
+		}
+		if next, cmd, handled := m.handleUsageKey(msg); handled {
+			return next, cmd
+		}
+		if next, cmd, handled := m.handleThemesKey(msg); handled {
 			return next, cmd
 		}
 		switch msg.String() {
@@ -278,10 +369,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "e":
 			if m.panel == "plan" {
-				m.mode = ModePlanEdit
-				m.planEdit.SetValue(m.app.Plan())
-				m.planEdit.Focus()
-				return m, textarea.Blink
+				next, cmd, _ := m.startPlanEdit()
+				return next, cmd
 			}
 		case "ctrl+o":
 			m.openActivityModal()
@@ -290,6 +379,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.modal, cmd = m.modal.Update(msg)
 		return m, cmd
+	}
+
+	if m.completionOpen {
+		if next, cmd, handled := m.handleCompletionKey(msg); handled {
+			return next, cmd
+		}
 	}
 
 	switch msg.String() {
@@ -304,15 +399,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, m.submit("/pause")
-	case "ctrl+v":
-		if text, err := clipboard.ReadAll(); err == nil {
-			if m.selectAll {
-				m.input.Reset()
-				m.selectAll = false
-			}
-			m.input.InsertString(text)
+	case "ctrl+v", "alt+v":
+		if pasted, err := m.pasteClipboard(); err == nil && pasted {
+			m.updateInlineSuggestion()
 		} else {
-			m.status = "Paste failed: " + err.Error()
+			if err != nil {
+				m.status = "Paste failed: " + err.Error()
+			} else {
+				m.status = "Nothing pasteable found on clipboard."
+			}
 		}
 		return m, nil
 	case "ctrl+a":
@@ -329,7 +424,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "ctrl+z":
 		m.input.Reset()
+		m.pendingPaste = ""
+		m.pasteNotice = ""
 		m.selectAll = false
+		m.closeCompletion()
+		m.updateInlineSuggestion()
 		m.status = "Input cleared."
 		return m, nil
 	case "ctrl+q":
@@ -348,10 +447,42 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.status = "Activity panel cleared."
 		return m, nil
 	case "enter":
-		if m.input.Value() == "" {
+		if m.capturePastedLineIfNeeded() {
+			m.updateInlineSuggestion()
 			return m, nil
 		}
+		if m.captureInputAsPasteIfNeeded() {
+			m.updateInlineSuggestion()
+			return m, nil
+		}
+		if m.input.Value() == "" && m.pendingPaste == "" {
+			return m, nil
+		}
+		m.closeCompletion()
 		value := m.input.Value()
+		if m.pendingPaste != "" {
+			value = combineInputAndPaste(value, m.pendingPaste)
+			m.pendingPaste = ""
+			m.pasteNotice = ""
+			m.pasteProtectUntil = time.Time{}
+		}
+		if strings.TrimSpace(value) == "/paste" {
+			m.input.Reset()
+			m.selectAll = false
+			if pasted, err := m.pasteClipboard(); err == nil && pasted {
+				m.updateInlineSuggestion()
+			} else if err != nil {
+				m.status = "Paste failed: " + err.Error()
+			} else {
+				m.status = "Nothing pasteable found on clipboard."
+			}
+			return m, nil
+		}
+		if normalized, count := normalizeAttachmentText(value); count > 0 {
+			value = normalized
+			m.status = fmt.Sprintf("Attached %d file(s).", count)
+		}
+		m.rememberInput(value)
 		m.input.Reset()
 		m.selectAll = false
 		return m, m.submit(value)
@@ -364,6 +495,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "right":
 		m.completeInput()
 		return m, nil
+	case "up":
+		if m.input.Line() == 0 {
+			m.closeCompletion()
+			m.historyPrev()
+			return m, nil
+		}
+	case "down":
+		if m.input.Line() >= m.input.LineCount()-1 {
+			m.closeCompletion()
+			m.historyNext()
+			return m, nil
+		}
 	case "ctrl+h":
 		return m, m.submit("/history")
 	case "ctrl+p":
@@ -383,15 +526,33 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	var cmd tea.Cmd
+	before := m.input.Value()
 	if m.selectAll && isReplacingKey(msg) {
 		m.input.Reset()
+		m.pendingPaste = ""
 		m.selectAll = false
 	}
+	if isReplacingKey(msg) {
+		m.historyAt = len(m.history)
+		m.draft = ""
+		m.closeCompletion()
+	}
 	m.input, cmd = m.input.Update(msg)
-	return m, cmd
+	m.normalizeInputAttachments()
+	pasteCmd := m.observePossiblePaste(msg, before)
+	m.updateInlineSuggestion()
+	return m, tea.Batch(cmd, pasteCmd)
 }
 
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if msg.Type == tea.MouseLeft && m.mode == ModeModal {
+		if next, cmd, handled := m.handleMarketMouse(msg); handled {
+			return next, cmd
+		}
+		if next, cmd, handled := m.handleMCPMouse(msg); handled {
+			return next, cmd
+		}
+	}
 	if msg.Type != tea.MouseWheelUp && msg.Type != tea.MouseWheelDown {
 		return m, nil
 	}
@@ -448,6 +609,9 @@ func (m *Model) refreshContent(reply app.Reply) {
 }
 
 func (m *Model) submit(input string) tea.Cmd {
+	if question, ok := alsoQuestion(input); ok {
+		return m.submitAlso(question)
+	}
 	m.busy = true
 	ch := make(chan app.ActivityRecord, 64)
 	m.events = append(m.events, activityEvent{
@@ -466,6 +630,62 @@ func (m *Model) submit(input string) tea.Cmd {
 		close(ch)
 		return replyMsg(reply)
 	})
+}
+
+func (m *Model) submitAlso(question string) tea.Cmd {
+	m.events = append(m.events, activityEvent{
+		Time:    time.Now(),
+		Command: "/also",
+		Status:  "observer submitted",
+		Detail:  question,
+	})
+	m.status = "Also observer working..."
+	m.refreshContent(app.Reply{})
+	return func() tea.Msg {
+		return alsoReplyMsg(m.app.RunAlsoObserver(context.Background(), question))
+	}
+}
+
+func (m *Model) applyReply(reply app.Reply) {
+	if reply.Command != "/also" || len(reply.History) > 0 {
+		m.messages = reply.History
+	}
+	m.status = reply.Message
+	for _, record := range reply.Activity {
+		m.events = append(m.events, activityEventFromRecord(record))
+	}
+	m.events = append(m.events, activityEvent{
+		Time:    time.Now(),
+		Command: reply.Command,
+		Panel:   reply.OpenPanel,
+		Status:  replyActivityStatus(reply),
+		Detail:  replyActivityDetail(reply),
+	})
+}
+
+func replyActivityStatus(reply app.Reply) string {
+	if reply.Command == "" && reply.OpenPanel == "" {
+		return "Agent completed task."
+	}
+	return compactStatus(reply.Message)
+}
+
+func replyActivityDetail(reply app.Reply) string {
+	if reply.Command == "" && reply.OpenPanel == "" {
+		return ""
+	}
+	return reply.Message
+}
+
+func alsoQuestion(input string) (string, bool) {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "/also" {
+		return "", true
+	}
+	if strings.HasPrefix(trimmed, "/also ") {
+		return strings.TrimSpace(strings.TrimPrefix(trimmed, "/also")), true
+	}
+	return "", false
 }
 
 func waitActivity(ch <-chan app.ActivityRecord) tea.Cmd {
@@ -496,6 +716,30 @@ func (m *Model) openModal(panel string, reply app.Reply) {
 		m.openModelsModal()
 		return
 	}
+	if panel == "market" {
+		m.openMarketModal(reply)
+		return
+	}
+	if panel == "mcp" {
+		m.openMCPModal(reply)
+		return
+	}
+	if panel == "tasks" {
+		m.openTasksModal(reply)
+		return
+	}
+	if panel == "plan" {
+		m.openPlanModal(reply)
+		return
+	}
+	if panel == "usage" {
+		m.openUsageModal(reply)
+		return
+	}
+	if panel == "themes" {
+		m.openThemesModal()
+		return
+	}
 	m.mode = ModeModal
 	m.panel = panel
 	m.input.Blur()
@@ -512,14 +756,27 @@ func (m *Model) openActivityModal() {
 }
 
 func (m *Model) completeInput() {
+	if m.completionOpen {
+		m.applyCompletion()
+		return
+	}
+	if m.openPathCompletionPicker() {
+		return
+	}
 	value := m.input.Value()
 	if value == "" {
+		return
+	}
+	if m.inlineSuggestion != "" && strings.HasPrefix(m.inlineSuggestion, value) && m.inlineSuggestion != value {
+		m.setInputValue(m.inlineSuggestion)
+		m.updateInlineSuggestion()
 		return
 	}
 	for _, candidate := range completions(m.app.State()) {
 		if strings.HasPrefix(candidate, value) && candidate != value {
 			m.input.SetValue(candidate)
 			m.input.SetCursor(len(candidate))
+			m.updateInlineSuggestion()
 			return
 		}
 	}
@@ -584,7 +841,7 @@ func (m Model) statusTopLine() string {
 	runtime, _ := state.Data["runtime"].(map[string]any)
 	provider := fmt.Sprint(runtime["provider"])
 	model := fmt.Sprint(runtime["model"])
-	return fmt.Sprintf(" %s | %s | F1 /help | Ctrl+O activity | Ctrl+Q quit | Ctrl+J newline ", provider, model)
+	return fmt.Sprintf(" %s | %s | F1 /help | Alt+V paste | Ctrl+O activity | Ctrl+Q quit | Ctrl+J newline ", provider, model)
 }
 
 func (m Model) statusWorkLine() string {
@@ -598,7 +855,22 @@ func (m Model) modalView() string {
 	title := modalTitleStyle.Render(strings.ToUpper(m.panel))
 	footer := "Esc close"
 	if m.panel == "plan" && m.mode == ModeModal {
-		footer += " | e edit | /plan focus <topic> | /plan execute"
+		footer += " | up/down move | enter details | e edit | x execute | r refresh"
+	}
+	if m.panel == "market" {
+		footer += " | up/down move | space select | i install | s small | e install+enable | r refresh | d details"
+	}
+	if m.panel == "mcp" {
+		footer += " | up/down move | e enable | x disable | r remove | d details"
+	}
+	if m.panel == "tasks" {
+		footer += " | up/down move | enter details | c cancel | r refresh | d details"
+	}
+	if m.panel == "usage" {
+		footer += " | tab/left/right tabs | f model filter | c clear | r refresh"
+	}
+	if m.panel == "themes" {
+		footer += " | up/down move | d details | enter/Ctrl+S apply"
 	}
 	if m.mode == ModePlanEdit {
 		title = modalTitleStyle.Render("EDIT PLAN")
@@ -621,159 +893,6 @@ func (m *Model) keepModalLineVisible(line int) {
 	if line > bottom-1 {
 		m.modal.SetYOffset(line - max(1, m.modal.Height) + 2)
 	}
-}
-
-func renderMessages(messages []app.Message, width int) string {
-	if len(messages) == 0 {
-		return mutedStyle.Render("No messages yet. Type /help to start.")
-	}
-	entries := make([]logEntry, 0, len(messages))
-	for _, msg := range messages {
-		role := userStyle
-		if msg.Role == "assistant" {
-			role = botStyle
-		}
-		entries = append(entries, logEntry{
-			Title: strings.ToUpper(msg.Role),
-			Body:  msg.Content,
-			Style: role,
-		})
-	}
-	return renderRichLog(entries, width)
-}
-
-func renderActivity(events []activityEvent, reply app.Reply, width int) string {
-	var b strings.Builder
-	start := max(0, len(events)-40)
-	for _, event := range events[start:] {
-		if b.Len() > 0 {
-			b.WriteByte('\n')
-		}
-		b.WriteString(activityLine(event, width))
-	}
-	if reply.OpenPanel != "" {
-		fmt.Fprintf(&b, "\n\n%s\n", renderMarkdown("- Panel: `"+reply.OpenPanel+"`", width))
-	}
-	return strings.TrimSpace(b.String())
-}
-
-func renderFullActivity(events []activityEvent, width int) string {
-	if len(events) == 0 {
-		return "No activity yet."
-	}
-	var b strings.Builder
-	for _, event := range events {
-		fmt.Fprintf(&b, "### %s\n", event.Time.Format("15:04:05"))
-		if event.Input != "" {
-			fmt.Fprintf(&b, "- **input:** %s\n", event.Input)
-		}
-		if event.Command != "" {
-			fmt.Fprintf(&b, "- **command:** `%s`\n", event.Command)
-		}
-		if event.Panel != "" {
-			fmt.Fprintf(&b, "- **panel:** `%s`\n", event.Panel)
-		}
-		if event.Status != "" {
-			fmt.Fprintf(&b, "- **status:** %s\n", event.Status)
-		}
-		if event.Detail != "" && event.Detail != event.Status {
-			fmt.Fprintf(&b, "- **detail:** %s\n", event.Detail)
-		}
-		b.WriteByte('\n')
-	}
-	return renderMarkdown(strings.TrimSpace(b.String()), width)
-}
-
-func activityLine(event activityEvent, width int) string {
-	var parts []string
-	if event.Input != "" {
-		parts = append(parts, "`input` "+quoteCompact(event.Input, max(16, width-18)))
-	}
-	if event.Command != "" {
-		parts = append(parts, "`"+event.Command+"`")
-	}
-	if event.Panel != "" {
-		parts = append(parts, "`panel="+event.Panel+"`")
-	}
-	if event.Status != "" {
-		parts = append(parts, event.Status)
-	}
-	if len(parts) == 0 {
-		parts = append(parts, "event")
-	}
-	text := fmt.Sprintf("`%s` %s", event.Time.Format("15:04:05"), strings.Join(parts, " "))
-	return renderMarkdown(text, width)
-}
-
-func compactStatus(text string) string {
-	return quoteCompact(strings.ReplaceAll(text, "\n", " "), 52)
-}
-
-func quoteCompact(text string, limit int) string {
-	text = strings.TrimSpace(text)
-	if len(text) > limit {
-		text = text[:limit] + "..."
-	}
-	return text
-}
-
-func renderModal(panel string, reply app.Reply, width int) string {
-	switch panel {
-	case "history":
-		return renderHistoryModal(reply, width)
-	case "logs":
-		return renderLogsModal(reply, width)
-	}
-	if reply.Data != nil {
-		data, _ := json.MarshalIndent(reply.Data, "", "  ")
-		return renderMarkdown(reply.Message+"\n\n```json\n"+string(data)+"\n```", width)
-	}
-	return renderMarkdown(reply.Message, width)
-}
-
-func renderHistoryModal(reply app.Reply, width int) string {
-	var b strings.Builder
-	b.WriteString(reply.Message)
-	if files, ok := reply.Data["history_files"].([]app.HistoryFile); ok {
-		b.WriteString("\n\n# History Files\n")
-		if len(files) == 0 {
-			b.WriteString("- none yet\n")
-		}
-		for _, file := range files {
-			fmt.Fprintf(&b, "- %s (%d bytes)\n", file.Name, file.Size)
-		}
-	}
-	if artifacts, ok := reply.Data["artifacts"].([]app.HistoryFile); ok {
-		b.WriteString("\n# Artifacts\n")
-		if len(artifacts) == 0 {
-			b.WriteString("- none yet\n")
-		}
-		for _, file := range artifacts {
-			fmt.Fprintf(&b, "- %s (%d bytes)\n", file.Name, file.Size)
-		}
-	}
-	if messages, ok := reply.Data["history"].([]app.Message); ok {
-		b.WriteString("\n# Visible Session\n")
-		start := max(0, len(messages)-12)
-		for _, message := range messages[start:] {
-			fmt.Fprintf(&b, "- %s: %s\n", message.Role, quoteCompact(message.Content, 160))
-		}
-	}
-	return renderMarkdown(b.String(), width)
-}
-
-func renderLogsModal(reply app.Reply, width int) string {
-	var b strings.Builder
-	b.WriteString(reply.Message)
-	if logs, ok := reply.Data["logs"].([]string); ok {
-		b.WriteString("\n\n```text\n")
-		for _, line := range logs {
-			b.WriteString(line)
-			b.WriteByte('\n')
-		}
-		b.WriteString("```")
-	}
-	return renderMarkdown(b.String(), width)
 }
 
 func completions(state app.Reply) []string {
@@ -824,6 +943,44 @@ func centerText(text string, width int) string {
 	}
 	left := (width - textWidth) / 2
 	return strings.Repeat(" ", left) + text
+}
+
+func (m *Model) observePossiblePaste(msg tea.KeyMsg, before string) tea.Cmd {
+	if msg.Type != tea.KeyRunes && msg.Type != tea.KeySpace {
+		return nil
+	}
+	now := time.Now()
+	batched := len(msg.Runes) > 1
+	rapid := !m.lastInputAt.IsZero() && now.Sub(m.lastInputAt) <= 35*time.Millisecond
+	m.lastInputAt = now
+	if batched {
+		m.rapidInputCount = 4
+	} else if rapid {
+		m.rapidInputCount++
+	} else {
+		m.rapidInputCount = 0
+	}
+	if !batched && m.rapidInputCount < 4 {
+		return nil
+	}
+	m.pasteProtectUntil = now.Add(650 * time.Millisecond)
+	lines := strings.Count(m.input.Value(), "\n") + 1
+	if lines > 1 {
+		m.pasteNotice = fmt.Sprintf("[Pasted +%d lines. Press Enter to submit.]", lines)
+	} else if len(m.input.Value())-len(before) > 20 || batched {
+		m.pasteNotice = "[Pasted text detected. Press Enter to submit.]"
+	}
+	return clearPasteNoticeAfter(700 * time.Millisecond)
+}
+
+func (m Model) pasteProtected() bool {
+	return !m.pasteProtectUntil.IsZero() && time.Now().Before(m.pasteProtectUntil)
+}
+
+func clearPasteNoticeAfter(delay time.Duration) tea.Cmd {
+	return tea.Tick(delay, func(time.Time) tea.Msg {
+		return pasteNoticeDoneMsg{}
+	})
 }
 
 func isReplacingKey(msg tea.KeyMsg) bool {

@@ -92,12 +92,12 @@ the app into plan mode.
 - `/analyze [focus]`: analyze the conversation, artifacts, or a focused topic.
 - `/compact [focus]`: compact message/tool history, optionally with a focus.
 - `/init`: initialize config directory and default skill.
-- `/files [open|view|recent]`: view files in app or external editor.
+- `/files [workspace <path>|open|view|recent]`: view file/workspace info in app or external editor, and set the active workspace.
 - `/clear`: clear visible chat while preserving history.
 - `/reset`: reset current session state.
 - `/config [key=value]`: open settings or update a config key.
-- `/ls`, `/dir`: list files when file tools are installed.
-- `/rm`, `/rmdir`: available only when the user installs file/coding tools.
+- `/ls`, `/dir`: list files in the configured workspace with a small built-in command, even without coding MCP tools.
+- `/rm`, `/rmdir`: remove workspace files/directories with explicit paths; recursive directory removal must be explicit.
 
 ## Skill Triggering
 

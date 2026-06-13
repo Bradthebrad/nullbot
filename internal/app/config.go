@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,16 +11,19 @@ import (
 )
 
 const DefaultPrefix = "Null"
+const defaultMaxIterations = 20
 
 type Config struct {
 	BrandPrefix         string              `json:"brand_prefix"`
 	Tagline             string              `json:"tagline"`
 	AppDir              string              `json:"app_dir"`
 	Model               ModelConfig         `json:"model"`
+	SubagentModel       ModelConfig         `json:"subagent_model,omitempty"`
 	Agent               AgentConfig         `json:"agent"`
 	Compaction          CompactionConfig    `json:"compaction"`
 	Editor              EditorConfig        `json:"editor"`
 	UI                  UIConfig            `json:"ui"`
+	WorkspaceDir        string              `json:"workspace_dir"`
 	SkillDirs           []string            `json:"skill_dirs"`
 	EnabledMCPServers   map[string]MCPEntry `json:"enabled_mcp_servers"`
 	PermissionDefaults  map[string]string   `json:"permission_defaults"`
@@ -37,6 +41,7 @@ type ModelConfig struct {
 
 type AgentConfig struct {
 	MaxIterations int  `json:"max_iterations"`
+	MaxSubagents  int  `json:"max_subagents"`
 	UseResponses  bool `json:"use_responses"`
 }
 
@@ -78,7 +83,8 @@ func DefaultConfig() Config {
 			Model:    "gpt-4.1-mini",
 		},
 		Agent: AgentConfig{
-			MaxIterations: 8,
+			MaxIterations: defaultMaxIterations,
+			MaxSubagents:  3,
 			UseResponses:  true,
 		},
 		Compaction: CompactionConfig{
@@ -91,7 +97,8 @@ func DefaultConfig() Config {
 		Editor: EditorConfig{
 			Command: defaultEditor(),
 		},
-		UI: UIConfig{Theme: "steel"},
+		UI:           UIConfig{Theme: "steel"},
+		WorkspaceDir: defaultWorkspaceDir(),
 		SkillDirs: []string{
 			filepath.Join(appDir, "skills"),
 		},
@@ -142,6 +149,7 @@ func loadOrInit(config Config) (Config, error) {
 		}
 		return Config{}, err
 	}
+	data = bytes.TrimPrefix(data, []byte{0xEF, 0xBB, 0xBF})
 	if err := json.Unmarshal(data, &config); err != nil {
 		return Config{}, err
 	}
@@ -149,10 +157,12 @@ func loadOrInit(config Config) (Config, error) {
 	if config.AppDir == "" {
 		config.AppDir = DefaultAppDir(config.BrandPrefix)
 	}
+	_ = SaveConfig(config)
 	return config, EnsureAppDir(config)
 }
 
 func SaveConfig(config Config) error {
+	config = normalizeConfig(config)
 	if err := EnsureAppDir(config); err != nil {
 		return err
 	}
@@ -173,6 +183,8 @@ func EnsureAppDir(config Config) error {
 		filepath.Join(config.AppDir, "history"),
 		filepath.Join(config.AppDir, "logs"),
 		filepath.Join(config.AppDir, "market"),
+		filepath.Join(config.AppDir, "plans"),
+		filepath.Join(config.AppDir, "usage"),
 		filepath.Join(config.AppDir, "artifacts"),
 	}
 	for _, dir := range dirs {
@@ -184,6 +196,18 @@ func EnsureAppDir(config Config) error {
 }
 
 func normalizeConfig(config Config) Config {
+	if config.Agent.MaxIterations <= 0 || config.Agent.MaxIterations == 8 {
+		config.Agent.MaxIterations = defaultMaxIterations
+	}
+	if config.Agent.MaxSubagents <= 0 {
+		config.Agent.MaxSubagents = 3
+	}
+	if strings.TrimSpace(config.SubagentModel.Provider) == "" {
+		config.SubagentModel = config.Model
+	}
+	if strings.TrimSpace(config.SubagentModel.Model) == "" {
+		config.SubagentModel.Model = config.Model.Model
+	}
 	if strings.TrimSpace(config.BrandPrefix) == "" {
 		config.BrandPrefix = DefaultPrefix
 	}
@@ -193,13 +217,65 @@ func normalizeConfig(config Config) Config {
 	if len(config.SkillDirs) == 0 {
 		config.SkillDirs = []string{filepath.Join(config.AppDir, "skills")}
 	}
+	if strings.TrimSpace(config.WorkspaceDir) == "" {
+		config.WorkspaceDir = defaultWorkspaceDir()
+	}
+	if abs, err := filepath.Abs(config.WorkspaceDir); err == nil {
+		config.WorkspaceDir = normalizeWorkspaceDir(abs)
+	}
 	if config.EnabledMCPServers == nil {
 		config.EnabledMCPServers = map[string]MCPEntry{}
 	}
+	config.EnabledMCPServers = syncMCPWorkspaceArgs(config.EnabledMCPServers, config.WorkspaceDir)
 	if config.PermissionDefaults == nil {
 		config.PermissionDefaults = map[string]string{"coding": "deny", "shell": "ask", "network": "ask"}
 	}
+	if strings.TrimSpace(config.UI.Theme) == "" {
+		config.UI.Theme = "steel"
+	}
 	return config
+}
+
+func syncMCPWorkspaceArgs(servers map[string]MCPEntry, workspace string) map[string]MCPEntry {
+	if len(servers) == 0 || strings.TrimSpace(workspace) == "" {
+		return servers
+	}
+	out := make(map[string]MCPEntry, len(servers))
+	for id, entry := range servers {
+		entry.Args = append([]string{}, entry.Args...)
+		if shouldPassWorkspaceToMCP(id, entry) && !hasWorkspaceArg(entry.Args) {
+			entry.Args = append(entry.Args, "--workspace", workspace)
+		}
+		for i, arg := range entry.Args {
+			if arg == "{{workspace}}" {
+				entry.Args[i] = workspace
+				continue
+			}
+			if arg == "--workspace" && i+1 < len(entry.Args) {
+				entry.Args[i+1] = workspace
+			}
+		}
+		out[id] = entry
+	}
+	return out
+}
+
+func shouldPassWorkspaceToMCP(id string, entry MCPEntry) bool {
+	id = strings.ToLower(id)
+	command := strings.ToLower(filepath.Base(entry.Command))
+	return strings.Contains(id, "nullbot-code-mcp") ||
+		strings.Contains(id, "nullbot-parsers-mcp") ||
+		strings.Contains(command, "nullbot-code-mcp") ||
+		strings.Contains(command, "nullbot-parsers-mcp")
+}
+
+func hasWorkspaceArg(args []string) bool {
+	for _, arg := range args {
+		if arg == "--workspace" {
+			return true
+		}
+	}
+	return false
 }
 
 func DisplayName(config Config) string {
@@ -215,4 +291,36 @@ func defaultEditor() string {
 		return "notepad"
 	}
 	return "vi"
+}
+
+func defaultWorkspaceDir() string {
+	dir, err := os.Getwd()
+	if err == nil {
+		return normalizeWorkspaceDir(dir)
+	}
+	home, err := os.UserHomeDir()
+	if err == nil {
+		return home
+	}
+	return "."
+}
+
+func normalizeWorkspaceDir(dir string) string {
+	dir = filepath.Clean(dir)
+	if strings.EqualFold(filepath.Base(dir), "dist") {
+		parent := filepath.Dir(dir)
+		if looksLikeProjectRoot(parent) {
+			return parent
+		}
+	}
+	return dir
+}
+
+func looksLikeProjectRoot(dir string) bool {
+	for _, marker := range []string{".git", "go.mod", "package.json", "pyproject.toml", "Cargo.toml"} {
+		if _, err := os.Stat(filepath.Join(dir, marker)); err == nil {
+			return true
+		}
+	}
+	return false
 }

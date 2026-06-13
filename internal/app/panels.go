@@ -1,7 +1,7 @@
 package app
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,44 +9,164 @@ import (
 )
 
 func (a *App) mcpCommand(sub string) Reply {
+	fields := strings.Fields(sub)
+	if len(fields) >= 2 {
+		id := fields[1]
+		switch fields[0] {
+		case "enable":
+			config, err := EnableMCPServer(a.config, id)
+			if err != nil {
+				return a.reply("MCP enable failed: "+err.Error(), "/mcp", "mcp")
+			}
+			a.mu.Lock()
+			a.config = config
+			a.mu.Unlock()
+			a.MarkRuntimeDirty("enabled MCP server " + id)
+			return a.mcpPanelReply("Enabled MCP server " + id + ".")
+		case "disable":
+			config, err := DisableMCPServer(a.config, id)
+			if err != nil {
+				return a.reply("MCP disable failed: "+err.Error(), "/mcp", "mcp")
+			}
+			a.mu.Lock()
+			a.config = config
+			a.mu.Unlock()
+			a.MarkRuntimeDirty("disabled MCP server " + id)
+			return a.mcpPanelReply("Disabled MCP server " + id + ".")
+		case "remove":
+			config, err := RemoveMCPServer(a.config, id)
+			if err != nil {
+				return a.reply("MCP remove failed: "+err.Error(), "/mcp", "mcp")
+			}
+			a.mu.Lock()
+			a.config = config
+			a.mu.Unlock()
+			a.MarkRuntimeDirty("removed MCP server " + id)
+			return a.mcpPanelReply("Removed MCP server " + id + ".")
+		}
+	}
+	return a.mcpPanelReply("MCP panel opened.")
+}
+
+func (a *App) mcpPanelReply(message string) Reply {
+	manifest, _ := LoadMarketManifest(a.config)
 	data := map[string]any{
-		"servers": a.config.EnabledMCPServers,
-		"dir":     filepath.Join(a.config.AppDir, "mcp"),
+		"servers":  a.config.EnabledMCPServers,
+		"dir":      filepath.Join(a.config.AppDir, "mcp"),
+		"packages": manifest.Packages,
 	}
-	msg := "MCP panel opened."
-	if sub != "" {
-		msg = "MCP " + sub + " panel opened."
-	}
-	reply := a.reply(msg, "/mcp", "mcp")
+	reply := a.reply(message, "/mcp", "mcp")
 	reply.Data = data
 	return reply
 }
 
 func (a *App) planCommand(sub string) Reply {
+	sub = strings.TrimSpace(sub)
 	if strings.HasPrefix(sub, "focus ") {
-		focus := strings.TrimSpace(strings.TrimPrefix(sub, "focus "))
-		a.SetPlan("Focus: " + focus + "\n\n1. Clarify the goal.\n2. Gather available tools.\n3. Execute the smallest useful next step.\n4. Report results.")
-		reply := a.reply("Plan focus updated.", "/plan", "plan")
-		reply.Data = map[string]any{"plan": a.Plan()}
+		sub = strings.TrimSpace(strings.TrimPrefix(sub, "focus "))
+	}
+	if strings.HasPrefix(sub, "execute") {
+		id := strings.TrimSpace(strings.TrimPrefix(sub, "execute"))
+		plan, err := a.runPlanExecutor(contextOrBackground(), id)
+		if err != nil {
+			reply := a.planPanelReply("Plan execution failed: " + err.Error())
+			reply.Data["error"] = err.Error()
+			return reply
+		}
+		reply := a.planPanelReply("Plan execution complete for " + plan.ID + ".")
+		reply.Data["selected"] = plan
 		return reply
 	}
-	if sub == "execute" {
-		reply := a.reply("Plan execution requested. Agent execution wiring will use the current plan as workflow guidance.", "/plan", "plan")
-		reply.Data = map[string]any{"plan": a.Plan()}
+	if sub != "" {
+		plan, err := a.runPlanner(contextOrBackground(), sub)
+		if err != nil {
+			reply := a.planPanelReply("Plan creation failed: " + err.Error())
+			reply.Data["error"] = err.Error()
+			return reply
+		}
+		reply := a.planPanelReply("Created plan " + plan.ID + ".")
+		reply.Data["selected"] = plan
 		return reply
 	}
-	reply := a.reply(focused("Plan panel opened", sub), "/plan", "plan")
-	reply.Data = map[string]any{"plan": a.Plan()}
+	return a.planPanelReply("Plan panel opened.")
+}
+
+func (a *App) planPanelReply(message string) Reply {
+	a.mu.Lock()
+	config := a.config
+	a.mu.Unlock()
+	plans := listPlans(config)
+	reply := a.reply(message, "/plan", "plan")
+	reply.Data = map[string]any{
+		"plans": plans,
+		"dir":   plansDir(config),
+	}
+	if len(plans) > 0 {
+		if plan, err := loadPlan(config, plans[0].ID); err == nil {
+			reply.Data["selected"] = plan
+		}
+	}
 	return reply
 }
 
-func (a *App) marketCommand() Reply {
-	reply := a.reply("Market panel opened. Initial market support reads cached metadata from the app data market directory.", "/market", "market")
-	reply.Data = map[string]any{
-		"dir":      filepath.Join(a.config.AppDir, "market"),
-		"packages": readMarketCache(filepath.Join(a.config.AppDir, "market", "index.json")),
+func (a *App) marketCommand(sub string) Reply {
+	fields := strings.Fields(sub)
+	if len(fields) > 0 {
+		switch fields[0] {
+		case "refresh":
+			manifest, err := RefreshMarket(contextOrBackground(), a.config)
+			if err != nil {
+				return a.reply("Market refresh failed: "+err.Error(), "/market", "market")
+			}
+			return a.marketPanelReply("Market refreshed.", manifest)
+		case "install":
+			if len(fields) < 2 {
+				return a.reply("Usage: /market install <package-id>[,<package-id>...] [small] [enable]", "/market", "market")
+			}
+			small := containsField(fields[2:], "small")
+			enable := containsField(fields[2:], "enable")
+			ids := splitMarketPackageIDs(fields[1])
+			if len(ids) == 0 {
+				return a.reply("Usage: /market install <package-id>[,<package-id>...] [small] [enable]", "/market", "market")
+			}
+			installed := make([]string, 0, len(ids))
+			for _, id := range ids {
+				pkg, err := InstallMarketPackage(contextOrBackground(), a.config, id, small)
+				if err != nil {
+					return a.reply("Market install failed: "+err.Error(), "/market", "market")
+				}
+				if enable && pkg.Kind == "mcp_server" {
+					config, err := EnableMCPServer(a.config, pkg.ID)
+					if err != nil {
+						return a.reply("Installed "+pkg.ID+" but enable failed: "+err.Error(), "/market", "market")
+					}
+					a.mu.Lock()
+					a.config = config
+					a.mu.Unlock()
+					a.MarkRuntimeDirty("installed and enabled MCP package " + pkg.ID)
+				}
+				installed = append(installed, pkg.ID)
+			}
+			manifest, _ := LoadMarketManifest(a.config)
+			return a.marketPanelReply("Installed "+strings.Join(installed, ", ")+".", manifest)
+		}
 	}
-	return reply
+	manifest, err := LoadMarketManifest(a.config)
+	if err != nil {
+		return a.reply("Market panel failed: "+err.Error(), "/market", "market")
+	}
+	return a.marketPanelReply("Market panel opened.", manifest)
+}
+
+func splitMarketPackageIDs(input string) []string {
+	var ids []string
+	for _, raw := range strings.Split(input, ",") {
+		id := strings.TrimSpace(raw)
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 func (a *App) skillsCommand(sub string) Reply {
@@ -66,9 +186,72 @@ func (a *App) compactCommand(focus string) Reply {
 }
 
 func (a *App) filesCommand(sub string) Reply {
-	reply := a.reply("Files panel opened. External editor: "+a.config.Editor.Command, "/files", "files")
-	reply.Data = map[string]any{"subcommand": sub, "editor": a.config.Editor}
+	fields := strings.Fields(sub)
+	if len(fields) >= 2 && fields[0] == "workspace" {
+		path := strings.TrimSpace(strings.TrimPrefix(sub, "workspace"))
+		if err := a.UpdateConfig(func(config *Config) {
+			config.WorkspaceDir = path
+		}); err != nil {
+			return a.reply("Workspace update failed: "+err.Error(), "/files", "files")
+		}
+		a.MarkRuntimeDirty("workspace changed")
+		return a.filesCommand("")
+	}
+	root, err := workspaceRoot(a.config)
+	message := "Files panel opened."
+	if err != nil {
+		message = "Files panel opened, but workspace is invalid: " + err.Error()
+	}
+	reply := a.reply(message, "/files", "files")
+	summary := map[string]any{"subcommand": sub, "editor": a.config.Editor, "workspace": root}
+	if err == nil {
+		if counts, countErr := workspaceCounts(root); countErr == nil {
+			summary["counts"] = counts
+		}
+		if listing, listErr := listWorkspaceDir(a.config, ".", 40); listErr == nil {
+			summary["listing"] = listing
+		}
+	}
+	reply.Data = summary
 	return reply
+}
+
+func (a *App) listFilesCommand(command, path string) Reply {
+	output, err := listWorkspaceDir(a.config, path, 200)
+	if err != nil {
+		return a.reply("List failed: "+err.Error(), command, "")
+	}
+	return a.reply(output, command, "", map[string]any{"workspace": a.config.WorkspaceDir, "path": path})
+}
+
+func workspaceCounts(root string) (map[string]int, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	counts := map[string]int{"files": 0, "directories": 0}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			counts["directories"]++
+		} else {
+			counts["files"]++
+		}
+	}
+	counts["total"] = len(entries)
+	return counts, nil
+}
+
+func (a *App) removeFileCommand(command, sub string, dirsOnly bool) Reply {
+	fields := strings.Fields(sub)
+	if len(fields) == 0 {
+		return a.reply("Usage: "+command+" <path> [--recursive]", command, "files")
+	}
+	recursive := containsField(fields[1:], "--recursive") || containsField(fields[1:], "-r")
+	message, err := removeWorkspacePath(a.config, fields[0], recursive, dirsOnly)
+	if err != nil {
+		return a.reply("Remove failed: "+err.Error(), command, "files")
+	}
+	return a.reply(message, command, "files")
 }
 
 func (a *App) compactSummary(focus string) string {
@@ -117,16 +300,29 @@ func scanSkillFiles(config Config) []string {
 	return skills
 }
 
-func readMarketCache(path string) []map[string]any {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil
+func (a *App) marketPanelReply(message string, manifest MarketManifest) Reply {
+	reply := a.reply(message, "/market", "market")
+	reply.Data = map[string]any{
+		"dir":       filepath.Join(a.config.AppDir, "market"),
+		"manifest":  manifest,
+		"packages":  manifest.Packages,
+		"summary":   MarketSummary(manifest),
+		"refreshed": manifest.UpdatedAt,
 	}
-	var packages []map[string]any
-	if err := json.Unmarshal(data, &packages); err != nil {
-		return nil
+	return reply
+}
+
+func containsField(fields []string, target string) bool {
+	for _, field := range fields {
+		if strings.EqualFold(field, target) {
+			return true
+		}
 	}
-	return packages
+	return false
+}
+
+func contextOrBackground() context.Context {
+	return context.Background()
 }
 
 func truncate(text string, limit int) string {

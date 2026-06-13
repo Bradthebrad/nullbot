@@ -1,9 +1,12 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -104,6 +107,339 @@ func TestRenderFullActivityUsesMarkdownPresentation(t *testing.T) {
 	}
 	if !strings.Contains(plain, "detail") {
 		t.Fatalf("activity missing detail:\n%s", rendered)
+	}
+}
+
+func TestMarketModalRendersInteractiveRows(t *testing.T) {
+	model := New(app.New(app.DefaultConfig()))
+	model.width = 100
+	model.height = 36
+	model.resize()
+	model.openMarketModal(app.Reply{
+		Message: "Market panel opened.",
+		Data: map[string]any{"packages": []app.MarketPackage{{
+			ID:          "nullbot-code-mcp",
+			Kind:        "mcp_server",
+			Description: "Coding tools",
+			Status:      "available",
+		}}},
+	})
+	rendered := stripANSI(model.modal.View())
+	if !strings.Contains(rendered, "[ ]  nullbot-code-mcp") {
+		t.Fatalf("market modal missing selectable row:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "PACKAGE") || !strings.Contains(rendered, "DESCRIPTION") {
+		t.Fatalf("market modal missing table headers:\n%s", rendered)
+	}
+	if !strings.Contains(strings.ToLower(rendered), "click") {
+		t.Fatalf("market modal missing interaction hint:\n%s", rendered)
+	}
+}
+
+func TestMCPModalRendersInteractiveRows(t *testing.T) {
+	model := New(app.New(app.DefaultConfig()))
+	model.width = 100
+	model.height = 36
+	model.resize()
+	model.openMCPModal(app.Reply{
+		Message: "MCP panel opened.",
+		Data: map[string]any{"packages": []app.MarketPackage{{
+			ID:          "nullbot-code-mcp",
+			Kind:        "mcp_server",
+			Description: "Coding tools",
+			Installed:   true,
+			Enabled:     true,
+		}}},
+	})
+	rendered := stripANSI(model.modal.View())
+	if !strings.Contains(rendered, "nullbot-code-mcp") || !strings.Contains(rendered, "enabled") {
+		t.Fatalf("mcp modal missing interactive row:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "PACKAGE") || !strings.Contains(rendered, "DESCRIPTION") {
+		t.Fatalf("mcp modal missing table headers:\n%s", rendered)
+	}
+	if !strings.Contains(strings.ToLower(rendered), "click") {
+		t.Fatalf("mcp modal missing interaction hint:\n%s", rendered)
+	}
+}
+
+func TestInputHistoryNavigationRestoresDraft(t *testing.T) {
+	model := New(app.New(app.DefaultConfig()))
+	model.rememberInput("/help")
+	model.rememberInput("/ls")
+	model.input.SetValue("draft message")
+
+	model.historyPrev()
+	if got := model.input.Value(); got != "/ls" {
+		t.Fatalf("prev = %q", got)
+	}
+	model.historyPrev()
+	if got := model.input.Value(); got != "/help" {
+		t.Fatalf("second prev = %q", got)
+	}
+	model.historyNext()
+	model.historyNext()
+	if got := model.input.Value(); got != "draft message" {
+		t.Fatalf("draft restored = %q", got)
+	}
+}
+
+func TestPathCompletionForFilesWorkspace(t *testing.T) {
+	parent := t.TempDir()
+	target := filepath.Join(parent, "workspace-target")
+	if err := os.Mkdir(target, 0700); err != nil {
+		t.Fatal(err)
+	}
+	model := New(app.New(app.DefaultConfig()))
+	model.input.SetValue("/files workspace " + filepath.Join(parent, "work"))
+	model.completeInput()
+	want := "/files workspace " + target + string(os.PathSeparator)
+	if got := model.input.Value(); got != want {
+		t.Fatalf("completion = %q, want %q", got, want)
+	}
+}
+
+func TestPathCompletionForWorkspaceListCommand(t *testing.T) {
+	config := app.DefaultConfig()
+	config.WorkspaceDir = t.TempDir()
+	if err := os.Mkdir(filepath.Join(config.WorkspaceDir, "src"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	model := New(app.New(config))
+	model.input.SetValue("/ls s")
+	model.completeInput()
+	if got, want := model.input.Value(), "/ls src"+string(os.PathSeparator); got != want {
+		t.Fatalf("completion = %q, want %q", got, want)
+	}
+}
+
+func TestPathCompletionPickerForMultipleDirectories(t *testing.T) {
+	parent := t.TempDir()
+	for _, name := range []string{"Users", "Windows"} {
+		if err := os.Mkdir(filepath.Join(parent, name), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	model := New(app.New(app.DefaultConfig()))
+	model.input.SetValue("/files workspace " + parent + string(os.PathSeparator))
+
+	model.completeInput()
+	if !model.completionOpen {
+		t.Fatal("completion picker did not open")
+	}
+	model.completionIndex = 0
+	model.applyCompletion()
+	if got := model.input.Value(); !strings.HasPrefix(got, "/files workspace "+parent) || !strings.HasSuffix(got, string(os.PathSeparator)) {
+		t.Fatalf("selected completion = %q", got)
+	}
+}
+
+func TestInlineHistorySuggestionCompletesFrequentCommand(t *testing.T) {
+	model := New(app.New(app.DefaultConfig()))
+	model.rememberInput("/files workspace C:\\Users\\brada")
+	model.rememberInput("/files workspace C:\\Users\\brada")
+	model.input.SetValue("/files")
+	model.updateInlineSuggestion()
+	if got := model.inlineSuggestion; got != "/files workspace C:\\Users\\brada" {
+		t.Fatalf("suggestion = %q", got)
+	}
+	model.completeInput()
+	if got := model.input.Value(); got != "/files workspace C:\\Users\\brada" {
+		t.Fatalf("completed = %q", got)
+	}
+}
+
+func TestAttachmentTokensFromPastedPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "report.pdf")
+	if err := os.WriteFile(path, []byte("pdf"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got := attachmentTokensFromText(path)
+	if len(got) != 1 {
+		t.Fatal("expected pasted path to become attachment token")
+	}
+	want := attachmentToken(path)
+	if got[0] != want {
+		t.Fatalf("token = %q, want %q", got, want)
+	}
+}
+
+func TestNormalizeAttachmentTextPreservesQuestion(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wedding.jpg")
+	if err := os.WriteFile(path, []byte("jpg"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, count := normalizeAttachmentText(path + " what's this a picture of?")
+	if count != 1 {
+		t.Fatalf("count = %d, text = %q", count, got)
+	}
+	if !strings.Contains(got, attachmentToken(path)) || !strings.Contains(got, "what's this a picture of?") {
+		t.Fatalf("normalized = %q", got)
+	}
+}
+
+func TestNormalizeInputAttachmentsConvertsDroppedPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "drop.png")
+	if err := os.WriteFile(path, []byte("png"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	model := New(app.New(app.DefaultConfig()))
+	model.input.SetValue(path)
+	model.normalizeInputAttachments()
+	if got := model.input.Value(); got != attachmentToken(path) {
+		t.Fatalf("input = %q, want %q", got, attachmentToken(path))
+	}
+}
+
+func TestPasteProtectedEnterCapturesBlock(t *testing.T) {
+	model := New(app.New(app.DefaultConfig()))
+	model.input.SetValue("first line\nsecond line that is long enough")
+	model.pasteProtectUntil = time.Now().Add(time.Second)
+	next, _ := model.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	updated := next.(Model)
+	if updated.input.Value() != "" || !strings.Contains(updated.pendingPaste, "second line") {
+		t.Fatalf("input=%q pending=%q", updated.input.Value(), updated.pendingPaste)
+	}
+	if len(updated.messages) != 0 {
+		t.Fatalf("enter submitted during paste guard: %#v", updated.messages)
+	}
+}
+
+func TestPasteProtectedEnterCapturesSingleInjectedLine(t *testing.T) {
+	model := New(app.New(app.DefaultConfig()))
+	model.input.SetValue("first pasted line")
+	model.pasteProtectUntil = time.Now().Add(time.Second)
+	next, _ := model.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	updated := next.(Model)
+	if updated.input.Value() != "" || !strings.Contains(updated.pendingPaste, "first pasted line") {
+		t.Fatalf("input=%q pending=%q", updated.input.Value(), updated.pendingPaste)
+	}
+	if len(updated.messages) != 0 {
+		t.Fatalf("line submitted during paste guard: %#v", updated.messages)
+	}
+}
+
+func TestPasteProtectedEnterDoesNotCaptureSlashCommand(t *testing.T) {
+	model := New(app.New(app.DefaultConfig()))
+	model.input.SetValue("/config")
+	model.pasteProtectUntil = time.Now().Add(time.Second)
+	next, cmd := model.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	updated := next.(Model)
+	if updated.pendingPaste != "" {
+		t.Fatalf("slash command captured as paste: %q", updated.pendingPaste)
+	}
+	if cmd == nil {
+		t.Fatal("slash command did not produce submit command")
+	}
+}
+
+func TestCapturePasteShowsChipWithoutInputText(t *testing.T) {
+	model := New(app.New(app.DefaultConfig()))
+	model.capturePaste("alpha\nbeta\ngamma")
+	if model.input.Value() != "" {
+		t.Fatalf("paste rendered in input: %q", model.input.Value())
+	}
+	if !strings.Contains(model.pasteChip(), "Pasted +3 lines") {
+		t.Fatalf("paste chip = %q", model.pasteChip())
+	}
+}
+
+func TestEnterConvertsPastedBlockBeforeSubmit(t *testing.T) {
+	model := New(app.New(app.DefaultConfig()))
+	model.input.SetValue("alpha\nbeta\ngamma delta epsilon zeta")
+	next, _ := model.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	updated := next.(Model)
+	if updated.pendingPaste == "" || updated.input.Value() != "" {
+		t.Fatalf("pending=%q input=%q", updated.pendingPaste, updated.input.Value())
+	}
+}
+
+func TestActivityToolRendererOmitsToolOutput(t *testing.T) {
+	events := []activityEvent{
+		{Time: now(), Command: "agent/read_file", Status: "tool start", Detail: `args: {"path":"README.md","max_bytes":2000}`},
+		{Time: now(), Command: "agent/read_file", Status: "tool complete", Detail: `output: very noisy file contents`},
+		{Time: now(), Command: "agent", Status: "agent complete", Detail: "Agent completed task."},
+	}
+	rendered := stripANSI(renderActivity(events, app.Reply{}, 80))
+	if strings.Contains(rendered, "very noisy file contents") || strings.Contains(rendered, "output:") {
+		t.Fatalf("activity leaked tool output:\n%s", rendered)
+	}
+	for _, want := range []string{"called", "read_file", "complete", "Agent completed task"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("activity missing %q:\n%s", want, rendered)
+		}
+	}
+}
+
+func TestUsageModalRendersTabsAndChart(t *testing.T) {
+	model := New(app.New(app.DefaultConfig()))
+	model.width = 120
+	model.height = 40
+	model.resize()
+	nowTime := now()
+	reply := app.Reply{
+		Message:   "Usage panel opened.",
+		OpenPanel: "usage",
+		Data: map[string]any{"usage": app.UsageSnapshot{
+			Total:   app.UsageTotals{Requests: 1, InputTokens: 100, OutputTokens: 50, TotalTokens: 150, CostUSD: 0.001},
+			Session: app.UsageTotals{Requests: 1, InputTokens: 100, OutputTokens: 50, TotalTokens: 150, CostUSD: 0.001},
+			ByModel: []app.UsageModelSummary{{
+				Provider: "openai",
+				Model:    "gpt-5-mini",
+				Totals:   app.UsageTotals{Requests: 1, TotalTokens: 150, CostUSD: 0.001},
+			}},
+			Daily: []app.UsageDailySummary{{
+				Day:      nowTime.Format("2006-01-02"),
+				Provider: "openai",
+				Model:    "gpt-5-mini",
+				Totals:   app.UsageTotals{TotalTokens: 150},
+			}},
+		}},
+	}
+	model.openUsageModal(reply)
+	rendered := stripANSI(model.modal.View())
+	if !strings.Contains(rendered, "Usage Summary") || !strings.Contains(rendered, "This Session") {
+		t.Fatalf("usage summary missing:\n%s", rendered)
+	}
+	model.usageTab = 1
+	model.modal.SetContent(model.renderUsageModal())
+	rendered = stripANSI(model.modal.View())
+	if !strings.Contains(rendered, "Daily Token Usage") {
+		t.Fatalf("usage chart missing:\n%s", rendered)
+	}
+}
+
+func TestThemesModalRendersAndAppliesTheme(t *testing.T) {
+	if len(themes) != 20 {
+		t.Fatalf("theme count = %d", len(themes))
+	}
+	for _, theme := range themes {
+		if theme.BannerTop == "" {
+			t.Fatalf("theme %s missing banner top color", theme.ID)
+		}
+	}
+	config := app.DefaultConfig()
+	config.AppDir = t.TempDir()
+	model := New(app.New(config))
+	model.width = 120
+	model.height = 40
+	model.resize()
+	model.openThemesModal()
+	rendered := stripANSI(model.renderThemesModal())
+	if !strings.Contains(rendered, "Classic NullBot") || !strings.Contains(rendered, "Neon Noir") {
+		t.Fatalf("themes missing:\n%s", rendered)
+	}
+	model.themeIndex = themeIndexByID("neon")
+	next, _, handled := model.handleThemesKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if !handled {
+		t.Fatal("theme key was not handled")
+	}
+	updated := next.(*Model)
+	if got := updated.app.Config().UI.Theme; got != "neon" {
+		t.Fatalf("theme = %q", got)
 	}
 }
 

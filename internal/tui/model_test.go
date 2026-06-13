@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -290,6 +291,20 @@ func TestNormalizeInputAttachmentsConvertsDroppedPath(t *testing.T) {
 	model.normalizeInputAttachments()
 	if got := model.input.Value(); got != attachmentToken(path) {
 		t.Fatalf("input = %q, want %q", got, attachmentToken(path))
+	}
+}
+
+func TestPasteProtectedEnterInsertsNewline(t *testing.T) {
+	model := New(app.New(app.DefaultConfig()))
+	model.input.SetValue("first line")
+	model.pasteProtectUntil = time.Now().Add(time.Second)
+	next, _ := model.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	updated := next.(Model)
+	if got := updated.input.Value(); got != "first line\n" {
+		t.Fatalf("input = %q", got)
+	}
+	if len(updated.messages) != 0 {
+		t.Fatalf("enter submitted during paste guard: %#v", updated.messages)
 	}
 }
 

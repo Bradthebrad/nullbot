@@ -81,6 +81,9 @@ type Model struct {
 	completionOptions []completionOption
 	completionIndex   int
 	inlineSuggestion  string
+	lastInputAt       time.Time
+	pasteProtectUntil time.Time
+	pasteNotice       string
 }
 
 type replyMsg app.Reply
@@ -90,6 +93,7 @@ type liveActivityMsg struct {
 	Ch     <-chan app.ActivityRecord
 }
 type liveActivityDoneMsg struct{}
+type pasteNoticeDoneMsg struct{}
 
 type activityEvent struct {
 	Time    time.Time
@@ -173,6 +177,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshContent(app.Reply{})
 		return m, waitActivity(msg.Ch)
 	case liveActivityDoneMsg:
+		return m, nil
+	case pasteNoticeDoneMsg:
+		if time.Now().After(m.pasteProtectUntil) {
+			m.pasteNotice = ""
+		}
 		return m, nil
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -262,6 +271,9 @@ func bannerTooWide(lines []string, width int) bool {
 func (m Model) inputView() string {
 	if !m.selectAll {
 		base := m.input.View()
+		if m.pasteNotice != "" {
+			base += "\n" + mutedStyle.Render(m.pasteNotice)
+		}
 		if m.inlineSuggestion != "" && m.input.Value() != "" && !m.completionOpen {
 			base += "\n" + mutedStyle.Render("→ "+m.inlineSuggestion)
 		}
@@ -421,6 +433,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.status = "Activity panel cleared."
 		return m, nil
 	case "enter":
+		if m.pasteProtected() {
+			m.input.InsertString("\n")
+			m.pasteNotice = "[Pasted text detected. Press Enter again to submit.]"
+			m.pasteProtectUntil = time.Now().Add(250 * time.Millisecond)
+			m.updateInlineSuggestion()
+			return m, clearPasteNoticeAfter(300 * time.Millisecond)
+		}
 		if m.input.Value() == "" {
 			return m, nil
 		}
@@ -486,6 +505,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	var cmd tea.Cmd
+	before := m.input.Value()
 	if m.selectAll && isReplacingKey(msg) {
 		m.input.Reset()
 		m.selectAll = false
@@ -497,8 +517,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	m.input, cmd = m.input.Update(msg)
 	m.normalizeInputAttachments()
+	pasteCmd := m.observePossiblePaste(msg, before)
 	m.updateInlineSuggestion()
-	return m, cmd
+	return m, tea.Batch(cmd, pasteCmd)
 }
 
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
@@ -893,6 +914,37 @@ func centerText(text string, width int) string {
 	}
 	left := (width - textWidth) / 2
 	return strings.Repeat(" ", left) + text
+}
+
+func (m *Model) observePossiblePaste(msg tea.KeyMsg, before string) tea.Cmd {
+	if msg.Type != tea.KeyRunes && msg.Type != tea.KeySpace {
+		return nil
+	}
+	now := time.Now()
+	batched := len(msg.Runes) > 1
+	rapid := !m.lastInputAt.IsZero() && now.Sub(m.lastInputAt) <= 12*time.Millisecond
+	m.lastInputAt = now
+	if !batched && !rapid {
+		return nil
+	}
+	m.pasteProtectUntil = now.Add(650 * time.Millisecond)
+	lines := strings.Count(m.input.Value(), "\n") + 1
+	if lines > 1 {
+		m.pasteNotice = fmt.Sprintf("[Pasted +%d lines. Press Enter to submit.]", lines)
+	} else if len(m.input.Value())-len(before) > 20 || batched {
+		m.pasteNotice = "[Pasted text detected. Press Enter to submit.]"
+	}
+	return clearPasteNoticeAfter(700 * time.Millisecond)
+}
+
+func (m Model) pasteProtected() bool {
+	return !m.pasteProtectUntil.IsZero() && time.Now().Before(m.pasteProtectUntil)
+}
+
+func clearPasteNoticeAfter(delay time.Duration) tea.Cmd {
+	return tea.Tick(delay, func(time.Time) tea.Msg {
+		return pasteNoticeDoneMsg{}
+	})
 }
 
 func isReplacingKey(msg tea.KeyMsg) bool {

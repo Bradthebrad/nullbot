@@ -138,7 +138,8 @@ func (m *Model) captureInputAsPasteIfNeeded() bool {
 
 func (m *Model) capturePastedLineIfNeeded() bool {
 	value := m.input.Value()
-	if strings.TrimSpace(value) == "" || !m.pasteProtected() {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" || strings.HasPrefix(trimmed, "/") || !m.pasteProtected() {
 		return false
 	}
 	m.input.Reset()

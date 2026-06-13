@@ -84,6 +84,7 @@ type Model struct {
 	completionIndex   int
 	inlineSuggestion  string
 	lastInputAt       time.Time
+	rapidInputCount   int
 	pasteProtectUntil time.Time
 	pasteNotice       string
 	pendingPaste      string
@@ -952,7 +953,14 @@ func (m *Model) observePossiblePaste(msg tea.KeyMsg, before string) tea.Cmd {
 	batched := len(msg.Runes) > 1
 	rapid := !m.lastInputAt.IsZero() && now.Sub(m.lastInputAt) <= 35*time.Millisecond
 	m.lastInputAt = now
-	if !batched && !rapid {
+	if batched {
+		m.rapidInputCount = 4
+	} else if rapid {
+		m.rapidInputCount++
+	} else {
+		m.rapidInputCount = 0
+	}
+	if !batched && m.rapidInputCount < 4 {
 		return nil
 	}
 	m.pasteProtectUntil = now.Add(650 * time.Millisecond)

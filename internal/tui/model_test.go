@@ -322,6 +322,20 @@ func TestPasteProtectedEnterCapturesSingleInjectedLine(t *testing.T) {
 	}
 }
 
+func TestPasteProtectedEnterDoesNotCaptureSlashCommand(t *testing.T) {
+	model := New(app.New(app.DefaultConfig()))
+	model.input.SetValue("/config")
+	model.pasteProtectUntil = time.Now().Add(time.Second)
+	next, cmd := model.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	updated := next.(Model)
+	if updated.pendingPaste != "" {
+		t.Fatalf("slash command captured as paste: %q", updated.pendingPaste)
+	}
+	if cmd == nil {
+		t.Fatal("slash command did not produce submit command")
+	}
+}
+
 func TestCapturePasteShowsChipWithoutInputText(t *testing.T) {
 	model := New(app.New(app.DefaultConfig()))
 	model.capturePaste("alpha\nbeta\ngamma")

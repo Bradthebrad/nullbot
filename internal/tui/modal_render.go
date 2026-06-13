@@ -176,6 +176,10 @@ func renderModal(panel string, reply app.Reply, width int) string {
 		if plans, ok := reply.Data["plans"].([]app.PlanSummary); ok {
 			return renderMarkdown(planSummaryMarkdown(plans), width)
 		}
+	case "usage":
+		if usage, ok := reply.Data["usage"].(app.UsageSnapshot); ok {
+			return renderMarkdown(fmt.Sprintf("# Usage\n\n- Session tokens: `%d`\n- Total tokens: `%d`\n- Total cost: `%s`\n", usage.Session.TotalTokens, usage.Total.TotalTokens, formatUsageCost(usage.Total.CostUSD)), width)
+		}
 	case "tasks":
 		if tasks, ok := reply.Data["tasks"].([]app.AgentTask); ok {
 			return renderMarkdown(taskSummaryMarkdown(tasks), width)

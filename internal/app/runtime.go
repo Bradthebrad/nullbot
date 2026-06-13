@@ -74,6 +74,7 @@ func (a *App) invokeAlsoObserver(ctx context.Context, snapshot AlsoSnapshot) (st
 	if err != nil {
 		return "", err
 	}
+	a.recordUsageDirect("Also Observer", snapshot.Config.Model, messages, msg)
 	return lcContentText(msg.Content), nil
 }
 
@@ -197,6 +198,7 @@ func (a *App) runSubagent(ctx context.Context, name, task string) (string, error
 			record := activityRecordFromCallback(event)
 			record.Name = name + "/" + record.Name
 			a.recordTaskCallback(taskID, event)
+			a.recordUsageCallback(taskID, name, config.SubagentModel, event)
 			a.appendActivity(record)
 		}),
 	})
@@ -248,6 +250,10 @@ func (a *App) handleAgentCallback(event callbacks.Event) {
 	if event.Event == callbacks.EventLLMEnd {
 		a.addTaskUsage(taskID, usageFromLLMEnd(event))
 	}
+	a.mu.Lock()
+	config := a.config
+	a.mu.Unlock()
+	a.recordUsageCallback(taskID, DisplayName(config), config.Model, event)
 	a.appendActivity(record)
 }
 

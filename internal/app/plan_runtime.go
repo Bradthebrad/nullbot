@@ -42,6 +42,7 @@ func (a *App) runPlanner(ctx context.Context, focus string) (Plan, error) {
 			record := activityRecordFromCallback(event)
 			record.Name = "planner/" + record.Name
 			a.recordTaskCallback(taskID, event)
+			a.recordUsageCallback(taskID, "planner", config.Model, event)
 			a.appendActivity(record)
 		}),
 	})
@@ -110,6 +111,7 @@ func (a *App) runPlanExecutor(ctx context.Context, id string) (Plan, error) {
 			record := activityRecordFromCallback(event)
 			record.Name = "executor/" + record.Name
 			a.recordTaskCallback(taskID, event)
+			a.recordUsageCallback(taskID, "plan-executor", config.Model, event)
 			a.appendActivity(record)
 		}),
 	})

@@ -265,6 +265,44 @@ func TestActivityToolRendererOmitsToolOutput(t *testing.T) {
 	}
 }
 
+func TestUsageModalRendersTabsAndChart(t *testing.T) {
+	model := New(app.New(app.DefaultConfig()))
+	model.width = 120
+	model.height = 40
+	model.resize()
+	nowTime := now()
+	reply := app.Reply{
+		Message:   "Usage panel opened.",
+		OpenPanel: "usage",
+		Data: map[string]any{"usage": app.UsageSnapshot{
+			Total:   app.UsageTotals{Requests: 1, InputTokens: 100, OutputTokens: 50, TotalTokens: 150, CostUSD: 0.001},
+			Session: app.UsageTotals{Requests: 1, InputTokens: 100, OutputTokens: 50, TotalTokens: 150, CostUSD: 0.001},
+			ByModel: []app.UsageModelSummary{{
+				Provider: "openai",
+				Model:    "gpt-5-mini",
+				Totals:   app.UsageTotals{Requests: 1, TotalTokens: 150, CostUSD: 0.001},
+			}},
+			Daily: []app.UsageDailySummary{{
+				Day:      nowTime.Format("2006-01-02"),
+				Provider: "openai",
+				Model:    "gpt-5-mini",
+				Totals:   app.UsageTotals{TotalTokens: 150},
+			}},
+		}},
+	}
+	model.openUsageModal(reply)
+	rendered := stripANSI(model.modal.View())
+	if !strings.Contains(rendered, "Usage Summary") || !strings.Contains(rendered, "This Session") {
+		t.Fatalf("usage summary missing:\n%s", rendered)
+	}
+	model.usageTab = 1
+	model.modal.SetContent(model.renderUsageModal())
+	rendered = stripANSI(model.modal.View())
+	if !strings.Contains(rendered, "Daily Token Usage") {
+		t.Fatalf("usage chart missing:\n%s", rendered)
+	}
+}
+
 func stripANSI(text string) string {
 	return regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(text, "")
 }

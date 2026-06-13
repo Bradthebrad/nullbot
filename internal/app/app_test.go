@@ -36,6 +36,39 @@ func TestConfigCommandUpdatesBrand(t *testing.T) {
 	}
 }
 
+func TestUsageSnapshotAggregatesSessionAndModels(t *testing.T) {
+	config := DefaultConfig()
+	config.AppDir = t.TempDir()
+	if err := EnsureAppDir(config); err != nil {
+		t.Fatal(err)
+	}
+	app := New(config)
+	if err := app.appendUsageRecord(UsageRecord{
+		Time:         time.Now().UTC(),
+		SessionID:    app.sessionID,
+		Provider:     "openai",
+		Model:        "gpt-5-mini",
+		Agent:        "test",
+		InputTokens:  1000,
+		OutputTokens: 500,
+		TotalTokens:  1500,
+		CostUSD:      0.00125,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := app.UsageSnapshot()
+	if snapshot.Session.TotalTokens != 1500 || snapshot.Total.TotalTokens != 1500 {
+		t.Fatalf("usage totals = session %#v total %#v", snapshot.Session, snapshot.Total)
+	}
+	if len(snapshot.ByModel) != 1 || snapshot.ByModel[0].Model != "gpt-5-mini" {
+		t.Fatalf("by model = %#v", snapshot.ByModel)
+	}
+	reply := app.Submit(context.Background(), "/usage")
+	if reply.OpenPanel != "usage" {
+		t.Fatalf("/usage panel = %q", reply.OpenPanel)
+	}
+}
+
 func TestWorkspaceSlashCommands(t *testing.T) {
 	config := DefaultConfig()
 	config.AppDir = t.TempDir()

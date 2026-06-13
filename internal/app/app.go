@@ -24,6 +24,7 @@ type App struct {
 	runtimeDirtyReason string
 	tasks              map[string]*AgentTask
 	taskCancels        map[string]context.CancelFunc
+	taskPendingInput   map[string]int
 	taskSeq            int
 }
 

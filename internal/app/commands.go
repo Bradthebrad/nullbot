@@ -21,6 +21,7 @@ var commands = []Command{
 	{Name: "/plan", Usage: "/plan execute", Description: "Execute the current plan."},
 	{Name: "/also", Usage: "/also <message>", Description: "Inject additional guidance into the current workflow."},
 	{Name: "/tasks", Usage: "/tasks [cancel <id>|detail <id>]", Description: "Inspect and cancel running agent tasks."},
+	{Name: "/usage", Usage: "/usage [clear]", Description: "Show local token and cost usage tracking."},
 	{Name: "/pause", Usage: "/pause", Description: "Pause active work without discarding state."},
 	{Name: "/mcp", Usage: "/mcp [enable|disable|remove <id>]", Description: "Manage MCP servers."},
 	{Name: "/models", Usage: "/models", Description: "Select provider and model."},
@@ -67,6 +68,8 @@ func (a *App) executeSlash(ctx context.Context, input string) Reply {
 		return a.RunAlsoObserver(ctx, rest)
 	case "/tasks":
 		return a.tasksCommand(strings.TrimSpace(rest))
+	case "/usage":
+		return a.usageCommand(strings.TrimSpace(rest))
 	case "/pause":
 		a.setPaused(true)
 		return a.reply("Paused. Tool calls and results remain in session state.", name, "")

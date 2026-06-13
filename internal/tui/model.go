@@ -72,6 +72,10 @@ type Model struct {
 	planIndex   int
 	planDetails bool
 
+	usage            app.UsageSnapshot
+	usageTab         int
+	usageModelFilter string
+
 	completionOpen    bool
 	completionPrefix  string
 	completionOptions []completionOption
@@ -306,6 +310,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return next, cmd
 		}
 		if next, cmd, handled := m.handlePlanKey(msg); handled {
+			return next, cmd
+		}
+		if next, cmd, handled := m.handleUsageKey(msg); handled {
 			return next, cmd
 		}
 		switch msg.String() {
@@ -655,6 +662,10 @@ func (m *Model) openModal(panel string, reply app.Reply) {
 		m.openPlanModal(reply)
 		return
 	}
+	if panel == "usage" {
+		m.openUsageModal(reply)
+		return
+	}
 	m.mode = ModeModal
 	m.panel = panel
 	m.input.Blur()
@@ -780,6 +791,9 @@ func (m Model) modalView() string {
 	}
 	if m.panel == "tasks" {
 		footer += " | up/down move | enter details | c cancel | r refresh | d details"
+	}
+	if m.panel == "usage" {
+		footer += " | tab/left/right tabs | f model filter | c clear | r refresh"
 	}
 	if m.mode == ModePlanEdit {
 		title = modalTitleStyle.Render("EDIT PLAN")

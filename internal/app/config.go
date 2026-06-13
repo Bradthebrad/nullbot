@@ -184,6 +184,7 @@ func EnsureAppDir(config Config) error {
 		filepath.Join(config.AppDir, "logs"),
 		filepath.Join(config.AppDir, "market"),
 		filepath.Join(config.AppDir, "plans"),
+		filepath.Join(config.AppDir, "usage"),
 		filepath.Join(config.AppDir, "artifacts"),
 	}
 	for _, dir := range dirs {

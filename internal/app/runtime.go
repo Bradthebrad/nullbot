@@ -437,7 +437,12 @@ func mcpRuntimeEnv(config Config, id string, entry MCPEntry) map[string]string {
 func shouldPassVisionEnvToMCP(id string, entry MCPEntry) bool {
 	id = strings.ToLower(id)
 	command := strings.ToLower(entry.Command)
-	return strings.Contains(id, "parsers") || strings.Contains(command, "parsers")
+	return strings.Contains(id, "parsers") ||
+		strings.Contains(command, "parsers") ||
+		strings.Contains(id, "imagetools") ||
+		strings.Contains(command, "imagetools") ||
+		strings.Contains(id, "image-tools") ||
+		strings.Contains(command, "image-tools")
 }
 
 func mcpClientForEntry(ctx context.Context, entry MCPEntry) (*mcp.Client, error) {

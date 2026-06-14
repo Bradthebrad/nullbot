@@ -105,6 +105,20 @@ func TestEnableDisableRemoveMCPServer(t *testing.T) {
 	}
 }
 
+func TestMCPRuntimeEnvPassesKeysToImageTools(t *testing.T) {
+	config := testMarketConfig(t)
+	if err := SaveAPIKeys(config, APIKeys{OpenAI: "sk-test", OpenRouter: "sk-or-test"}); err != nil {
+		t.Fatal(err)
+	}
+	env := mcpRuntimeEnv(config, "nullbot-imagetools-mcp", MCPEntry{Command: "nullbot-imagetools-mcp.exe"})
+	if env["OPENAI_API_KEY"] != "sk-test" {
+		t.Fatalf("OPENAI_API_KEY = %q", env["OPENAI_API_KEY"])
+	}
+	if env["OPENROUTER_API_KEY"] != "sk-or-test" {
+		t.Fatalf("OPENROUTER_API_KEY = %q", env["OPENROUTER_API_KEY"])
+	}
+}
+
 func testMarketConfig(t *testing.T) Config {
 	t.Helper()
 	config := DefaultConfig()

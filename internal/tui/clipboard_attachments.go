@@ -3,12 +3,15 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
+
+	"yourbot/internal/app"
 
 	"github.com/atotto/clipboard"
 )
@@ -51,7 +54,8 @@ func (m *Model) insertAttachments(attachments []pastedAttachment) bool {
 		if attachment.Path == "" {
 			continue
 		}
-		tokens = append(tokens, attachmentToken(attachment.Path))
+		path := m.workspaceAttachmentPath(attachment.Path)
+		tokens = append(tokens, attachmentToken(path))
 	}
 	if len(tokens) == 0 {
 		return false
@@ -66,7 +70,7 @@ func (m *Model) insertPastedText(text string) {
 		m.input.Reset()
 		m.selectAll = false
 	}
-	if normalized, count := normalizeAttachmentText(text); count > 0 {
+	if normalized, count := m.normalizeAttachmentText(text); count > 0 {
 		text = normalized
 		m.status = fmt.Sprintf("Attached %d file(s).", count)
 	}
@@ -80,7 +84,7 @@ func (m *Model) capturePaste(text string) {
 	if text == "" {
 		return
 	}
-	if normalized, count := normalizeAttachmentText(text); count > 0 {
+	if normalized, count := m.normalizeAttachmentText(text); count > 0 {
 		m.insertPastedText(normalized)
 		m.status = fmt.Sprintf("Attached %d file(s).", count)
 		return
@@ -104,20 +108,32 @@ func attachmentTokensFromText(text string) []string {
 }
 
 func normalizeAttachmentText(text string) (string, int) {
+	return normalizeAttachmentTextWithCopier(text, nil)
+}
+
+func (m *Model) normalizeAttachmentText(text string) (string, int) {
+	return normalizeAttachmentTextWithCopier(text, m.workspaceAttachmentPath)
+}
+
+func normalizeAttachmentTextWithCopier(text string, copier func(string) string) (string, int) {
 	if strings.Contains(text, "@file(") {
 		return text, 0
 	}
 	paths := attachmentPathsFromText(text)
 	normalized := text
 	for _, path := range paths {
-		normalized = strings.Replace(normalized, path, attachmentToken(path), 1)
+		tokenPath := path
+		if copier != nil {
+			tokenPath = copier(path)
+		}
+		normalized = strings.Replace(normalized, path, attachmentToken(tokenPath), 1)
 	}
 	return normalized, len(paths)
 }
 
 func (m *Model) normalizeInputAttachments() {
 	value := m.input.Value()
-	normalized, count := normalizeAttachmentText(value)
+	normalized, count := m.normalizeAttachmentText(value)
 	if count == 0 || normalized == value {
 		return
 	}
@@ -221,6 +237,74 @@ func attachmentPath(path string) (string, bool) {
 
 func attachmentToken(path string) string {
 	return fmt.Sprintf("@file(%q)", filepath.Clean(path))
+}
+
+func (m *Model) workspaceAttachmentPath(path string) string {
+	copied, err := copyAttachmentIntoWorkspace(m.app.Config(), path)
+	if err != nil {
+		m.status = "Attachment copy failed: " + err.Error()
+		return path
+	}
+	return copied
+}
+
+func copyAttachmentIntoWorkspace(config app.Config, source string) (string, error) {
+	source = filepath.Clean(source)
+	info, err := os.Stat(source)
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("directories cannot be attached: %s", source)
+	}
+	workspace := strings.TrimSpace(config.WorkspaceDir)
+	if workspace == "" {
+		workspace = "."
+	}
+	workspace, err = filepath.Abs(workspace)
+	if err != nil {
+		return "", err
+	}
+	destRoot := filepath.Join(workspace, ".nullbot", "attachments", time.Now().Format("20060102-150405-000000000"))
+	if err := os.MkdirAll(destRoot, 0700); err != nil {
+		return "", err
+	}
+	dest := uniqueAttachmentPath(filepath.Join(destRoot, filepath.Base(source)))
+	if err := copyFile(source, dest); err != nil {
+		return "", err
+	}
+	return dest, nil
+}
+
+func uniqueAttachmentPath(path string) string {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return path
+	}
+	ext := filepath.Ext(path)
+	base := strings.TrimSuffix(path, ext)
+	for i := 2; ; i++ {
+		candidate := fmt.Sprintf("%s-%d%s", base, i, ext)
+		if _, err := os.Stat(candidate); os.IsNotExist(err) {
+			return candidate
+		}
+	}
+}
+
+func copyFile(source, dest string) error {
+	in, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 func clipboardAttachments(appDir string) ([]pastedAttachment, error) {

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -286,12 +287,66 @@ func TestNormalizeInputAttachmentsConvertsDroppedPath(t *testing.T) {
 	if err := os.WriteFile(path, []byte("png"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	model := New(app.New(app.DefaultConfig()))
+	config := app.DefaultConfig()
+	config.WorkspaceDir = t.TempDir()
+	model := New(app.New(config))
 	model.input.SetValue(path)
 	model.normalizeInputAttachments()
-	if got := model.input.Value(); got != attachmentToken(path) {
-		t.Fatalf("input = %q, want %q", got, attachmentToken(path))
+	got := model.input.Value()
+	if strings.Contains(got, path) {
+		t.Fatalf("input still references original path: %q", got)
 	}
+	paths := appAttachmentPathsForTest(got)
+	if len(paths) != 1 {
+		t.Fatalf("expected one copied attachment path in %q", got)
+	}
+	if !strings.Contains(paths[0], filepath.Join(config.WorkspaceDir, ".nullbot", "attachments")) {
+		t.Fatalf("attachment not copied into workspace attachments: %q", paths[0])
+	}
+	if data, err := os.ReadFile(paths[0]); err != nil || string(data) != "png" {
+		t.Fatalf("copied data = %q, err = %v", data, err)
+	}
+}
+
+func TestInsertAttachmentsCopiesClipboardFileIntoWorkspace(t *testing.T) {
+	external := t.TempDir()
+	source := filepath.Join(external, "List for Cruise.docx")
+	if err := os.WriteFile(source, []byte("docx"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	config := app.DefaultConfig()
+	config.WorkspaceDir = t.TempDir()
+	model := New(app.New(config))
+	if !model.insertAttachments([]pastedAttachment{{Kind: "file", Path: source, Name: filepath.Base(source)}}) {
+		t.Fatal("insertAttachments returned false")
+	}
+	got := model.input.Value()
+	if strings.Contains(got, source) {
+		t.Fatalf("input still references original path: %q", got)
+	}
+	paths := appAttachmentPathsForTest(got)
+	if len(paths) != 1 {
+		t.Fatalf("expected one attachment token in %q", got)
+	}
+	if filepath.Base(paths[0]) != "List for Cruise.docx" {
+		t.Fatalf("copied filename = %q", filepath.Base(paths[0]))
+	}
+}
+
+func appAttachmentPathsForTest(text string) []string {
+	re := regexp.MustCompile(`@file\("([^"]+)"\)|@file\(([^)]+)\)`)
+	var paths []string
+	for _, match := range re.FindAllStringSubmatch(text, -1) {
+		path := strings.TrimSpace(match[1])
+		if path == "" && len(match) > 2 {
+			path = strings.TrimSpace(match[2])
+		}
+		if unquoted, err := strconv.Unquote(`"` + strings.Trim(path, "\"") + `"`); err == nil {
+			path = unquoted
+		}
+		paths = append(paths, strings.Trim(path, "\"'"))
+	}
+	return paths
 }
 
 func TestPasteProtectedEnterCapturesBlock(t *testing.T) {

@@ -15,10 +15,10 @@ func TestLoadMarketManifestSeedsOfficialPackages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(manifest.Packages) < 4 {
+	if len(manifest.Packages) < 5 {
 		t.Fatalf("packages = %#v", manifest.Packages)
 	}
-	for _, id := range []string{"nullbot-code-mcp", "nullbot-parsers-mcp", "api-probe", "mcp-skill"} {
+	for _, id := range []string{"nullbot-code-mcp", "nullbot-parsers-mcp", "nullbot-imagetools-mcp", "api-probe", "mcp-skill"} {
 		if _, _, err := findMarketPackage(manifest, id); err != nil {
 			t.Fatalf("missing package %s: %v", id, err)
 		}

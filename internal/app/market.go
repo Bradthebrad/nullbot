@@ -144,6 +144,7 @@ func defaultMarketSources() []MarketSource {
 		Repos: []string{
 			"nullbot-code-mcp",
 			"nullbot-parsers-mcp",
+			"nullbot-imagetools-mcp",
 			"nullbot-skills",
 		},
 	}}
@@ -180,6 +181,19 @@ func defaultMarketManifest(config Config) MarketManifest {
 				Permissions:      []string{"document_parse", "workspace_read"},
 				Status:           "available",
 				Assets:           defaultReleaseAssets("Bradthebrad/nullbot-parsers-mcp", "v0.1.0", "nullbot-parsers-mcp"),
+			},
+			{
+				ID:               "nullbot-imagetools-mcp",
+				Kind:             "mcp_server",
+				Name:             "NullBot Image Tools MCP",
+				Description:      "Image generation, editing, thumbnail composition, contact sheets, and image PDFs with OpenAI/OpenRouter plus local Go tools.",
+				Repo:             "Bradthebrad/nullbot-imagetools-mcp",
+				ReleaseTag:       "v0.1.0",
+				DefaultTransport: "stdio",
+				DefaultArgs:      []string{"--workspace", "{{workspace}}"},
+				Permissions:      []string{"image_generation", "workspace_read", "workspace_write"},
+				Status:           "available",
+				Assets:           defaultReleaseAssets("Bradthebrad/nullbot-imagetools-mcp", "v0.1.0", "nullbot-imagetools-mcp"),
 			},
 			{
 				ID:          "api-probe",

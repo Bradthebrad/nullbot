@@ -54,6 +54,11 @@ type Model struct {
 	modelGroups     []app.ModelGroup
 	modelIndex      int
 	modelTarget     string
+	accounts        app.AccountState
+	accountIndex    int
+	codexFlow       app.CodexDeviceFlow
+	codexLoginText  string
+	codexPolling    bool
 
 	marketPackages []app.MarketPackage
 	marketIndex    int
@@ -112,6 +117,17 @@ type liveActivityMsg struct {
 type liveActivityDoneMsg struct{}
 type pasteNoticeDoneMsg struct{}
 type dashboardTickMsg struct{}
+type accountsLoginMsg struct {
+	Flow  app.CodexDeviceFlow
+	State app.AccountState
+	Err   error
+}
+type accountsPollMsg struct {
+	Flow   app.CodexDeviceFlow
+	Result app.CodexLoginPollResult
+	State  app.AccountState
+	Err    error
+}
 
 type activityEvent struct {
 	Time    time.Time
@@ -230,6 +246,53 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.busy || m.hasRunningAgentTasks() {
 				return m, dashboardTick()
 			}
+		}
+		return m, nil
+	case accountsLoginMsg:
+		m.accounts = msg.State
+		m.codexPolling = false
+		if msg.Err != nil {
+			m.codexLoginText = "Codex login failed: " + msg.Err.Error()
+			m.status = m.codexLoginText
+		} else {
+			m.codexFlow = msg.Flow
+			m.codexPolling = true
+			m.codexLoginText = "Codex login started. Browser opened if available. Enter code " + msg.Flow.UserCode + "."
+			m.status = "Codex login waiting for browser authorization."
+			if m.panel == "accounts" {
+				m.modal.SetContent(m.renderAccountsModal())
+			}
+			return m, accountsPollCmd(m.app, msg.Flow, accountsPollDelay(msg.Flow.IntervalSeconds))
+		}
+		if m.panel == "accounts" {
+			m.modal.SetContent(m.renderAccountsModal())
+		}
+		return m, nil
+	case accountsPollMsg:
+		if m.codexFlow.DeviceAuthID != "" && msg.Flow.DeviceAuthID != m.codexFlow.DeviceAuthID {
+			return m, nil
+		}
+		m.accounts = msg.State
+		m.codexPolling = false
+		if msg.Err != nil {
+			m.codexLoginText = "Codex login poll failed: " + msg.Err.Error()
+			m.status = m.codexLoginText
+		} else {
+			m.codexLoginText = codexPollMessage(msg.Result)
+			m.status = m.codexLoginText
+			switch msg.Result.Status {
+			case "pending", "slow_down":
+				m.codexPolling = true
+				if m.panel == "accounts" {
+					m.modal.SetContent(m.renderAccountsModal())
+				}
+				return m, accountsPollCmd(m.app, msg.Flow, accountsPollDelay(firstPositive(msg.Result.IntervalSeconds, msg.Flow.IntervalSeconds)))
+			case "authorized", "expired", "denied":
+				m.codexFlow = app.CodexDeviceFlow{}
+			}
+		}
+		if m.panel == "accounts" {
+			m.modal.SetContent(m.renderAccountsModal())
 		}
 		return m, nil
 	case spinner.TickMsg:
@@ -373,6 +436,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return next, cmd
 		}
 		if next, cmd, handled := m.handleModelsKey(msg); handled {
+			return next, cmd
+		}
+		if next, cmd, handled := m.handleAccountsKey(msg); handled {
 			return next, cmd
 		}
 		if next, cmd, handled := m.handleMarketKey(msg); handled {
@@ -796,6 +862,10 @@ func (m *Model) openModal(panel string, reply app.Reply) {
 		m.openModelsModal()
 		return
 	}
+	if panel == "accounts" {
+		m.openAccountsModal(reply)
+		return
+	}
 	if panel == "market" {
 		m.openMarketModal(reply)
 		return
@@ -966,6 +1036,9 @@ func (m Model) modalView() string {
 	}
 	if m.panel == "tasks" {
 		footer += " | up/down move | enter details | c cancel | r refresh | d details"
+	}
+	if m.panel == "accounts" {
+		footer += " | up/down move | c codex login | p poll now | o open URL | r refresh"
 	}
 	if m.panel == "schedule" {
 		footer += " | /schedule in 10m msg | /schedule run/cancel/delete <id>"

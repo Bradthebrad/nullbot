@@ -98,6 +98,35 @@ func TestAgentsAvailableUpdatesMaxSubagents(t *testing.T) {
 	}
 }
 
+func TestAccountsCommandReportsSavedAPIKeys(t *testing.T) {
+	config := DefaultConfig()
+	config.AppDir = t.TempDir()
+	if err := SaveAPIKeys(config, APIKeys{OpenAI: "sk-test"}); err != nil {
+		t.Fatal(err)
+	}
+	app := New(config)
+	reply := app.Submit(context.Background(), "/accounts")
+	if reply.OpenPanel != "accounts" {
+		t.Fatalf("panel = %q message=%s", reply.OpenPanel, reply.Message)
+	}
+	state, ok := reply.Data["accounts"].(AccountState)
+	if !ok {
+		t.Fatalf("accounts data = %#v", reply.Data)
+	}
+	found := false
+	for _, account := range state.Accounts {
+		if account.ID == "openai" {
+			found = true
+			if account.Status != "saved" {
+				t.Fatalf("openai account = %#v", account)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("openai account missing: %#v", state.Accounts)
+	}
+}
+
 func TestScheduleCommandCreatesAndPersistsTask(t *testing.T) {
 	config := DefaultConfig()
 	config.AppDir = t.TempDir()

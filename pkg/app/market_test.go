@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,6 +23,26 @@ func TestLoadMarketManifestSeedsOfficialPackages(t *testing.T) {
 		if _, _, err := findMarketPackage(manifest, id); err != nil {
 			t.Fatalf("missing package %s: %v", id, err)
 		}
+	}
+}
+
+func TestLoadMarketManifestAcceptsUTF8BOM(t *testing.T) {
+	config := testMarketConfig(t)
+	manifest := defaultMarketManifest(config)
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append([]byte{0xEF, 0xBB, 0xBF}, data...)
+	if err := os.WriteFile(manifestPath(config), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadMarketManifest(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Packages) == 0 {
+		t.Fatalf("packages = %#v", loaded.Packages)
 	}
 }
 

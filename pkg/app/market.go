@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -102,6 +103,7 @@ func LoadMarketManifest(config Config) (MarketManifest, error) {
 		return MarketManifest{}, err
 	}
 	var manifest MarketManifest
+	data = bytes.TrimPrefix(data, []byte{0xEF, 0xBB, 0xBF})
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		return MarketManifest{}, err
 	}

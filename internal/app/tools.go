@@ -21,6 +21,8 @@ func BuiltinToolsFor(config Config, state *App, includeSpawner bool) []agent.Too
 		configDirListTool(config),
 		configDirReadTool(config),
 		skillsListTool(config),
+		skillReferencesTool(config),
+		skillReadTool(config),
 		createSkillTool(config),
 		workspaceInfoTool(config),
 		workspaceListDirTool(config),
@@ -43,7 +45,7 @@ func BuiltinToolsFor(config Config, state *App, includeSpawner bool) []agent.Too
 		mcpListTool(config),
 	}
 	if includeSpawner {
-		tools = append(tools, spawnSubagentTool(state))
+		tools = append(tools, spawnSubagentTool(state), subagentStatusTool(state), subagentWaitTool(state))
 	}
 	return tools
 }
@@ -210,10 +212,45 @@ func configDirReadTool(config Config) agent.Tool {
 func skillsListTool(config Config) agent.Tool {
 	return agent.ToolFunc{
 		Name:        "skills_list",
-		Description: "List installed skill files.",
+		Description: "List installed skills with metadata and reference files. Use skill_read to load SKILL.md or referenced markdown on demand.",
 		Schema:      agent.ToolSchema(map[string]any{}),
 		Func: func(ctx context.Context, args map[string]any) (string, error) {
-			return strings.Join(scanSkillFiles(config), "\n"), nil
+			return prettyJSON(scanSkillSummaries(config)), nil
+		},
+	}
+}
+
+func skillReferencesTool(config Config) agent.Tool {
+	return agent.ToolFunc{
+		Name:        "skill_references",
+		Description: "List markdown files referenced by an installed skill's SKILL.md without loading their contents.",
+		Schema: agent.ToolSchema(map[string]any{
+			"skill": agent.StringProperty("Skill name, directory name, or SKILL.md path."),
+		}, "skill"),
+		Func: func(ctx context.Context, args map[string]any) (string, error) {
+			summary, ok := findSkillSummary(config, stringArg(args, "skill"))
+			if !ok {
+				return "", fmt.Errorf("skill not found: %s", stringArg(args, "skill"))
+			}
+			return prettyJSON(summary.References), nil
+		},
+	}
+}
+
+func skillReadTool(config Config) agent.Tool {
+	return agent.ToolFunc{
+		Name:        "skill_read",
+		Description: "Read an installed skill's primary SKILL.md or a referenced markdown file under that skill directory. Use this progressively only after skills_list indicates the skill is relevant.",
+		Schema: agent.ToolSchema(map[string]any{
+			"skill": agent.StringProperty("Skill name, directory name, or SKILL.md path."),
+			"path":  agent.StringProperty("Optional referenced markdown path relative to the skill directory. Omit to read SKILL.md."),
+		}, "skill"),
+		Func: func(ctx context.Context, args map[string]any) (string, error) {
+			result, err := readSkillMarkdown(config, stringArg(args, "skill"), stringArg(args, "path"))
+			if err != nil {
+				return "", err
+			}
+			return prettyJSON(result), nil
 		},
 	}
 }
@@ -577,7 +614,7 @@ func mcpListTool(config Config) agent.Tool {
 func spawnSubagentTool(state *App) agent.Tool {
 	return agent.ToolFunc{
 		Name:        "spawn_subagent",
-		Description: "Spawn a named subagent for a focused task. The subagent gets the same built-in non-spawn tools and enabled MCP tools as the primary agent. It runs synchronously and returns its result.",
+		Description: "Spawn a named subagent for a focused task. Returns immediately with a task id; use subagent_wait or subagent_status to collect results.",
 		Schema: agent.ToolSchema(map[string]any{
 			"name": agent.StringProperty("Short human-readable subagent name, such as PDF Inspector or API Scout."),
 			"task": agent.StringProperty("Concrete task for the subagent to perform. Include relevant context and expected output."),
@@ -600,7 +637,87 @@ func spawnSubagentTool(state *App) agent.Tool {
 			if state.runningSubagentCount() >= maxSubagents {
 				return "", fmt.Errorf("subagent limit reached (%d running)", maxSubagents)
 			}
-			return state.runSubagent(ctx, name, task)
+			id, err := state.startSubagent(ctx, name, task)
+			if err != nil {
+				return "", err
+			}
+			return prettyJSON(map[string]any{
+				"task_id": id,
+				"name":    name,
+				"status":  "running",
+				"note":    "Use subagent_wait with this task_id before final synthesis.",
+			}), nil
+		},
+	}
+}
+
+func subagentStatusTool(state *App) agent.Tool {
+	return agent.ToolFunc{
+		Name:        "subagent_status",
+		Description: "Read current status, tool calls, token counts, and final result if available for one subagent task or all subagent tasks.",
+		Schema: agent.ToolSchema(map[string]any{
+			"task_id": agent.StringProperty("Optional subagent task id returned by spawn_subagent."),
+		}),
+		Func: func(ctx context.Context, args map[string]any) (string, error) {
+			id := strings.TrimSpace(stringArg(args, "task_id"))
+			if id != "" {
+				task, ok := state.TaskDetails(id)
+				if !ok {
+					return "", fmt.Errorf("task not found: %s", id)
+				}
+				return prettyJSON(task), nil
+			}
+			var tasks []AgentTask
+			for _, task := range state.TaskSnapshots() {
+				if task.Role == "subagent" {
+					tasks = append(tasks, task)
+				}
+			}
+			return prettyJSON(tasks), nil
+		},
+	}
+}
+
+func subagentWaitTool(state *App) agent.Tool {
+	return agent.ToolFunc{
+		Name:        "subagent_wait",
+		Description: "Wait briefly for a spawned subagent task to finish and return its status/result. Use after spawn_subagent.",
+		Schema: agent.ToolSchema(map[string]any{
+			"task_id":         agent.StringProperty("Subagent task id returned by spawn_subagent."),
+			"timeout_seconds": agent.NumberProperty("Maximum seconds to wait. Defaults to 20 and caps at 120."),
+		}, "task_id"),
+		Func: func(ctx context.Context, args map[string]any) (string, error) {
+			id := strings.TrimSpace(stringArg(args, "task_id"))
+			if id == "" {
+				return "", fmt.Errorf("task_id is required")
+			}
+			timeout := intArg(args, "timeout_seconds", 20)
+			if timeout <= 0 {
+				timeout = 20
+			}
+			if timeout > 120 {
+				timeout = 120
+			}
+			deadline := time.NewTimer(time.Duration(timeout) * time.Second)
+			defer deadline.Stop()
+			tick := time.NewTicker(100 * time.Millisecond)
+			defer tick.Stop()
+			for {
+				task, ok := state.TaskDetails(id)
+				if !ok {
+					return "", fmt.Errorf("task not found: %s", id)
+				}
+				if task.Status != TaskRunning && task.Status != TaskCanceling {
+					return prettyJSON(task), nil
+				}
+				select {
+				case <-ctx.Done():
+					return "", ctx.Err()
+				case <-deadline.C:
+					return prettyJSON(task), nil
+				case <-tick.C:
+				}
+			}
 		},
 	}
 }

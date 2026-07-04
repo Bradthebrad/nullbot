@@ -18,7 +18,7 @@ func (a *App) configCommand(expr string) Reply {
 	key = strings.TrimSpace(key)
 	value = strings.TrimSpace(value)
 	switch key {
-	case "brand_prefix", "tagline", "editor", "model", "provider", "reasoning_effort", "workspace", "workspace_dir":
+	case "brand_prefix", "bot_name", "name", "tagline", "editor", "model", "provider", "reasoning_effort", "workspace", "workspace_dir":
 	default:
 		return a.reply("Unsupported config key: "+key, "/config", "config")
 	}
@@ -26,6 +26,8 @@ func (a *App) configCommand(expr string) Reply {
 		switch key {
 		case "brand_prefix":
 			config.BrandPrefix = value
+		case "bot_name", "name":
+			config.BotName = value
 		case "tagline":
 			config.Tagline = value
 		case "editor":
@@ -35,7 +37,7 @@ func (a *App) configCommand(expr string) Reply {
 		case "provider":
 			config.Model.Provider = value
 		case "reasoning_effort":
-			config.Model.ReasoningEffort = value
+			config.Model.ReasoningEffort = NormalizeEffort(value)
 		case "workspace", "workspace_dir":
 			config.WorkspaceDir = value
 		}

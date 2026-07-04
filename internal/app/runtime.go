@@ -74,6 +74,11 @@ func (a *App) invokeAlsoObserver(ctx context.Context, snapshot AlsoSnapshot) (st
 	if err != nil {
 		return "", err
 	}
+	for _, text := range lc.VisibleReasoning(msg) {
+		record := ActivityRecord{Time: time.Now().UTC(), Kind: "reasoning", Name: "also/agent", Status: "reasoning", Detail: text}
+		a.recordVisibleReasoning(record)
+		a.appendActivity(record)
+	}
 	a.recordUsageDirect("Also Observer", snapshot.Config.Model, messages, msg)
 	return lcContentText(msg.Content), nil
 }
@@ -110,6 +115,23 @@ func formatAlsoSnapshot(snapshot AlsoSnapshot) string {
 				continue
 			}
 			fmt.Fprintf(&b, "- %s: %s\n", msg.Role, truncate(strings.ReplaceAll(msg.Content, "\n", " "), 500))
+		}
+	}
+	if len(snapshot.Tasks) > 0 {
+		b.WriteString("\nRecent tasks:\n")
+		for _, task := range snapshot.Tasks {
+			current := strings.TrimSpace(task.Current)
+			if current == "" {
+				current = string(task.Status)
+			}
+			fmt.Fprintf(&b, "- %s (%s/%s): %s", task.Name, task.Role, task.Status, truncate(current, 240))
+			if task.Tokens.Total > 0 {
+				fmt.Fprintf(&b, " tokens=%d", task.Tokens.Total)
+			}
+			if task.Error != "" {
+				fmt.Fprintf(&b, " error=%s", truncate(task.Error, 240))
+			}
+			b.WriteByte('\n')
 		}
 	}
 	if len(snapshot.Activity) > 0 {
@@ -158,16 +180,42 @@ func (a *App) buildRuntime(ctx context.Context, skillHints []string) (*runtimeBu
 			Skills:        skills,
 			MaxIterations: config.Agent.MaxIterations,
 			Callbacks:     callbacks.SinkFunc(a.handleAgentCallback),
+			Context:       agentContextPolicy(config),
 		}),
 		closers: closers,
 	}, nil
+}
+
+func (a *App) PromptDefaults() map[string]string {
+	a.mu.Lock()
+	config := a.config
+	a.mu.Unlock()
+	config.Prompts = PromptConfig{}
+	skills, _ := loadSkills(config)
+	return map[string]string{
+		"manager":  baseSystemPrompt(config, nil, BuiltinToolsFor(config, a, true), skills),
+		"subagent": subagentSystemPrompt(config, "Subagent", "Focused task from the manager.", BuiltinToolsFor(config, a, false), skills),
+	}
 }
 
 func (a *App) runSubagent(ctx context.Context, name, task string) (string, error) {
 	subCtx, cancel := context.WithCancel(ctx)
 	taskID := a.startTask(name, "subagent", task, cancel)
 	defer cancel()
+	return a.executeSubagent(subCtx, taskID, name, task)
+}
 
+func (a *App) startSubagent(ctx context.Context, name, task string) (string, error) {
+	stateCtx, cancel := context.WithCancel(ctx)
+	taskID := a.startTask(name, "subagent", task, cancel)
+	go func() {
+		defer cancel()
+		_, _ = a.executeSubagent(stateCtx, taskID, name, task)
+	}()
+	return taskID, nil
+}
+
+func (a *App) executeSubagent(subCtx context.Context, taskID, name, task string) (string, error) {
 	a.mu.Lock()
 	config := a.config
 	a.mu.Unlock()
@@ -198,9 +246,13 @@ func (a *App) runSubagent(ctx context.Context, name, task string) (string, error
 			record := activityRecordFromCallback(event)
 			record.Name = name + "/" + record.Name
 			a.recordTaskCallback(taskID, event)
-			a.recordUsageCallback(taskID, name, config.SubagentModel, event)
+			a.recordUsageCallback(taskID, name, effectiveModelConfig(config, config.SubagentModel), event)
+			if record.Status == "reasoning" {
+				a.recordVisibleReasoning(record)
+			}
 			a.appendActivity(record)
 		}),
+		Context: agentContextPolicy(config),
 	})
 	result, err := sub.InvokeMessages(subCtx, lcMessagesWithTask(task))
 	if err != nil {
@@ -235,7 +287,19 @@ func subagentSystemPrompt(config Config, name, task string, tools []tcagent.Tool
 			fmt.Fprintf(&b, "- %s: %s\n", skill.Name, skill.Description)
 		}
 	}
-	return strings.TrimSpace(b.String())
+	if custom := strings.TrimSpace(config.Prompts.SubagentAppend); custom != "" {
+		b.WriteString("\nAdditional subagent prompt guidance:\n")
+		b.WriteString(custom)
+		b.WriteByte('\n')
+	}
+	prompt := strings.TrimSpace(b.String())
+	if override := strings.TrimSpace(config.Prompts.SubagentPrompt); override != "" {
+		prompt = override
+		if custom := strings.TrimSpace(config.Prompts.SubagentAppend); custom != "" {
+			prompt += "\n\nAdditional subagent prompt guidance:\n" + custom
+		}
+	}
+	return strings.TrimSpace(prompt)
 }
 
 func (a *App) handleAgentCallback(event callbacks.Event) {
@@ -253,7 +317,10 @@ func (a *App) handleAgentCallback(event callbacks.Event) {
 	a.mu.Lock()
 	config := a.config
 	a.mu.Unlock()
-	a.recordUsageCallback(taskID, DisplayName(config), config.Model, event)
+	a.recordUsageCallback(taskID, DisplayName(config), effectiveModelConfig(config, config.Model), event)
+	if record.Status == "reasoning" {
+		a.recordVisibleReasoning(record)
+	}
 	a.appendActivity(record)
 }
 
@@ -282,17 +349,24 @@ func modelFromModelConfig(config Config, modelConfig ModelConfig) (tcagent.Model
 	}
 
 	switch strings.ToLower(modelConfig.Provider) {
+	case "codex":
+		if !CodexAuthPresent(config) {
+			return nil, fmt.Errorf("Codex subscription is not signed in. Use the Accounts tab to sign in with ChatGPT.")
+		}
+		return CodexSubscriptionModel{Config: config, Model: modelConfig.Model, ReasoningEffort: modelConfig.ReasoningEffort}, nil
 	case "openai", "":
 		apiKey := apiKeyForProvider(config, "openai", "OPENAI_API_KEY")
 		if apiKey == "" {
-			return nil, fmt.Errorf("OpenAI API key is not set. Use /config to save one locally.")
+			return nil, fmt.Errorf("OpenAI API key is not set. Use the Accounts tab to save an OpenAI API key, or choose a Codex subscription model.")
 		}
 		return tcagent.OpenAIModel{
-			Client:       openai.Client{APIKey: apiKey},
-			Model:        modelConfig.Model,
-			UseResponses: config.Agent.UseResponses,
-			Temperature:  tempPtr,
-			MaxTokens:    maxTokensPtr,
+			Client:          openai.Client{APIKey: apiKey},
+			Model:           modelConfig.Model,
+			UseResponses:    config.Agent.UseResponses,
+			Temperature:     tempPtr,
+			MaxTokens:       maxTokensPtr,
+			ReasoningEffort: ProviderEffort("openai", modelConfig.ReasoningEffort),
+			Provider:        "openai",
 		}, nil
 	case "anthropic":
 		apiKey := apiKeyForProvider(config, "anthropic", "ANTHROPIC_API_KEY")
@@ -300,10 +374,11 @@ func modelFromModelConfig(config Config, modelConfig ModelConfig) (tcagent.Model
 			return nil, fmt.Errorf("Anthropic API key is not set. Use /config to save one locally.")
 		}
 		return tcagent.AnthropicModel{
-			Client:      anthropic.Client{APIKey: apiKey},
-			Model:       modelConfig.Model,
-			MaxTokens:   maxTokens,
-			Temperature: tempPtr,
+			Client:          anthropic.Client{APIKey: apiKey},
+			Model:           modelConfig.Model,
+			MaxTokens:       maxTokens,
+			Temperature:     tempPtr,
+			ReasoningEffort: ProviderEffort("anthropic", modelConfig.ReasoningEffort),
 		}, nil
 	case "openrouter":
 		apiKey := apiKeyForProvider(config, "openrouter", "OPENROUTER_API_KEY")
@@ -311,11 +386,13 @@ func modelFromModelConfig(config Config, modelConfig ModelConfig) (tcagent.Model
 			return nil, fmt.Errorf("OpenRouter API key is not set. Use /config to save one locally.")
 		}
 		return tcagent.OpenAIModel{
-			Client:       openai.Client{APIKey: apiKey, BaseURL: "https://openrouter.ai/api/v1"},
-			Model:        modelConfig.Model,
-			UseResponses: false,
-			Temperature:  tempPtr,
-			MaxTokens:    maxTokensPtr,
+			Client:          openai.Client{APIKey: apiKey, BaseURL: "https://openrouter.ai/api/v1"},
+			Model:           modelConfig.Model,
+			UseResponses:    false,
+			Temperature:     tempPtr,
+			MaxTokens:       maxTokensPtr,
+			ReasoningEffort: ProviderEffort("openrouter", modelConfig.ReasoningEffort),
+			Provider:        "openrouter",
 		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported provider %q", modelConfig.Provider)
@@ -324,19 +401,68 @@ func modelFromModelConfig(config Config, modelConfig ModelConfig) (tcagent.Model
 
 func RuntimeStatus(config Config) map[string]any {
 	keys, _ := LoadAPIKeys(config)
+	effective := effectiveModelConfig(config, config.Model)
+	effectiveSubagent := effectiveModelConfig(config, config.SubagentModel)
 	return map[string]any{
-		"provider":               config.Model.Provider,
-		"model":                  config.Model.Model,
-		"subagent_provider":      config.SubagentModel.Provider,
-		"subagent_model":         config.SubagentModel.Model,
+		"provider":               effective.Provider,
+		"model":                  effective.Model,
+		"configured_provider":    config.Model.Provider,
+		"configured_model":       config.Model.Model,
+		"bot_name":               DisplayName(config),
+		"reasoning_effort":       effective.ReasoningEffort,
+		"provider_effort":        ProviderEffort(effective.Provider, effective.ReasoningEffort),
+		"subagent_provider":      effectiveSubagent.Provider,
+		"subagent_model":         effectiveSubagent.Model,
 		"max_subagents":          config.Agent.MaxSubagents,
 		"openai_api_key_set":     keys.OpenAI != "" || os.Getenv("OPENAI_API_KEY") != "",
 		"anthropic_api_key_set":  keys.Anthropic != "" || os.Getenv("ANTHROPIC_API_KEY") != "",
 		"openrouter_api_key_set": keys.OpenRouter != "" || os.Getenv("OPENROUTER_API_KEY") != "",
+		"google_api_key_set":     keys.Google != "" || os.Getenv("GOOGLE_API_KEY") != "" || os.Getenv("GEMINI_API_KEY") != "",
+		"codex_auth_set":         CodexAuthPresent(config),
+		"codex_auth_path":        CodexAuthPath(config),
 		"mcp_servers_enabled":    len(config.EnabledMCPServers),
 		"skill_dirs":             config.SkillDirs,
 		"app_dir":                config.AppDir,
 		"logs_path":              NewLogger(config).path,
+	}
+}
+
+func effectiveModelConfig(config Config, model ModelConfig) ModelConfig {
+	if strings.TrimSpace(model.Provider) == "" && strings.TrimSpace(model.Model) == "" {
+		model = config.Model
+	}
+	if strings.TrimSpace(model.Provider) == "" {
+		model.Provider = "openai"
+	}
+	return model
+}
+
+func agentContextPolicy(config Config) tcagent.ContextPolicy {
+	compaction := config.Compaction
+	ratio := compaction.ThresholdRatio
+	if ratio <= 0 || ratio >= 1 {
+		ratio = 0.75
+	}
+	maxTokens := compaction.ApproxTokenLimit
+	if maxTokens <= 0 {
+		maxTokens = 64000
+	}
+	keepLast := compaction.KeepLastMessages
+	if keepLast <= 0 {
+		keepLast = 12
+	}
+	safetyChars := compaction.ToolResultCharLimit
+	if safetyChars <= 0 {
+		safetyChars = 12000
+	}
+	return tcagent.ContextPolicy{
+		Enabled:               compaction.Enabled,
+		MaxTokens:             maxTokens,
+		ThresholdRatio:        ratio,
+		ThresholdTokens:       int(float64(maxTokens) * ratio),
+		KeepLastMessages:      keepLast,
+		MaxMessages:           compaction.MessageCountLimit,
+		ToolResultSafetyChars: safetyChars,
 	}
 }
 
@@ -403,6 +529,17 @@ func mcpRuntimeEnv(config Config, id string, entry MCPEntry) map[string]string {
 	for key, value := range entry.Env {
 		env[key] = value
 	}
+	if shouldPassWebEnvToMCP(id, entry) {
+		keys, _ := LoadAPIKeys(config)
+		if key := strings.TrimSpace(keys.ForProvider("brave")); key != "" {
+			env["BRAVE_API_KEY"] = key
+		}
+		if env["BRAVE_API_KEY"] == "" {
+			if key := strings.TrimSpace(os.Getenv("BRAVE_API_KEY")); key != "" {
+				env["BRAVE_API_KEY"] = key
+			}
+		}
+	}
 	if !shouldPassVisionEnvToMCP(id, entry) {
 		if len(env) == 0 {
 			return nil
@@ -416,6 +553,10 @@ func mcpRuntimeEnv(config Config, id string, entry MCPEntry) map[string]string {
 	if key := keys.OpenRouter; key != "" {
 		env["OPENROUTER_API_KEY"] = key
 	}
+	if key := keys.Google; key != "" {
+		env["GOOGLE_API_KEY"] = key
+		env["GEMINI_API_KEY"] = key
+	}
 	if env["OPENAI_API_KEY"] == "" {
 		if key := os.Getenv("OPENAI_API_KEY"); key != "" {
 			env["OPENAI_API_KEY"] = key
@@ -426,12 +567,25 @@ func mcpRuntimeEnv(config Config, id string, entry MCPEntry) map[string]string {
 			env["OPENROUTER_API_KEY"] = key
 		}
 	}
+	if env["GOOGLE_API_KEY"] == "" {
+		if key := firstNonEmpty(os.Getenv("GOOGLE_API_KEY"), os.Getenv("GEMINI_API_KEY")); key != "" {
+			env["GOOGLE_API_KEY"] = key
+			env["GEMINI_API_KEY"] = key
+		}
+	}
 	env["NULLBOT_VISION_PROVIDER"] = config.Model.Provider
 	env["NULLBOT_VISION_MODEL"] = config.Model.Model
 	if len(env) == 0 {
 		return nil
 	}
 	return env
+}
+
+func shouldPassWebEnvToMCP(id string, entry MCPEntry) bool {
+	id = strings.ToLower(id)
+	command := strings.ToLower(entry.Command)
+	return strings.Contains(id, "web") ||
+		strings.Contains(command, "web")
 }
 
 func shouldPassVisionEnvToMCP(id string, entry MCPEntry) bool {
@@ -492,8 +646,8 @@ func baseSystemPrompt(config Config, skillHints []string, tools []tcagent.Tool, 
 	if root, err := workspaceRoot(config); err == nil {
 		fmt.Fprintf(&b, "Configured workspace: %s\n", root)
 	}
-	fmt.Fprintf(&b, "You may spawn up to %d concurrent named subagents with `spawn_subagent` when decomposition helps. Give each subagent a narrow task and synthesize their results yourself. Subagents use `%s/%s` unless configured otherwise.\n", config.Agent.MaxSubagents, config.SubagentModel.Provider, config.SubagentModel.Model)
-	b.WriteString("Available built-in tools are constrained to NullBot app data and configured workspace browsing: listing config-directory files, reading small config-directory text files, listing skills, creating SKILL.md files under the configured skills directory, listing/reading/updating saved JSON plans, refreshing/listing/installing market packages, enabling/disabling/removing installed MCP servers, listing configured MCP servers, summarizing recent visible chat history, reading compact persisted session history, and reading recent NullBot runtime log lines.\n")
+	fmt.Fprintf(&b, "You may spawn up to %d concurrent named subagents with `spawn_subagent` when decomposition helps. `spawn_subagent` returns a task id immediately; use `subagent_wait` or `subagent_status` to collect results before synthesizing. Give each subagent a narrow task. Subagents use `%s/%s` unless configured otherwise.\n", config.Agent.MaxSubagents, config.SubagentModel.Provider, config.SubagentModel.Model)
+	b.WriteString("Available built-in tools are constrained to NullBot app data and configured workspace browsing: listing config-directory files, reading small config-directory text files, listing skills, reading installed skill markdown progressively with `skill_read`, creating SKILL.md files under the configured skills directory, listing/reading/updating saved JSON plans, refreshing/listing/installing market packages, enabling/disabling/removing installed MCP servers, listing configured MCP servers, summarizing recent visible chat history, reading compact persisted session history, and reading recent NullBot runtime log lines.\n")
 	if len(tools) > 0 {
 		b.WriteString("Current tool inventory:\n")
 		for _, tool := range tools {
@@ -527,7 +681,19 @@ func baseSystemPrompt(config Config, skillHints []string, tools []tcagent.Tool, 
 	if len(skillHints) > 0 {
 		fmt.Fprintf(&b, "Active skill hints from user text: %s.\n", strings.Join(skillHints, ", "))
 	}
-	return strings.TrimSpace(b.String())
+	if custom := strings.TrimSpace(config.Prompts.ManagerAppend); custom != "" {
+		b.WriteString("\nAdditional manager prompt guidance:\n")
+		b.WriteString(custom)
+		b.WriteByte('\n')
+	}
+	prompt := strings.TrimSpace(b.String())
+	if override := strings.TrimSpace(config.Prompts.ManagerPrompt); override != "" {
+		prompt = override
+		if custom := strings.TrimSpace(config.Prompts.ManagerAppend); custom != "" {
+			prompt += "\n\nAdditional manager prompt guidance:\n" + custom
+		}
+	}
+	return strings.TrimSpace(prompt)
 }
 
 func callbackMessageCount(event callbacks.Event) int {
@@ -596,11 +762,20 @@ func lcContentText(content lc.Content) string {
 	}
 	var parts []string
 	for _, part := range content.Parts {
-		if part.Text != "" {
+		if part.Text != "" && visibleAnswerPart(part) {
 			parts = append(parts, part.Text)
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+func visibleAnswerPart(part lc.ContentPart) bool {
+	switch strings.ToLower(strings.TrimSpace(part.Type)) {
+	case "", "text", "output_text":
+		return true
+	default:
+		return false
+	}
 }
 
 func compactAny(value any, limit int) string {

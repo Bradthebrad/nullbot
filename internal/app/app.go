@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -19,7 +20,8 @@ type App struct {
 	paused             bool
 	activeCancel       context.CancelFunc
 	activeTaskID       string
-	activitySink       func(ActivityRecord)
+	activitySinks      map[int]func(ActivityRecord)
+	activitySinkSeq    int
 	runtimeDirty       bool
 	runtimeDirtyReason string
 	tasks              map[string]*AgentTask
@@ -34,6 +36,7 @@ type AlsoSnapshot struct {
 	Config     Config
 	Messages   []Message
 	Activity   []ActivityRecord
+	Tasks      []AgentTask
 	Runtime    map[string]any
 	CapturedAt time.Time
 }
@@ -148,7 +151,7 @@ func (a *App) SaveAPIKeys(keys APIKeys) error {
 		a.logError("api keys save failed", "error", err)
 		return err
 	}
-	a.logInfo("api keys saved", "openai_set", keys.OpenAI != "", "anthropic_set", keys.Anthropic != "", "openrouter_set", keys.OpenRouter != "")
+	a.logInfo("api keys saved", "openai_set", keys.OpenAI != "", "anthropic_set", keys.Anthropic != "", "openrouter_set", keys.OpenRouter != "", "google_set", keys.Google != "")
 	return nil
 }
 
@@ -158,14 +161,12 @@ func (a *App) Submit(ctx context.Context, input string) Reply {
 
 func (a *App) SubmitWithActivity(ctx context.Context, input string, sink func(ActivityRecord)) Reply {
 	a.mu.Lock()
-	previousSink := a.activitySink
-	a.activitySink = sink
+	activityStart := len(a.activity)
 	a.mu.Unlock()
-	defer func() {
-		a.mu.Lock()
-		a.activitySink = previousSink
-		a.mu.Unlock()
-	}()
+	if sink != nil {
+		unsubscribe := a.SubscribeActivity(sink)
+		defer unsubscribe()
+	}
 
 	trimmed := strings.TrimSpace(input)
 	isSlash := strings.HasPrefix(trimmed, "/")
@@ -189,11 +190,10 @@ func (a *App) SubmitWithActivity(ctx context.Context, input string, sink func(Ac
 	a.logs = append(a.logs, time.Now().UTC().Format(time.RFC3339)+" "+reply.Message)
 	reply.Config = a.config
 	reply.History = append([]Message{}, a.history...)
-	if sink == nil {
-		reply.Activity = a.drainActivityLocked()
-	} else {
-		a.activity = nil
+	if activityStart > len(a.activity) {
+		activityStart = 0
 	}
+	reply.Activity = append([]ActivityRecord{}, a.activity[activityStart:]...)
 	a.mu.Unlock()
 	if recordAssistant {
 		a.persistMessage(assistantMessage)
@@ -271,6 +271,13 @@ func (a *App) alsoSnapshot(question string) AlsoSnapshot {
 	active := a.activeCancel != nil
 	messages := append([]Message{}, a.history...)
 	activity := append([]ActivityRecord{}, a.activity...)
+	tasks := a.taskSnapshotsLocked()
+	for _, task := range tasks {
+		if task.Status == TaskRunning || task.Status == TaskCanceling {
+			active = true
+			break
+		}
+	}
 	a.mu.Unlock()
 	if len(messages) > 12 {
 		messages = messages[len(messages)-12:]
@@ -278,12 +285,16 @@ func (a *App) alsoSnapshot(question string) AlsoSnapshot {
 	if len(activity) > 40 {
 		activity = activity[len(activity)-40:]
 	}
+	if len(tasks) > 10 {
+		tasks = tasks[:10]
+	}
 	return AlsoSnapshot{
 		Question:   question,
 		Active:     active,
 		Config:     config,
 		Messages:   messages,
 		Activity:   activity,
+		Tasks:      tasks,
 		Runtime:    RuntimeStatus(config),
 		CapturedAt: time.Now().UTC(),
 	}
@@ -305,11 +316,76 @@ func (a *App) appendActivity(record ActivityRecord) {
 	if len(a.activity) > 400 {
 		a.activity = a.activity[len(a.activity)-400:]
 	}
-	sink := a.activitySink
+	sinks := make([]func(ActivityRecord), 0, len(a.activitySinks))
+	for _, sink := range a.activitySinks {
+		sinks = append(sinks, sink)
+	}
 	a.mu.Unlock()
-	if sink != nil {
+	for _, sink := range sinks {
 		sink(record)
 	}
+}
+
+func (a *App) SubscribeActivity(sink func(ActivityRecord)) func() {
+	if sink == nil {
+		return func() {}
+	}
+	a.mu.Lock()
+	if a.activitySinks == nil {
+		a.activitySinks = map[int]func(ActivityRecord){}
+	}
+	a.activitySinkSeq++
+	id := a.activitySinkSeq
+	a.activitySinks[id] = sink
+	a.mu.Unlock()
+	return func() {
+		a.mu.Lock()
+		delete(a.activitySinks, id)
+		a.mu.Unlock()
+	}
+}
+
+func (a *App) recordVisibleReasoning(record ActivityRecord) {
+	message, ok := ReasoningMessageFromRecord(record)
+	if !ok {
+		return
+	}
+	a.mu.Lock()
+	a.history = append(a.history, message)
+	a.mu.Unlock()
+}
+
+func ReasoningMessageFromRecord(record ActivityRecord) (Message, bool) {
+	if record.Status != "reasoning" {
+		return Message{}, false
+	}
+	text := strings.TrimSpace(record.Detail)
+	if text == "" {
+		return Message{}, false
+	}
+	if label := reasoningAgentLabel(record.Name); label != "" {
+		text = "**" + label + "**\n\n" + text
+	}
+	if record.Time.IsZero() {
+		record.Time = time.Now().UTC()
+	}
+	return Message{
+		Role:        "reasoning",
+		Content:     text,
+		Time:        record.Time,
+		VisibleOnly: true,
+	}, true
+}
+
+func reasoningAgentLabel(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" || name == "agent" {
+		return ""
+	}
+	if before, _, ok := strings.Cut(name, "/"); ok && before != "" {
+		return before
+	}
+	return name
 }
 
 func (a *App) drainActivityLocked() []ActivityRecord {
@@ -361,6 +437,18 @@ func (a *App) RequestPause() {
 	a.setPaused(true)
 }
 
+func (a *App) Resume() {
+	a.setPaused(false)
+	a.appendActivity(ActivityRecord{
+		Time:   time.Now().UTC(),
+		Kind:   "runtime",
+		Name:   "runtime",
+		Status: "resume requested",
+		Detail: "Ready for the next active run.",
+	})
+	a.logInfo("resume requested")
+}
+
 func (a *App) setPaused(paused bool) {
 	var fallbackCancel context.CancelFunc
 	a.mu.Lock()
@@ -392,6 +480,20 @@ func (a *App) clearHistory() {
 	a.history = nil
 	a.mu.Unlock()
 	a.logInfo("visible history cleared")
+}
+
+func (a *App) ReplaceHistory(messages []Message) {
+	a.mu.Lock()
+	a.history = append([]Message{}, messages...)
+	a.mu.Unlock()
+	a.appendActivity(ActivityRecord{
+		Time:   time.Now().UTC(),
+		Kind:   "history",
+		Name:   "history",
+		Status: "session loaded",
+		Detail: fmt.Sprintf("%d visible messages loaded", len(messages)),
+	})
+	a.logInfo("visible history replaced", "messages", len(messages))
 }
 
 func (a *App) beginWork(parent context.Context) (context.Context, string) {

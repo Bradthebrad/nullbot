@@ -119,6 +119,17 @@ func TestMCPRuntimeEnvPassesKeysToImageTools(t *testing.T) {
 	}
 }
 
+func TestMCPRuntimeEnvPassesBraveKeyToWebTools(t *testing.T) {
+	config := testMarketConfig(t)
+	if err := SaveAPIKeys(config, APIKeys{Other: map[string]string{"brave": "bsa-test"}}); err != nil {
+		t.Fatal(err)
+	}
+	env := mcpRuntimeEnv(config, "nullbot-web-mcp", MCPEntry{Command: "nullbot-web-mcp.exe"})
+	if env["BRAVE_API_KEY"] != "bsa-test" {
+		t.Fatalf("BRAVE_API_KEY = %q", env["BRAVE_API_KEY"])
+	}
+}
+
 func testMarketConfig(t *testing.T) Config {
 	t.Helper()
 	config := DefaultConfig()

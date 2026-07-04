@@ -21,7 +21,10 @@ var commands = []Command{
 	{Name: "/plan", Usage: "/plan execute", Description: "Execute the current plan."},
 	{Name: "/also", Usage: "/also <message>", Description: "Inject additional guidance into the current workflow."},
 	{Name: "/tasks", Usage: "/tasks [cancel <id>|detail <id>]", Description: "Inspect and cancel running agent tasks."},
+	{Name: "/agents", Usage: "/agents [available <number>|cancel <id>|detail <id>]", Description: "Open the live manager/subagent dashboard or update the subagent limit."},
+	{Name: "/thoughts", Usage: "/thoughts", Description: "Open the manager/subagent reasoning and progress dashboard."},
 	{Name: "/usage", Usage: "/usage [clear]", Description: "Show local token and cost usage tracking."},
+	{Name: "/effort", Usage: "/effort [level]", Description: "Choose reasoning effort with provider-aware mapping."},
 	{Name: "/pause", Usage: "/pause", Description: "Pause active work without discarding state."},
 	{Name: "/mcp", Usage: "/mcp [enable|disable|remove <id>]", Description: "Manage MCP servers."},
 	{Name: "/models", Usage: "/models", Description: "Select provider and model."},
@@ -38,6 +41,7 @@ var commands = []Command{
 	{Name: "/history", Usage: "/history", Description: "Open recent session history."},
 	{Name: "/logs", Usage: "/logs", Description: "Open runtime logs."},
 	{Name: "/reset", Usage: "/reset", Description: "Reset current session state."},
+	{Name: "/name", Usage: "/name <bot-name>", Description: "Change the displayed bot name."},
 	{Name: "/config", Usage: "/config [key=value]", Description: "Open settings or update a supported config key."},
 	{Name: "/ls", Usage: "/ls [path]", Description: "List files in the configured workspace.", Aliases: []string{"/dir"}},
 	{Name: "/rm", Usage: "/rm <path> [--recursive]", Description: "Remove a workspace file or directory."},
@@ -70,8 +74,14 @@ func (a *App) executeSlash(ctx context.Context, input string) Reply {
 		return a.RunAlsoObserver(ctx, rest)
 	case "/tasks":
 		return a.tasksCommand(strings.TrimSpace(rest))
+	case "/agents":
+		return a.agentsCommand(strings.TrimSpace(rest))
+	case "/thoughts":
+		return a.thoughtsCommand(strings.TrimSpace(rest))
 	case "/usage":
 		return a.usageCommand(strings.TrimSpace(rest))
+	case "/effort":
+		return a.effortCommand(strings.TrimSpace(rest))
 	case "/pause":
 		a.setPaused(true)
 		return a.reply("Paused. Tool calls and results remain in session state.", name, "")
@@ -122,6 +132,8 @@ func (a *App) executeSlash(ctx context.Context, input string) Reply {
 		a.clearHistory()
 		a.setPaused(false)
 		return a.reply("Reset current session state.", name, "")
+	case "/name":
+		return a.nameCommand(strings.TrimSpace(rest))
 	case "/config":
 		return a.configCommand(strings.TrimSpace(rest))
 	case "/ls", "/dir":

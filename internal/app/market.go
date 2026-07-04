@@ -145,6 +145,7 @@ func defaultMarketSources() []MarketSource {
 			"nullbot-code-mcp",
 			"nullbot-parsers-mcp",
 			"nullbot-imagetools-mcp",
+			"nullbot-web-mcp",
 			"nullbot-skills",
 		},
 	}}
@@ -194,6 +195,19 @@ func defaultMarketManifest(config Config) MarketManifest {
 				Permissions:      []string{"image_generation", "workspace_read", "workspace_write"},
 				Status:           "available",
 				Assets:           defaultReleaseAssets("Bradthebrad/nullbot-imagetools-mcp", "v0.1.1", "nullbot-imagetools-mcp"),
+			},
+			{
+				ID:               "nullbot-web-mcp",
+				Kind:             "mcp_server",
+				Name:             "NullBot Web MCP",
+				Description:      "Web search, safe URL fetching/readability, and Chromium browser automation through localhost CDP.",
+				Repo:             "Bradthebrad/nullbot-web-mcp",
+				ReleaseTag:       "v0.1.0",
+				DefaultTransport: "stdio",
+				DefaultArgs:      []string{"--workspace", "{{workspace}}"},
+				Permissions:      []string{"network_fetch", "browser_control", "workspace_write"},
+				Status:           "available",
+				Assets:           defaultReleaseAssets("Bradthebrad/nullbot-web-mcp", "v0.1.0", "nullbot-web-mcp"),
 			},
 			{
 				ID:          "api-probe",

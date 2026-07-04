@@ -16,8 +16,11 @@ func renderMessages(messages []app.Message, width int) string {
 	entries := make([]logEntry, 0, len(messages))
 	for _, msg := range messages {
 		role := userStyle
-		if msg.Role == "assistant" {
+		switch msg.Role {
+		case "assistant":
 			role = botStyle
+		case "reasoning":
+			role = reasoningStyle
 		}
 		entries = append(entries, logEntry{
 			Title: strings.ToUpper(msg.Role),

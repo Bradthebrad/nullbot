@@ -61,15 +61,41 @@ func nullbotMarkdownStyle() ansi.StyleConfig {
 
 	style.H1.Prefix = ""
 	style.H1.Suffix = ""
-	style.H1.BackgroundColor = nil
+	style.H1.BackgroundColor = strPtr(currentThemePalette.CodeBG)
+	style.H1.Color = strPtr(currentThemePalette.Accent)
+	style.H1.Bold = boolPtr(true)
 	style.H2.Prefix = ""
+	style.H2.Color = strPtr(currentThemePalette.Accent2)
+	style.H2.Bold = boolPtr(true)
 	style.H3.Prefix = ""
+	style.H3.Color = strPtr(currentThemePalette.Accent)
+	style.H3.Bold = boolPtr(true)
 	style.H4.Prefix = ""
 	style.H5.Prefix = ""
 	style.H6.Prefix = ""
 
 	style.CodeBlock.Margin = &zero
+	style.CodeBlock.Color = strPtr(currentThemePalette.CodeFG)
+	style.CodeBlock.BackgroundColor = strPtr(currentThemePalette.CodeBG)
+	style.Code.Color = strPtr(currentThemePalette.CodeFG)
+	style.Code.BackgroundColor = strPtr(currentThemePalette.CodeBG)
+	style.BlockQuote.Color = strPtr(currentThemePalette.InputBorder)
+	style.List.Color = strPtr(currentThemePalette.Text)
+	centerSep := " | "
+	columnSep := " | "
+	rowSep := "-"
+	style.Table.CenterSeparator = &centerSep
+	style.Table.ColumnSeparator = &columnSep
+	style.Table.RowSeparator = &rowSep
 	return style
+}
+
+func strPtr(value string) *string {
+	return &value
+}
+
+func boolPtr(value bool) *bool {
+	return &value
 }
 
 func unwrapMarkdownFence(text string) string {

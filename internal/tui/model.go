@@ -68,6 +68,19 @@ type Model struct {
 	taskIndex   int
 	taskDetails bool
 
+	agents        []app.AgentTask
+	agentIndex    int
+	agentTab      int
+	agentDetails  bool
+	thoughts      []app.ThoughtSnapshot
+	thoughtIndex  int
+	effortOptions []app.EffortOption
+	effortIndex   int
+	skills        []app.SkillSummary
+	skillIndex    int
+	skillDetails  bool
+	skillRaw      string
+
 	plans       []app.PlanSummary
 	planIndex   int
 	planDetails bool
@@ -98,6 +111,7 @@ type liveActivityMsg struct {
 }
 type liveActivityDoneMsg struct{}
 type pasteNoticeDoneMsg struct{}
+type dashboardTickMsg struct{}
 
 type activityEvent struct {
 	Time    time.Time
@@ -111,7 +125,7 @@ type activityEvent struct {
 func New(a *app.App) Model {
 	applyTheme(a.Config().UI.Theme)
 	input := textarea.New()
-	input.Placeholder = "Message NullBot or type /help"
+	input.Placeholder = "Message " + app.DisplayName(a.Config()) + " or type /help"
 	input.Prompt = "| "
 	input.CharLimit = 0
 	input.SetHeight(3)
@@ -162,6 +176,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		reply := app.Reply(msg)
 		m.busy = false
 		m.applyReply(reply)
+		m.input.Placeholder = "Message " + app.DisplayName(m.app.Config()) + " or type /help"
 		if text, ok := reply.Data["copy"].(string); ok {
 			if err := clipboard.WriteAll(text); err != nil {
 				m.status = "Copy failed: " + err.Error()
@@ -170,6 +185,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshContent(reply)
 		if reply.OpenPanel != "" {
 			m.openModal(reply.OpenPanel, reply)
+			if reply.OpenPanel == "agents" || reply.OpenPanel == "thoughts" {
+				return m, dashboardTick()
+			}
+		}
+		if reply.Command == "/name" {
+			return m, tea.SetWindowTitle(app.DisplayName(m.app.Config()))
 		}
 		return m, nil
 	case alsoReplyMsg:
@@ -180,6 +201,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case liveActivityMsg:
 		m.events = append(m.events, activityEventFromRecord(msg.Record))
+		if message, ok := app.ReasoningMessageFromRecord(msg.Record); ok {
+			m.messages = append(m.messages, message)
+		}
 		m.refreshContent(app.Reply{})
 		return m, waitActivity(msg.Ch)
 	case liveActivityDoneMsg:
@@ -187,6 +211,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case pasteNoticeDoneMsg:
 		if time.Now().After(m.pasteProtectUntil) {
 			m.pasteNotice = ""
+		}
+		return m, nil
+	case dashboardTickMsg:
+		if m.mode == ModeModal && (m.panel == "agents" || m.panel == "thoughts") {
+			if m.panel == "agents" {
+				reply := m.app.Execute(context.Background(), "/agents")
+				m.agents = tasksFromReply(reply)
+				m.modal.SetContent(m.renderAgentsModal())
+				m.syncAgentsModalViewport()
+			} else {
+				reply := m.app.Execute(context.Background(), "/thoughts")
+				m.agents = tasksFromReply(reply)
+				m.thoughts = thoughtsFromReply(reply)
+				m.modal.SetContent(m.renderThoughtsModal())
+				m.syncThoughtsModalViewport()
+			}
+			if m.busy || m.hasRunningAgentTasks() {
+				return m, dashboardTick()
+			}
 		}
 		return m, nil
 	case spinner.TickMsg:
@@ -341,6 +384,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if next, cmd, handled := m.handleTasksKey(msg); handled {
 			return next, cmd
 		}
+		if next, cmd, handled := m.handleAgentsKey(msg); handled {
+			return next, cmd
+		}
+		if next, cmd, handled := m.handleThoughtsKey(msg); handled {
+			return next, cmd
+		}
+		if next, cmd, handled := m.handleEffortKey(msg); handled {
+			return next, cmd
+		}
+		if next, cmd, handled := m.handleSkillsKey(msg); handled {
+			return next, cmd
+		}
 		if next, cmd, handled := m.handlePlanKey(msg); handled {
 			return next, cmd
 		}
@@ -493,16 +548,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.completeInput()
 		return m, nil
 	case "right":
-		m.completeInput()
-		return m, nil
+		if m.inputCursorAtEnd() {
+			m.completeInput()
+			return m, nil
+		}
 	case "up":
-		if m.input.Line() == 0 {
+		if m.inputAtFirstVisualLine() {
 			m.closeCompletion()
 			m.historyPrev()
 			return m, nil
 		}
 	case "down":
-		if m.input.Line() >= m.input.LineCount()-1 {
+		if m.inputAtLastVisualLine() {
 			m.closeCompletion()
 			m.historyNext()
 			return m, nil
@@ -512,9 +569,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+p":
 		return m, m.submit("/plan")
 	case "pgup":
+		if m.input.LineCount() > 1 {
+			m.inputPageUp()
+			return m, nil
+		}
 		m.output.PageUp()
 		return m, nil
 	case "pgdown":
+		if m.input.LineCount() > 1 {
+			m.inputPageDown()
+			return m, nil
+		}
 		m.output.PageDown()
 		return m, nil
 	case "shift+up":
@@ -551,6 +616,21 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 		if next, cmd, handled := m.handleMCPMouse(msg); handled {
 			return next, cmd
+		}
+		if next, cmd, handled := m.handleEffortMouse(msg); handled {
+			return next, cmd
+		}
+		if next, cmd, handled := m.handleSkillsMouse(msg); handled {
+			return next, cmd
+		}
+		if next, cmd, handled := m.handleAgentsMouse(msg); handled {
+			return next, cmd
+		}
+	}
+	if msg.Type == tea.MouseLeft && m.mode == ModeChat {
+		if m.mouseInInput(msg) {
+			m.input.Focus()
+			return m, nil
 		}
 	}
 	if msg.Type != tea.MouseWheelUp && msg.Type != tea.MouseWheelDown {
@@ -728,6 +808,22 @@ func (m *Model) openModal(panel string, reply app.Reply) {
 		m.openTasksModal(reply)
 		return
 	}
+	if panel == "agents" {
+		m.openAgentsModal(reply)
+		return
+	}
+	if panel == "thoughts" {
+		m.openThoughtsModal(reply)
+		return
+	}
+	if panel == "effort" {
+		m.openEffortModal(reply)
+		return
+	}
+	if panel == "skills" {
+		m.openSkillsModal(reply)
+		return
+	}
 	if panel == "plan" {
 		m.openPlanModal(reply)
 		return
@@ -828,6 +924,11 @@ func (m Model) mouseInActivity(msg tea.MouseMsg) bool {
 	return msg.X >= leftW && msg.X < leftW+rightW && msg.Y >= 2 && msg.Y < 2+panelH
 }
 
+func (m Model) mouseInInput(msg tea.MouseMsg) bool {
+	inputTop := max(0, m.height-5)
+	return msg.Y >= inputTop && msg.Y < m.height && msg.X >= 0 && msg.X < m.width
+}
+
 func (m Model) statusView() string {
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
@@ -865,6 +966,18 @@ func (m Model) modalView() string {
 	}
 	if m.panel == "tasks" {
 		footer += " | up/down move | enter details | c cancel | r refresh | d details"
+	}
+	if m.panel == "agents" {
+		footer += " | tab/left/right tabs | up/down move | enter details | c cancel | r refresh"
+	}
+	if m.panel == "thoughts" {
+		footer += " | tab/left/right tabs | up/down move | r refresh"
+	}
+	if m.panel == "effort" {
+		footer += " | up/down move | enter apply | click row"
+	}
+	if m.panel == "skills" {
+		footer += " | up/down move | enter raw | d details | r reload"
 	}
 	if m.panel == "usage" {
 		footer += " | tab/left/right tabs | f model filter | c clear | r refresh"
@@ -981,6 +1094,21 @@ func clearPasteNoticeAfter(delay time.Duration) tea.Cmd {
 	return tea.Tick(delay, func(time.Time) tea.Msg {
 		return pasteNoticeDoneMsg{}
 	})
+}
+
+func dashboardTick() tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg {
+		return dashboardTickMsg{}
+	})
+}
+
+func (m Model) hasRunningAgentTasks() bool {
+	for _, task := range m.agents {
+		if task.Status == app.TaskRunning || task.Status == app.TaskCanceling {
+			return true
+		}
+	}
+	return false
 }
 
 func isReplacingKey(msg tea.KeyMsg) bool {

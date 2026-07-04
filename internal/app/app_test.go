@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,6 +56,45 @@ func TestConfigCommandUpdatesBrand(t *testing.T) {
 	reply := app.Submit(context.Background(), "/config brand_prefix=Brad")
 	if reply.Config.BrandPrefix != "Brad" {
 		t.Fatalf("brand = %q, message = %s", reply.Config.BrandPrefix, reply.Message)
+	}
+}
+
+func TestNameCommandUpdatesBotName(t *testing.T) {
+	config := DefaultConfig()
+	config.AppDir = t.TempDir()
+	app := New(config)
+	reply := app.Submit(context.Background(), "/name BradBot")
+	if reply.Config.BotName != "BradBot" || DisplayName(reply.Config) != "BradBot" {
+		t.Fatalf("bot name = %q display=%q message=%s", reply.Config.BotName, DisplayName(reply.Config), reply.Message)
+	}
+}
+
+func TestEffortCommandNormalizesAndMaps(t *testing.T) {
+	config := DefaultConfig()
+	config.AppDir = t.TempDir()
+	app := New(config)
+	reply := app.Submit(context.Background(), "/effort Big Brain")
+	if reply.Config.Model.ReasoningEffort != "xhigh" {
+		t.Fatalf("effort = %q message=%s", reply.Config.Model.ReasoningEffort, reply.Message)
+	}
+	if got := ProviderEffort("openai", "xhigh"); got != "high" {
+		t.Fatalf("openai mapped effort = %q", got)
+	}
+	if got := ProviderEffort("anthropic", "xhigh"); got != "xhigh" {
+		t.Fatalf("anthropic mapped effort = %q", got)
+	}
+}
+
+func TestAgentsAvailableUpdatesMaxSubagents(t *testing.T) {
+	config := DefaultConfig()
+	config.AppDir = t.TempDir()
+	app := New(config)
+	reply := app.Submit(context.Background(), "/agents available 7")
+	if reply.Config.Agent.MaxSubagents != 7 {
+		t.Fatalf("max subagents = %d message=%s", reply.Config.Agent.MaxSubagents, reply.Message)
+	}
+	if reply.OpenPanel != "agents" {
+		t.Fatalf("panel = %q", reply.OpenPanel)
 	}
 }
 
@@ -294,6 +334,87 @@ func TestCreateSkillToolWritesSingleAndBatchSkills(t *testing.T) {
 	}
 }
 
+func TestSkillReadLoadsReferencedMarkdownSafely(t *testing.T) {
+	config := DefaultConfig()
+	config.AppDir = t.TempDir()
+	config.SkillDirs = []string{filepath.Join(config.AppDir, "skills")}
+	if err := EnsureAppDir(config); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(config.AppDir, "skills", "multi")
+	if err := os.MkdirAll(filepath.Join(root, "references"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	skill := "---\nname: multi\ndescription: Multi tier skill.\n---\n\n# Multi\n\nRead [Guide](references/guide.md).\n"
+	if err := os.WriteFile(filepath.Join(root, "SKILL.md"), []byte(skill), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "references", "guide.md"), []byte("# Guide\n\nUse it."), 0600); err != nil {
+		t.Fatal(err)
+	}
+	summaries := scanSkillSummaries(config)
+	var found SkillSummary
+	for _, summary := range summaries {
+		if summary.Name == "multi" {
+			found = summary
+		}
+	}
+	if len(found.References) != 1 || !found.References[0].Exists {
+		t.Fatalf("references = %#v", found.References)
+	}
+	result, err := readSkillMarkdown(config, "multi", "references/guide.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Content, "Use it") {
+		t.Fatalf("content = %q", result.Content)
+	}
+	if _, err := readSkillMarkdown(config, "multi", "../outside.md"); err == nil {
+		t.Fatal("expected escape to be rejected")
+	}
+}
+
+func TestSpawnSubagentToolReturnsTaskIDImmediately(t *testing.T) {
+	config := DefaultConfig()
+	config.AppDir = t.TempDir()
+	config.SkillDirs = []string{filepath.Join(config.AppDir, "skills")}
+	if err := EnsureAppDir(config); err != nil {
+		t.Fatal(err)
+	}
+	state := New(config)
+	tool := spawnSubagentTool(state)
+	output, err := tool.Call(context.Background(), map[string]any{"name": "Scout", "task": "look around"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		TaskID string `json:"task_id"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(output), &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if parsed.TaskID == "" || parsed.Status != "running" {
+		t.Fatalf("spawn output = %s", output)
+	}
+	deadline := time.After(500 * time.Millisecond)
+	for {
+		task, ok := state.TaskDetails(parsed.TaskID)
+		if !ok {
+			t.Fatalf("task %s not found", parsed.TaskID)
+		}
+		if task.Status != TaskRunning {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("subagent task did not finish after missing API key")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
 func TestHistorySessionToolsReadPersistedSessions(t *testing.T) {
 	config := DefaultConfig()
 	config.AppDir = t.TempDir()
@@ -326,6 +447,22 @@ func TestLangChainHistorySkipsVisibleOnlySlashOutput(t *testing.T) {
 	messages := app.langChainHistory()
 	if len(messages) != 2 || lcContentText(messages[0].Content) != "what is here?" || lcContentText(messages[1].Content) != "A repo." {
 		t.Fatalf("messages = %#v", messages)
+	}
+}
+
+func TestReasoningRecordCreatesVisibleOnlyHistoryMessage(t *testing.T) {
+	state := New(DefaultConfig())
+	record := ActivityRecord{Time: time.Now().UTC(), Kind: "reasoning", Name: "Scout/agent", Status: "reasoning", Detail: "checked the plan"}
+	state.recordVisibleReasoning(record)
+	history := state.State().History
+	if len(history) != 1 || history[0].Role != "reasoning" || !history[0].VisibleOnly {
+		t.Fatalf("history = %#v", history)
+	}
+	if !strings.Contains(history[0].Content, "Scout") || !strings.Contains(history[0].Content, "checked the plan") {
+		t.Fatalf("reasoning content = %q", history[0].Content)
+	}
+	if got := state.langChainHistory(); len(got) != 0 {
+		t.Fatalf("visible reasoning should not enter model history: %#v", got)
 	}
 }
 

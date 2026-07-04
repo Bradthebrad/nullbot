@@ -48,9 +48,23 @@ type TaskToolCall struct {
 }
 
 type TaskTokens struct {
-	Input  int `json:"input,omitempty"`
-	Output int `json:"output,omitempty"`
-	Total  int `json:"total,omitempty"`
+	Input              int `json:"input,omitempty"`
+	Output             int `json:"output,omitempty"`
+	Total              int `json:"total,omitempty"`
+	CachedInput        int `json:"cached_input,omitempty"`
+	CacheCreationInput int `json:"cache_creation_input,omitempty"`
+	ReasoningOutput    int `json:"reasoning_output,omitempty"`
+}
+
+type ThoughtSnapshot struct {
+	TaskID    string    `json:"task_id"`
+	Agent     string    `json:"agent"`
+	Role      string    `json:"role"`
+	Status    string    `json:"status"`
+	Current   string    `json:"current,omitempty"`
+	Prompt    string    `json:"prompt,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Notes     []string  `json:"notes,omitempty"`
 }
 
 func (a *App) startTask(name, role, prompt string, cancel func()) string {
@@ -243,6 +257,9 @@ func (a *App) addTaskUsage(id string, usage TaskTokens) {
 	task.Tokens.Input += usage.Input
 	task.Tokens.Output += usage.Output
 	task.Tokens.Total += usage.Total
+	task.Tokens.CachedInput += usage.CachedInput
+	task.Tokens.CacheCreationInput += usage.CacheCreationInput
+	task.Tokens.ReasoningOutput += usage.ReasoningOutput
 	if task.Tokens.Total == 0 {
 		task.Tokens.Total = task.Tokens.Input + task.Tokens.Output
 	}
@@ -263,12 +280,54 @@ func usageFromLLMEnd(event callbacks.Event) TaskTokens {
 			usage.Input += meta.InputTokens
 			usage.Output += meta.OutputTokens
 			usage.Total += meta.TotalTokens
+			usage.CachedInput += meta.InputTokenDetails["cached_tokens"]
+			usage.CachedInput += meta.InputTokenDetails["cache_read_input_tokens"]
+			usage.CacheCreationInput += meta.InputTokenDetails["cache_creation_input_tokens"]
+			usage.ReasoningOutput += meta.OutputTokenDetails["reasoning_tokens"]
 		}
 	}
 	if usage.Total == 0 {
 		usage.Total = usage.Input + usage.Output
 	}
 	return usage
+}
+
+func (a *App) ThoughtSnapshots() []ThoughtSnapshot {
+	tasks := a.TaskSnapshots()
+	out := make([]ThoughtSnapshot, 0, len(tasks))
+	for _, task := range tasks {
+		snap := ThoughtSnapshot{
+			TaskID:    task.ID,
+			Agent:     task.Name,
+			Role:      task.Role,
+			Status:    string(task.Status),
+			Current:   task.Current,
+			Prompt:    task.Prompt,
+			UpdatedAt: task.UpdatedAt,
+		}
+		start := maxInt(0, len(task.Activity)-10)
+		for _, record := range task.Activity[start:] {
+			switch record.Status {
+			case "model start":
+				snap.Notes = append(snap.Notes, "started model call: "+record.Detail)
+			case "reasoning":
+				snap.Notes = append(snap.Notes, "reasoning: "+record.Detail)
+			case "tool start":
+				snap.Notes = append(snap.Notes, "using tool "+record.Name+" "+record.Detail)
+			case "tool complete":
+				snap.Notes = append(snap.Notes, "tool complete: "+record.Name)
+			case "tool error", "model error":
+				snap.Notes = append(snap.Notes, record.Status+": "+record.Detail)
+			case "agent complete":
+				snap.Notes = append(snap.Notes, "completed current turn")
+			}
+		}
+		if len(snap.Notes) == 0 && snap.Current != "" {
+			snap.Notes = append(snap.Notes, snap.Current)
+		}
+		out = append(out, snap)
+	}
+	return out
 }
 
 func taskSummary(tasks []AgentTask) string {
@@ -316,6 +375,12 @@ func activityRecordFromCallback(event callbacks.Event) ActivityRecord {
 	case callbacks.EventChatModelStart:
 		record.Status = "model start"
 		record.Detail = fmt.Sprintf("messages=%d", callbackMessageCount(event))
+	case callbacks.EventLLMReasoning:
+		record.Status = "reasoning"
+		record.Detail = event.Data.Token
+		if record.Detail == "" && event.Data.Chunk != nil {
+			record.Detail = event.Data.Chunk.Text
+		}
 	case callbacks.EventLLMEnd:
 		record.Status = "agent complete"
 		record.Detail = "Agent completed task."
@@ -331,6 +396,23 @@ func activityRecordFromCallback(event callbacks.Event) ActivityRecord {
 	case callbacks.EventToolError:
 		record.Status = "tool error"
 		record.Detail = "error: " + event.Data.Error
+	case callbacks.EventChainStart:
+		if event.Name == "context_compaction" {
+			record.Status = "context compact start"
+			record.Detail = compactAny(event.Data.Extra, 220)
+		} else {
+			record.Status = "chain start"
+		}
+	case callbacks.EventChainEnd:
+		if event.Name == "context_compaction" {
+			record.Status = "context compact complete"
+			record.Detail = compactAny(event.Data.Extra, 220)
+		} else {
+			record.Status = "chain complete"
+		}
+	case callbacks.EventChainError:
+		record.Status = "context compact error"
+		record.Detail = "error: " + event.Data.Error
 	default:
 		record.Status = string(event.Event)
 	}
@@ -339,4 +421,11 @@ func activityRecordFromCallback(event callbacks.Event) ActivityRecord {
 
 func lcMessagesWithTask(task string) []lc.BaseMessage {
 	return []lc.BaseMessage{lc.Human(task)}
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

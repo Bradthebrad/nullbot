@@ -15,12 +15,14 @@ const defaultMaxIterations = 20
 
 type Config struct {
 	BrandPrefix         string              `json:"brand_prefix"`
+	BotName             string              `json:"bot_name,omitempty"`
 	Tagline             string              `json:"tagline"`
 	AppDir              string              `json:"app_dir"`
 	Model               ModelConfig         `json:"model"`
 	SubagentModel       ModelConfig         `json:"subagent_model,omitempty"`
 	Agent               AgentConfig         `json:"agent"`
 	Compaction          CompactionConfig    `json:"compaction"`
+	Prompts             PromptConfig        `json:"prompts,omitempty"`
 	Editor              EditorConfig        `json:"editor"`
 	UI                  UIConfig            `json:"ui"`
 	WorkspaceDir        string              `json:"workspace_dir"`
@@ -46,12 +48,20 @@ type AgentConfig struct {
 }
 
 type CompactionConfig struct {
-	Enabled             bool   `json:"enabled"`
-	ApproxTokenLimit    int    `json:"approx_token_limit"`
-	MessageCountLimit   int    `json:"message_count_limit"`
-	KeepLastMessages    int    `json:"keep_last_messages"`
-	ToolResultCharLimit int    `json:"tool_result_char_limit"`
-	DefaultFocus        string `json:"default_focus,omitempty"`
+	Enabled             bool    `json:"enabled"`
+	ApproxTokenLimit    int     `json:"approx_token_limit"`
+	ThresholdRatio      float64 `json:"threshold_ratio,omitempty"`
+	MessageCountLimit   int     `json:"message_count_limit"`
+	KeepLastMessages    int     `json:"keep_last_messages"`
+	ToolResultCharLimit int     `json:"tool_result_char_limit"`
+	DefaultFocus        string  `json:"default_focus,omitempty"`
+}
+
+type PromptConfig struct {
+	ManagerPrompt  string `json:"manager_prompt,omitempty"`
+	SubagentPrompt string `json:"subagent_prompt,omitempty"`
+	ManagerAppend  string `json:"manager_append,omitempty"`
+	SubagentAppend string `json:"subagent_append,omitempty"`
 }
 
 type EditorConfig struct {
@@ -90,6 +100,7 @@ func DefaultConfig() Config {
 		Compaction: CompactionConfig{
 			Enabled:             true,
 			ApproxTokenLimit:    64000,
+			ThresholdRatio:      0.75,
 			MessageCountLimit:   80,
 			KeepLastMessages:    12,
 			ToolResultCharLimit: 12000,
@@ -202,6 +213,18 @@ func normalizeConfig(config Config) Config {
 	if config.Agent.MaxSubagents <= 0 {
 		config.Agent.MaxSubagents = 3
 	}
+	if config.Compaction.ThresholdRatio <= 0 || config.Compaction.ThresholdRatio >= 1 {
+		config.Compaction.ThresholdRatio = 0.75
+	}
+	if config.Compaction.ApproxTokenLimit <= 0 {
+		config.Compaction.ApproxTokenLimit = 64000
+	}
+	if config.Compaction.KeepLastMessages <= 0 {
+		config.Compaction.KeepLastMessages = 12
+	}
+	if config.Compaction.ToolResultCharLimit <= 0 {
+		config.Compaction.ToolResultCharLimit = 12000
+	}
 	if strings.TrimSpace(config.SubagentModel.Provider) == "" {
 		config.SubagentModel = config.Model
 	}
@@ -279,6 +302,10 @@ func hasWorkspaceArg(args []string) bool {
 }
 
 func DisplayName(config Config) string {
+	name := strings.TrimSpace(config.BotName)
+	if name != "" {
+		return name
+	}
 	prefix := strings.TrimSpace(config.BrandPrefix)
 	if prefix == "" {
 		prefix = DefaultPrefix

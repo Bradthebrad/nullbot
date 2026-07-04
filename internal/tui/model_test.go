@@ -429,6 +429,24 @@ func TestActivityToolRendererOmitsToolOutput(t *testing.T) {
 	}
 }
 
+func TestLiveReasoningActivityAppearsInOutput(t *testing.T) {
+	model := New(app.New(app.DefaultConfig()))
+	model.width = 100
+	model.height = 32
+	model.resize()
+	ch := make(chan app.ActivityRecord)
+	close(ch)
+	next, _ := model.Update(liveActivityMsg{
+		Record: app.ActivityRecord{Time: now(), Kind: "reasoning", Name: "agent", Status: "reasoning", Detail: "checked constraints"},
+		Ch:     ch,
+	})
+	updated := next.(Model)
+	rendered := stripANSI(updated.output.View())
+	if !strings.Contains(rendered, "REASONING") || !strings.Contains(rendered, "checked constraints") {
+		t.Fatalf("output missing live reasoning:\n%s", rendered)
+	}
+}
+
 func TestUsageModalRendersTabsAndChart(t *testing.T) {
 	model := New(app.New(app.DefaultConfig()))
 	model.width = 120
@@ -464,6 +482,71 @@ func TestUsageModalRendersTabsAndChart(t *testing.T) {
 	rendered = stripANSI(model.modal.View())
 	if !strings.Contains(rendered, "Daily Token Usage") {
 		t.Fatalf("usage chart missing:\n%s", rendered)
+	}
+}
+
+func TestEffortModalRendersFunnyLabels(t *testing.T) {
+	model := New(app.New(app.DefaultConfig()))
+	model.width = 100
+	model.height = 36
+	model.resize()
+	model.openEffortModal(app.Reply{Message: "Effort panel opened."})
+	rendered := stripANSI(model.modal.View())
+	if !strings.Contains(rendered, "Empty Vessel") || !strings.Contains(rendered, "Big Brain") {
+		t.Fatalf("effort labels missing:\n%s", rendered)
+	}
+}
+
+func TestAgentsModalRendersTokensAndToolsWithoutOutput(t *testing.T) {
+	model := New(app.New(app.DefaultConfig()))
+	model.width = 120
+	model.height = 40
+	model.resize()
+	model.openAgentsModal(app.Reply{
+		Message: "Agents dashboard opened.",
+		Data: map[string]any{"tasks": []app.AgentTask{{
+			ID:      "task-0001",
+			Name:    "Manager",
+			Role:    "primary",
+			Status:  app.TaskRunning,
+			Current: "tool start",
+			Tokens:  app.TaskTokens{Input: 10, Output: 5, CachedInput: 3, ReasoningOutput: 2},
+			ToolCalls: []app.TaskToolCall{{
+				Time:   now(),
+				Name:   "read_file",
+				Status: "tool complete",
+				Detail: "output: secret file contents",
+			}},
+		}}},
+	})
+	rendered := stripANSI(model.modal.View())
+	if !strings.Contains(rendered, "CACHE") || !strings.Contains(rendered, "THINK") || !strings.Contains(rendered, "Manager") {
+		t.Fatalf("agents modal missing dashboard fields:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "secret file contents") {
+		t.Fatalf("agents modal leaked tool output:\n%s", rendered)
+	}
+}
+
+func TestSkillsModalRendersReferences(t *testing.T) {
+	model := New(app.New(app.DefaultConfig()))
+	model.width = 110
+	model.height = 40
+	model.resize()
+	model.openSkillsModal(app.Reply{
+		Message: "Skills panel opened.",
+		Data: map[string]any{"skills": []app.SkillSummary{{
+			Name:        "multi",
+			Description: "Multi tier skill.",
+			Path:        "skills/multi/SKILL.md",
+			References:  []app.SkillReference{{Path: "references/guide.md", Exists: true}},
+		}}},
+	})
+	model.skillDetails = true
+	model.modal.SetContent(model.renderSkillsModal())
+	rendered := stripANSI(model.modal.View())
+	if !strings.Contains(rendered, "multi") || !strings.Contains(rendered, "references/guide.md") {
+		t.Fatalf("skills modal missing references:\n%s", rendered)
 	}
 }
 

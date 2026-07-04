@@ -57,6 +57,47 @@ func (m *Model) setInputValue(value string) {
 	m.input.CursorEnd()
 }
 
+func (m Model) inputCursorAtEnd() bool {
+	if m.input.Line() != m.input.LineCount()-1 {
+		return false
+	}
+	lines := strings.Split(m.input.Value(), "\n")
+	if len(lines) == 0 {
+		return true
+	}
+	line := lines[min(m.input.Line(), len(lines)-1)]
+	info := m.input.LineInfo()
+	return info.StartColumn+info.ColumnOffset >= len([]rune(line))
+}
+
+func (m Model) inputAtFirstVisualLine() bool {
+	if m.input.Line() != 0 {
+		return false
+	}
+	info := m.input.LineInfo()
+	return info.RowOffset <= 0
+}
+
+func (m Model) inputAtLastVisualLine() bool {
+	if m.input.Line() != m.input.LineCount()-1 {
+		return false
+	}
+	info := m.input.LineInfo()
+	return info.RowOffset+1 >= max(1, info.Height)
+}
+
+func (m *Model) inputPageUp() {
+	for i := 0; i < max(1, m.input.LineCount()/2); i++ {
+		m.input.CursorUp()
+	}
+}
+
+func (m *Model) inputPageDown() {
+	for i := 0; i < max(1, m.input.LineCount()/2); i++ {
+		m.input.CursorDown()
+	}
+}
+
 func (m *Model) completePathInput() bool {
 	value := m.input.Value()
 	if value == "" || strings.Contains(value, "\n") {

@@ -30,6 +30,30 @@ type ModelGroup struct {
 func ModelCatalog() []ModelOption {
 	return []ModelOption{
 		{
+			Provider:    "codex",
+			ID:          "gpt-5.5",
+			Name:        "Codex GPT-5.5",
+			Description: "Uses your ChatGPT/Codex subscription sign-in instead of OpenAI API-key billing.",
+			Reasoning:   true,
+			APIKeyEnv:   "CODEX_AUTH",
+		},
+		{
+			Provider:    "codex",
+			ID:          "gpt-5.4-mini",
+			Name:        "Codex GPT-5.4 mini",
+			Description: "Faster Codex-backed model for lighter work and subagents, using subscription auth.",
+			Reasoning:   true,
+			APIKeyEnv:   "CODEX_AUTH",
+		},
+		{
+			Provider:    "codex",
+			ID:          "gpt-5.3-codex-spark",
+			Name:        "Codex Spark",
+			Description: "Research-preview Codex model for fast coding iteration when your subscription allows it.",
+			Reasoning:   true,
+			APIKeyEnv:   "CODEX_AUTH",
+		},
+		{
 			Provider:    "openai",
 			ID:          "gpt-5.2",
 			Name:        "GPT-5.2",
@@ -111,27 +135,56 @@ func ModelCatalog() []ModelOption {
 func DiscoverModelGroups(ctx context.Context, config Config) []ModelGroup {
 	keys, _ := LoadAPIKeys(config)
 	groups := []ModelGroup{
+		{Provider: "codex", Models: staticProviderModels("codex")},
 		{Provider: "openai", Models: staticProviderModels("openai")},
 		{Provider: "anthropic", Models: staticProviderModels("anthropic")},
 		{Provider: "openrouter", Models: staticProviderModels("openrouter")},
 	}
-	if keys.OpenAI != "" {
-		models, err := fetchOpenAIModels(ctx, keys.OpenAI)
+	if CodexAuthPresent(config) {
+		models, err := FetchCodexModels(ctx, config)
 		if err != nil {
 			groups[0].Error = err.Error()
 		} else if len(models) > 0 {
-			groups[0].Models = models
+			groups[0].Models = codexModelOptions(models)
+		}
+	}
+	if keys.OpenAI != "" {
+		models, err := fetchOpenAIModels(ctx, keys.OpenAI)
+		if err != nil {
+			groups[1].Error = err.Error()
+		} else if len(models) > 0 {
+			groups[1].Models = models
 		}
 	}
 	if keys.OpenRouter != "" {
 		models, err := fetchOpenRouterModels(ctx, keys.OpenRouter)
 		if err != nil {
-			groups[2].Error = err.Error()
+			groups[3].Error = err.Error()
 		} else if len(models) > 0 {
-			groups[2].Models = models
+			groups[3].Models = models
 		}
 	}
 	return groups
+}
+
+func codexModelOptions(ids []string) []ModelOption {
+	out := make([]ModelOption, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		out = append(out, ModelOption{
+			Provider:    "codex",
+			ID:          id,
+			Name:        "Codex " + id,
+			Description: "Available through the signed-in ChatGPT/Codex subscription.",
+			Reasoning:   true,
+			APIKeyEnv:   "CODEX_AUTH",
+		})
+	}
+	sortModels(out)
+	return out
 }
 
 func FlattenModelGroups(groups []ModelGroup) []ModelOption {

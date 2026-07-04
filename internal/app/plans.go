@@ -24,12 +24,80 @@ type Plan struct {
 	Notes       []string   `json:"notes,omitempty"`
 }
 
+func (p *Plan) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		ID          string          `json:"id"`
+		Name        string          `json:"name"`
+		Goal        string          `json:"goal"`
+		Status      string          `json:"status"`
+		CreatedAt   time.Time       `json:"created_at"`
+		UpdatedAt   time.Time       `json:"updated_at"`
+		CurrentStep string          `json:"current_step,omitempty"`
+		Steps       json.RawMessage `json:"steps"`
+		Notes       json.RawMessage `json:"notes,omitempty"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	steps, err := decodePlanSteps(raw.Steps)
+	if err != nil {
+		return err
+	}
+	notes, err := decodeStringList(raw.Notes)
+	if err != nil {
+		return err
+	}
+	*p = Plan{
+		ID:          raw.ID,
+		Name:        raw.Name,
+		Goal:        raw.Goal,
+		Status:      raw.Status,
+		CreatedAt:   raw.CreatedAt,
+		UpdatedAt:   raw.UpdatedAt,
+		CurrentStep: raw.CurrentStep,
+		Steps:       steps,
+		Notes:       notes,
+	}
+	return nil
+}
+
 type PlanStep struct {
 	ID          string     `json:"id"`
 	Title       string     `json:"title"`
 	Description string     `json:"description,omitempty"`
 	Status      string     `json:"status"`
 	Substeps    []PlanStep `json:"substeps,omitempty"`
+}
+
+func (s *PlanStep) UnmarshalJSON(data []byte) error {
+	var text string
+	if err := json.Unmarshal(data, &text); err == nil {
+		*s = PlanStep{Title: strings.TrimSpace(text), Status: "pending"}
+		return nil
+	}
+	var raw struct {
+		ID          string          `json:"id"`
+		Title       string          `json:"title"`
+		Name        string          `json:"name"`
+		Description string          `json:"description,omitempty"`
+		Status      string          `json:"status"`
+		Substeps    json.RawMessage `json:"substeps,omitempty"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	substeps, err := decodePlanSteps(raw.Substeps)
+	if err != nil {
+		return err
+	}
+	*s = PlanStep{
+		ID:          raw.ID,
+		Title:       firstNonEmptyPlanValue(raw.Title, raw.Name),
+		Description: raw.Description,
+		Status:      raw.Status,
+		Substeps:    substeps,
+	}
+	return nil
 }
 
 type PlanSummary struct {
@@ -244,7 +312,7 @@ func updatePlanStepStatus(plan *Plan, stepID, status, note string) bool {
 			plan.Status = "complete"
 		}
 		if strings.TrimSpace(note) != "" {
-			plan.Notes = append(plan.Notes, fmt.Sprintf("%s: %s", stepID, note))
+			plan.Notes = append(plan.Notes, fmt.Sprintf("%s: %s", stepID, truncate(note, 2000)))
 		}
 		plan.UpdatedAt = time.Now().UTC()
 	}
@@ -256,7 +324,7 @@ func updatePlanStepStatusIn(steps []PlanStep, stepID, status, note string) bool 
 		if steps[i].ID == stepID {
 			steps[i].Status = status
 			if note != "" {
-				steps[i].Description = strings.TrimSpace(steps[i].Description + "\n\nUpdate: " + note)
+				steps[i].Description = strings.TrimSpace(steps[i].Description + "\n\nUpdate: " + truncate(note, 2500))
 			}
 			return true
 		}
@@ -283,7 +351,7 @@ func planMarkdown(plan Plan) string {
 	if len(plan.Notes) > 0 {
 		b.WriteString("\n## Notes\n\n")
 		for _, note := range plan.Notes {
-			fmt.Fprintf(&b, "- %s\n", note)
+			fmt.Fprintf(&b, "- %s\n", truncate(note, 1600))
 		}
 	}
 	return strings.TrimSpace(b.String())
@@ -298,7 +366,7 @@ func writePlanStepsMarkdown(b *strings.Builder, steps []PlanStep, depth int) {
 		}
 		fmt.Fprintf(b, "%s- %s `%s` **%s**", prefix, box, step.ID, step.Title)
 		if step.Description != "" {
-			fmt.Fprintf(b, " - %s", strings.ReplaceAll(step.Description, "\n", " "))
+			fmt.Fprintf(b, " - %s", truncate(strings.ReplaceAll(step.Description, "\n", " "), 1600))
 		}
 		b.WriteByte('\n')
 		writePlanStepsMarkdown(b, step.Substeps, depth+1)
@@ -358,4 +426,67 @@ func firstNonEmptyPlanValue(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func decodePlanSteps(raw json.RawMessage) ([]PlanStep, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return nil, nil
+	}
+	var steps []PlanStep
+	if err := json.Unmarshal(raw, &steps); err == nil {
+		return steps, nil
+	}
+	var step PlanStep
+	if err := json.Unmarshal(raw, &step); err == nil {
+		if strings.TrimSpace(step.Title) == "" && strings.TrimSpace(step.Description) == "" && len(step.Substeps) == 0 {
+			return nil, nil
+		}
+		return []PlanStep{step}, nil
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		return nil, err
+	}
+	return planStepsFromText(text), nil
+}
+
+func planStepsFromText(text string) []PlanStep {
+	text = strings.TrimSpace(text)
+	if text == "" || strings.EqualFold(text, "none") || strings.EqualFold(text, "n/a") {
+		return nil
+	}
+	var out []PlanStep
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		line = strings.TrimLeft(line, "-*0123456789.) \t")
+		if line == "" {
+			continue
+		}
+		out = append(out, PlanStep{Title: line, Status: "pending"})
+	}
+	if len(out) == 0 {
+		return []PlanStep{{Title: text, Status: "pending"}}
+	}
+	return out
+}
+
+func decodeStringList(raw json.RawMessage) ([]string, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return nil, nil
+	}
+	var list []string
+	if err := json.Unmarshal(raw, &list); err == nil {
+		return list, nil
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		return nil, err
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil, nil
+	}
+	return []string{text}, nil
 }

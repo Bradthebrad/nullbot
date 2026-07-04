@@ -24,6 +24,7 @@ func configFields(config app.Config) []configField {
 		{Label: "Anthropic API Key", Key: "key_anthropic", Value: app.MaskSecret(keys.Anthropic)},
 		{Label: "OpenRouter API Key", Key: "key_openrouter", Value: app.MaskSecret(keys.OpenRouter)},
 		{Label: "Brand Prefix", Key: "brand_prefix", Value: config.BrandPrefix},
+		{Label: "Bot Name", Key: "bot_name", Value: config.BotName},
 		{Label: "Tagline", Key: "tagline", Value: config.Tagline},
 		{Label: "Provider", Key: "provider", Value: config.Model.Provider},
 		{Label: "Model", Key: "model", Value: config.Model.Model},
@@ -165,12 +166,13 @@ func (m *Model) saveConfigFields() error {
 	}
 	return m.app.UpdateConfig(func(config *app.Config) {
 		config.BrandPrefix = values["brand_prefix"]
+		config.BotName = values["bot_name"]
 		config.Tagline = values["tagline"]
 		config.Model.Provider = values["provider"]
 		config.Model.Model = values["model"]
 		config.SubagentModel.Provider = values["subagent_provider"]
 		config.SubagentModel.Model = values["subagent_model"]
-		config.Model.ReasoningEffort = values["reasoning_effort"]
+		config.Model.ReasoningEffort = app.NormalizeEffort(values["reasoning_effort"])
 		config.Model.Temperature = parseFloat(values["temperature"])
 		config.Model.MaxTokens = parseInt(values["max_tokens"])
 		config.Agent.MaxIterations = parseIntDefault(values["max_iterations"], config.Agent.MaxIterations)

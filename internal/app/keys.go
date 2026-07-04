@@ -7,9 +7,11 @@ import (
 )
 
 type APIKeys struct {
-	OpenAI     string `json:"openai,omitempty"`
-	Anthropic  string `json:"anthropic,omitempty"`
-	OpenRouter string `json:"openrouter,omitempty"`
+	OpenAI     string            `json:"openai,omitempty"`
+	Anthropic  string            `json:"anthropic,omitempty"`
+	OpenRouter string            `json:"openrouter,omitempty"`
+	Google     string            `json:"google,omitempty"`
+	Other      map[string]string `json:"other,omitempty"`
 }
 
 func KeysPath(config Config) string {
@@ -50,7 +52,12 @@ func (k APIKeys) ForProvider(provider string) string {
 		return k.Anthropic
 	case "openrouter":
 		return k.OpenRouter
+	case "google", "gemini":
+		return k.Google
 	default:
+		if k.Other != nil {
+			return k.Other[provider]
+		}
 		return ""
 	}
 }

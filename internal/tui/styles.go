@@ -71,6 +71,7 @@ var (
 	footerStyle         lipgloss.Style
 	userStyle           lipgloss.Style
 	botStyle            lipgloss.Style
+	reasoningStyle      lipgloss.Style
 	headingStyle        lipgloss.Style
 	bulletStyle         lipgloss.Style
 	quoteStyle          lipgloss.Style
@@ -111,6 +112,7 @@ func applyTheme(id string) {
 	footerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(p.InputBorder)).MarginTop(1)
 	userStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(p.Accent))
 	botStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(p.Accent2))
+	reasoningStyle = lipgloss.NewStyle().Bold(true).Italic(true).Foreground(lipgloss.Color(p.InputBorder))
 	headingStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(p.Accent))
 	bulletStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(p.Text))
 	quoteStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(p.InputBorder)).Italic(true)

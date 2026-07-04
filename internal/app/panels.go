@@ -67,14 +67,18 @@ func (a *App) planCommand(sub string) Reply {
 	}
 	if strings.HasPrefix(sub, "execute") {
 		id := strings.TrimSpace(strings.TrimPrefix(sub, "execute"))
-		plan, err := a.runPlanExecutor(contextOrBackground(), id)
+		taskID, planID, err := a.StartPlanExecutor(id)
 		if err != nil {
 			reply := a.planPanelReply("Plan execution failed: " + err.Error())
 			reply.Data["error"] = err.Error()
 			return reply
 		}
-		reply := a.planPanelReply("Plan execution complete for " + plan.ID + ".")
-		reply.Data["selected"] = plan
+		reply := a.planPanelReply("Plan execution started for " + planID + ".")
+		reply.Data["task_id"] = taskID
+		reply.Data["plan_id"] = planID
+		if plan, err := a.PlanByID(planID); err == nil {
+			reply.Data["selected"] = plan
+		}
 		return reply
 	}
 	if sub != "" {
@@ -107,6 +111,10 @@ func (a *App) planPanelReply(message string) Reply {
 		}
 	}
 	return reply
+}
+
+func (a *App) PlanPanel() Reply {
+	return a.planPanelReply("Plan panel opened.")
 }
 
 func (a *App) marketCommand(sub string) Reply {
@@ -171,9 +179,26 @@ func splitMarketPackageIDs(input string) []string {
 
 func (a *App) skillsCommand(sub string) Reply {
 	reply := a.reply("Skills panel opened.", "/skills", "skills")
-	reply.Data = map[string]any{"skills": scanSkillFiles(a.config)}
+	summaries := scanSkillSummaries(a.config)
+	reply.Data = map[string]any{
+		"skills":       summaries,
+		"skill_paths":  scanSkillFiles(a.config),
+		"skill_dirs":   a.config.SkillDirs,
+		"selected_idx": 0,
+	}
 	if sub != "" {
-		reply.Message = "Skills " + sub + " panel opened."
+		fields := strings.Fields(sub)
+		if len(fields) >= 2 && (fields[0] == "open" || fields[0] == "read") {
+			result, err := readSkillMarkdown(a.config, fields[1], strings.Join(fields[2:], " "))
+			if err != nil {
+				reply.Message = "Skill read failed: " + err.Error()
+			} else {
+				reply.Message = "Skill opened: " + result.SkillName
+				reply.Data["selected"] = result
+			}
+		} else {
+			reply.Message = "Skills " + sub + " panel opened."
+		}
 	}
 	return reply
 }

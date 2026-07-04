@@ -15,17 +15,20 @@ import (
 )
 
 type UsageRecord struct {
-	Time         time.Time `json:"time"`
-	SessionID    string    `json:"session_id"`
-	Provider     string    `json:"provider"`
-	Model        string    `json:"model"`
-	Agent        string    `json:"agent"`
-	TaskID       string    `json:"task_id,omitempty"`
-	InputTokens  int       `json:"input_tokens"`
-	OutputTokens int       `json:"output_tokens"`
-	TotalTokens  int       `json:"total_tokens"`
-	CostUSD      float64   `json:"cost_usd"`
-	Estimated    bool      `json:"estimated"`
+	Time                     time.Time `json:"time"`
+	SessionID                string    `json:"session_id"`
+	Provider                 string    `json:"provider"`
+	Model                    string    `json:"model"`
+	Agent                    string    `json:"agent"`
+	TaskID                   string    `json:"task_id,omitempty"`
+	InputTokens              int       `json:"input_tokens"`
+	OutputTokens             int       `json:"output_tokens"`
+	TotalTokens              int       `json:"total_tokens"`
+	CachedInputTokens        int       `json:"cached_input_tokens,omitempty"`
+	CacheCreationInputTokens int       `json:"cache_creation_input_tokens,omitempty"`
+	ReasoningOutputTokens    int       `json:"reasoning_output_tokens,omitempty"`
+	CostUSD                  float64   `json:"cost_usd"`
+	Estimated                bool      `json:"estimated"`
 }
 
 type UsageSnapshot struct {
@@ -40,12 +43,15 @@ type UsageSnapshot struct {
 }
 
 type UsageTotals struct {
-	Requests     int     `json:"requests"`
-	InputTokens  int     `json:"input_tokens"`
-	OutputTokens int     `json:"output_tokens"`
-	TotalTokens  int     `json:"total_tokens"`
-	CostUSD      float64 `json:"cost_usd"`
-	Estimated    int     `json:"estimated"`
+	Requests                 int     `json:"requests"`
+	InputTokens              int     `json:"input_tokens"`
+	OutputTokens             int     `json:"output_tokens"`
+	TotalTokens              int     `json:"total_tokens"`
+	CachedInputTokens        int     `json:"cached_input_tokens,omitempty"`
+	CacheCreationInputTokens int     `json:"cache_creation_input_tokens,omitempty"`
+	ReasoningOutputTokens    int     `json:"reasoning_output_tokens,omitempty"`
+	CostUSD                  float64 `json:"cost_usd"`
+	Estimated                int     `json:"estimated"`
 }
 
 type UsageModelSummary struct {
@@ -120,16 +126,19 @@ func (a *App) recordUsageCallback(taskID, agentName string, model ModelConfig, e
 			return
 		}
 		record := UsageRecord{
-			Time:         time.Now().UTC(),
-			SessionID:    a.sessionID,
-			Provider:     firstNonEmptyPlanValue(model.Provider, "openai"),
-			Model:        model.Model,
-			Agent:        firstNonEmptyPlanValue(agentName, "agent"),
-			TaskID:       taskID,
-			InputTokens:  usage.Input,
-			OutputTokens: usage.Output,
-			TotalTokens:  usage.Total,
-			Estimated:    estimated,
+			Time:                     time.Now().UTC(),
+			SessionID:                a.sessionID,
+			Provider:                 firstNonEmptyPlanValue(model.Provider, "openai"),
+			Model:                    model.Model,
+			Agent:                    firstNonEmptyPlanValue(agentName, "agent"),
+			TaskID:                   taskID,
+			InputTokens:              usage.Input,
+			OutputTokens:             usage.Output,
+			TotalTokens:              usage.Total,
+			CachedInputTokens:        usage.CachedInput,
+			CacheCreationInputTokens: usage.CacheCreationInput,
+			ReasoningOutputTokens:    usage.ReasoningOutput,
+			Estimated:                estimated,
 		}
 		record.CostUSD = estimateUsageCost(record)
 		_ = a.appendUsageRecord(record)
@@ -143,6 +152,9 @@ func (a *App) recordUsageDirect(agentName string, model ModelConfig, input []lc.
 		usage.Input = output.UsageMetadata.InputTokens
 		usage.Output = output.UsageMetadata.OutputTokens
 		usage.Total = output.UsageMetadata.TotalTokens
+		usage.CachedInput = output.UsageMetadata.InputTokenDetails["cached_tokens"] + output.UsageMetadata.InputTokenDetails["cache_read_input_tokens"]
+		usage.CacheCreationInput = output.UsageMetadata.InputTokenDetails["cache_creation_input_tokens"]
+		usage.ReasoningOutput = output.UsageMetadata.OutputTokenDetails["reasoning_tokens"]
 	}
 	if usage.Input == 0 && usage.Output == 0 && usage.Total == 0 {
 		estimated = true
@@ -159,15 +171,18 @@ func (a *App) recordUsageDirect(agentName string, model ModelConfig, input []lc.
 		return
 	}
 	record := UsageRecord{
-		Time:         time.Now().UTC(),
-		SessionID:    a.sessionID,
-		Provider:     firstNonEmptyPlanValue(model.Provider, "openai"),
-		Model:        model.Model,
-		Agent:        firstNonEmptyPlanValue(agentName, "agent"),
-		InputTokens:  usage.Input,
-		OutputTokens: usage.Output,
-		TotalTokens:  usage.Total,
-		Estimated:    estimated,
+		Time:                     time.Now().UTC(),
+		SessionID:                a.sessionID,
+		Provider:                 firstNonEmptyPlanValue(model.Provider, "openai"),
+		Model:                    model.Model,
+		Agent:                    firstNonEmptyPlanValue(agentName, "agent"),
+		InputTokens:              usage.Input,
+		OutputTokens:             usage.Output,
+		TotalTokens:              usage.Total,
+		CachedInputTokens:        usage.CachedInput,
+		CacheCreationInputTokens: usage.CacheCreationInput,
+		ReasoningOutputTokens:    usage.ReasoningOutput,
+		Estimated:                estimated,
 	}
 	record.CostUSD = estimateUsageCost(record)
 	_ = a.appendUsageRecord(record)
@@ -324,6 +339,9 @@ func addUsageTotals(total *UsageTotals, record UsageRecord) {
 	total.InputTokens += record.InputTokens
 	total.OutputTokens += record.OutputTokens
 	total.TotalTokens += record.TotalTokens
+	total.CachedInputTokens += record.CachedInputTokens
+	total.CacheCreationInputTokens += record.CacheCreationInputTokens
+	total.ReasoningOutputTokens += record.ReasoningOutputTokens
 	total.CostUSD += record.CostUSD
 	if record.Estimated {
 		total.Estimated++

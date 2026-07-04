@@ -43,8 +43,12 @@ func (a *App) runPlanner(ctx context.Context, focus string) (Plan, error) {
 			record.Name = "planner/" + record.Name
 			a.recordTaskCallback(taskID, event)
 			a.recordUsageCallback(taskID, "planner", config.Model, event)
+			if record.Status == "reasoning" {
+				a.recordVisibleReasoning(record)
+			}
 			a.appendActivity(record)
 		}),
+		Context: agentContextPolicy(config),
 	})
 	result, err := planner.InvokeMessages(planCtx, []lc.BaseMessage{lc.Human(plannerTask(config, focus))})
 	if err != nil {
@@ -72,7 +76,36 @@ func (a *App) runPlanExecutor(ctx context.Context, id string) (Plan, error) {
 	execCtx, cancel := context.WithCancel(ctx)
 	taskID := a.startTask("Plan Executor", "plan-executor", id, cancel)
 	defer cancel()
+	return a.executePlanWithTask(execCtx, taskID, id)
+}
 
+func (a *App) StartPlanExecutor(id string) (taskID string, planID string, err error) {
+	a.mu.Lock()
+	config := a.config
+	a.mu.Unlock()
+	planID = strings.TrimSpace(id)
+	if planID == "" {
+		planID = latestPlanID(config)
+	}
+	if planID == "" {
+		return "", "", fmt.Errorf("no plans found")
+	}
+	if _, err := loadPlan(config, planID); err != nil {
+		return "", "", err
+	}
+	execCtx, cancel := context.WithCancel(context.Background())
+	taskID = a.startTask("Plan Executor", "plan-executor", planID, cancel)
+	record := ActivityRecord{Time: nowUTC(), Kind: "plan", Name: "plan_executor", Status: "start", Detail: "Started plan " + planID}
+	a.appendActivity(record)
+	a.recordTaskActivity(taskID, record)
+	go func() {
+		defer cancel()
+		_, _ = a.executePlanWithTask(execCtx, taskID, planID)
+	}()
+	return taskID, planID, nil
+}
+
+func (a *App) executePlanWithTask(execCtx context.Context, taskID, id string) (Plan, error) {
 	a.mu.Lock()
 	config := a.config
 	a.mu.Unlock()
@@ -112,8 +145,12 @@ func (a *App) runPlanExecutor(ctx context.Context, id string) (Plan, error) {
 			record.Name = "executor/" + record.Name
 			a.recordTaskCallback(taskID, event)
 			a.recordUsageCallback(taskID, "plan-executor", config.Model, event)
+			if record.Status == "reasoning" {
+				a.recordVisibleReasoning(record)
+			}
 			a.appendActivity(record)
 		}),
+		Context: agentContextPolicy(config),
 	})
 
 	rounds := 0
@@ -169,7 +206,19 @@ func plannerSystemPrompt(config Config, tools []tcagent.Tool, skills []tcagent.S
 			fmt.Fprintf(&b, "- %s: %s\n", skill.Name, skill.Description)
 		}
 	}
-	return strings.TrimSpace(b.String())
+	if custom := strings.TrimSpace(config.Prompts.ManagerAppend); custom != "" {
+		b.WriteString("\nAdditional manager prompt guidance:\n")
+		b.WriteString(custom)
+		b.WriteByte('\n')
+	}
+	prompt := strings.TrimSpace(b.String())
+	if override := strings.TrimSpace(config.Prompts.ManagerPrompt); override != "" {
+		prompt = override
+		if custom := strings.TrimSpace(config.Prompts.ManagerAppend); custom != "" {
+			prompt += "\n\nAdditional manager prompt guidance:\n" + custom
+		}
+	}
+	return strings.TrimSpace(prompt)
 }
 
 func plannerTask(config Config, focus string) string {
@@ -197,7 +246,19 @@ func executorSystemPrompt(config Config, plan Plan, tools []tcagent.Tool, skills
 			fmt.Fprintf(&b, "- %s: %s\n", skill.Name, skill.Description)
 		}
 	}
-	return strings.TrimSpace(b.String())
+	if custom := strings.TrimSpace(config.Prompts.ManagerAppend); custom != "" {
+		b.WriteString("\nAdditional manager prompt guidance:\n")
+		b.WriteString(custom)
+		b.WriteByte('\n')
+	}
+	prompt := strings.TrimSpace(b.String())
+	if override := strings.TrimSpace(config.Prompts.ManagerPrompt); override != "" {
+		prompt = override
+		if custom := strings.TrimSpace(config.Prompts.ManagerAppend); custom != "" {
+			prompt += "\n\nAdditional manager prompt guidance:\n" + custom
+		}
+	}
+	return strings.TrimSpace(prompt)
 }
 
 func nowUTC() time.Time {

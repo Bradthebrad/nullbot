@@ -17,8 +17,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	bot := app.New(config)
+	bot.StartScheduler()
+	defer bot.StopScheduler()
+
 	program := tea.NewProgram(
-		tui.New(app.New(config)),
+		tui.New(bot),
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	)

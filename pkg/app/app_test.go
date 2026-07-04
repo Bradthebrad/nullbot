@@ -98,6 +98,49 @@ func TestAgentsAvailableUpdatesMaxSubagents(t *testing.T) {
 	}
 }
 
+func TestScheduleCommandCreatesAndPersistsTask(t *testing.T) {
+	config := DefaultConfig()
+	config.AppDir = t.TempDir()
+	app := New(config)
+	reply := app.Submit(context.Background(), "/schedule in 10m check the build")
+	if reply.OpenPanel != "schedule" {
+		t.Fatalf("panel = %q message=%s", reply.OpenPanel, reply.Message)
+	}
+	schedules := app.ScheduledTasks()
+	if len(schedules) != 1 {
+		t.Fatalf("schedules = %#v", schedules)
+	}
+	if schedules[0].Status != ScheduleActive || schedules[0].Prompt != "check the build" {
+		t.Fatalf("schedule = %#v", schedules[0])
+	}
+
+	reloaded := New(config)
+	reloadedSchedules := reloaded.ScheduledTasks()
+	if len(reloadedSchedules) != 1 || reloadedSchedules[0].ID != schedules[0].ID {
+		t.Fatalf("reloaded schedules = %#v", reloadedSchedules)
+	}
+}
+
+func TestScheduleCancelAndDelete(t *testing.T) {
+	config := DefaultConfig()
+	config.AppDir = t.TempDir()
+	app := New(config)
+	task, err := app.CreateScheduledTask(ScheduleRequest{Mode: "every", Every: "1h", Prompt: "summarize status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	canceled, ok := app.CancelScheduledTask(task.ID)
+	if !ok || canceled.Status != ScheduleCanceled {
+		t.Fatalf("canceled=%#v ok=%t", canceled, ok)
+	}
+	if !app.DeleteScheduledTask(task.ID) {
+		t.Fatalf("delete failed")
+	}
+	if got := app.ScheduledTasks(); len(got) != 0 {
+		t.Fatalf("schedules after delete = %#v", got)
+	}
+}
+
 func TestUsageSnapshotAggregatesSessionAndModels(t *testing.T) {
 	config := DefaultConfig()
 	config.AppDir = t.TempDir()

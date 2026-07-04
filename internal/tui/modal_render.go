@@ -187,6 +187,10 @@ func renderModal(panel string, reply app.Reply, width int) string {
 		if tasks, ok := reply.Data["tasks"].([]app.AgentTask); ok {
 			return renderMarkdown(taskSummaryMarkdown(tasks), width)
 		}
+	case "schedule":
+		if schedules, ok := reply.Data["schedules"].([]app.ScheduledTask); ok {
+			return renderMarkdown(scheduleSummaryMarkdown(schedules), width)
+		}
 	}
 	if reply.Data != nil {
 		data, _ := json.MarshalIndent(reply.Data, "", "  ")
@@ -215,6 +219,30 @@ func taskSummaryMarkdown(tasks []app.AgentTask) string {
 	b.WriteString("# Tasks\n\n")
 	for _, task := range tasks {
 		fmt.Fprintf(&b, "- `%s` [%s/%s] %s - %s\n", task.ID, task.Role, task.Status, task.Name, quoteCompact(task.Current, 120))
+	}
+	return b.String()
+}
+
+func scheduleSummaryMarkdown(schedules []app.ScheduledTask) string {
+	if len(schedules) == 0 {
+		return "No scheduled tasks yet.\n\nCreate one with `/schedule in 10m <message>`, `/schedule at 15:04 <message>`, or `/schedule every 1h <message>`."
+	}
+	var b strings.Builder
+	b.WriteString("# Scheduled Tasks\n\n")
+	b.WriteString("Use `/schedule run <id>`, `/schedule cancel <id>`, or `/schedule delete <id>` to manage entries.\n\n")
+	for _, schedule := range schedules {
+		next := "none"
+		if !schedule.NextRunAt.IsZero() {
+			next = schedule.NextRunAt.Local().Format("2006-01-02 15:04:05")
+		}
+		repeat := ""
+		if schedule.RepeatEvery != "" {
+			repeat = " every `" + schedule.RepeatEvery + "`"
+		}
+		fmt.Fprintf(&b, "- `%s` [%s] **%s** next `%s`%s, runs `%d` - %s\n", schedule.ID, schedule.Status, schedule.Name, next, repeat, schedule.RunCount, quoteCompact(schedule.Prompt, 140))
+		if schedule.LastError != "" {
+			fmt.Fprintf(&b, "  - error: %s\n", quoteCompact(schedule.LastError, 160))
+		}
 	}
 	return b.String()
 }

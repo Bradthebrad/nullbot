@@ -21,6 +21,7 @@ var commands = []Command{
 	{Name: "/plan", Usage: "/plan execute", Description: "Execute the current plan."},
 	{Name: "/also", Usage: "/also <message>", Description: "Inject additional guidance into the current workflow."},
 	{Name: "/tasks", Usage: "/tasks [cancel <id>|detail <id>]", Description: "Inspect and cancel running agent tasks."},
+	{Name: "/schedule", Usage: "/schedule [list|in <duration>|at <time>|every <duration>|run <id>|cancel <id>|delete <id>]", Description: "Create, inspect, run, and cancel scheduled agent tasks."},
 	{Name: "/agents", Usage: "/agents [available <number>|cancel <id>|detail <id>]", Description: "Open the live manager/subagent dashboard or update the subagent limit."},
 	{Name: "/thoughts", Usage: "/thoughts", Description: "Open the manager/subagent reasoning and progress dashboard."},
 	{Name: "/usage", Usage: "/usage [clear]", Description: "Show local token and cost usage tracking."},
@@ -74,6 +75,8 @@ func (a *App) executeSlash(ctx context.Context, input string) Reply {
 		return a.RunAlsoObserver(ctx, rest)
 	case "/tasks":
 		return a.tasksCommand(strings.TrimSpace(rest))
+	case "/schedule":
+		return a.scheduleCommand(strings.TrimSpace(rest))
 	case "/agents":
 		return a.agentsCommand(strings.TrimSpace(rest))
 	case "/thoughts":

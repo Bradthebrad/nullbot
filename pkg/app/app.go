@@ -28,6 +28,9 @@ type App struct {
 	taskCancels        map[string]context.CancelFunc
 	taskPendingInput   map[string]int
 	taskSeq            int
+	schedules          map[string]*ScheduledTask
+	scheduleSeq        int
+	schedulerCancel    context.CancelFunc
 }
 
 type AlsoSnapshot struct {
@@ -70,12 +73,15 @@ type Reply struct {
 func New(config Config) *App {
 	logger := NewLogger(config)
 	logger.Info("app initialized", "app_dir", config.AppDir, "provider", config.Model.Provider, "model", config.Model.Model)
+	schedules, seq := loadScheduledTasks(config, logger)
 	return &App{
 		config:      config,
 		logger:      logger,
 		sessionID:   newSessionID(),
 		tasks:       map[string]*AgentTask{},
 		taskCancels: map[string]context.CancelFunc{},
+		schedules:   schedules,
+		scheduleSeq: seq,
 	}
 }
 
@@ -87,7 +93,7 @@ func (a *App) State() Reply {
 		Config:      a.config,
 		History:     append([]Message{}, a.history...),
 		Suggestions: commandNames(),
-		Data:        map[string]any{"runtime": RuntimeStatus(a.config), "tasks": a.taskSnapshotsLocked()},
+		Data:        map[string]any{"runtime": RuntimeStatus(a.config), "tasks": a.taskSnapshotsLocked(), "schedules": a.scheduledSnapshotsLocked()},
 	}
 }
 

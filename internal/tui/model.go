@@ -967,6 +967,9 @@ func (m Model) modalView() string {
 	if m.panel == "tasks" {
 		footer += " | up/down move | enter details | c cancel | r refresh | d details"
 	}
+	if m.panel == "schedule" {
+		footer += " | /schedule in 10m msg | /schedule run/cancel/delete <id>"
+	}
 	if m.panel == "agents" {
 		footer += " | tab/left/right tabs | up/down move | enter details | c cancel | r refresh"
 	}

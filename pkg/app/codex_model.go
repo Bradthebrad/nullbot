@@ -12,8 +12,8 @@ import (
 	"runtime"
 	"strings"
 
-	tcagent "tinychain/agent"
-	"tinychain/lc"
+	tcagent "github.com/Bradthebrad/tinychain/agent"
+	"github.com/Bradthebrad/tinychain/lc"
 )
 
 const defaultCodexSandbox = "workspace-write"

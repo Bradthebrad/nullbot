@@ -7,7 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"yourbot/internal/app"
+	"github.com/Bradthebrad/nullbot/pkg/app"
 )
 
 func (m *Model) openThemesModal() {

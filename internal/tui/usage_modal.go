@@ -10,7 +10,7 @@ import (
 	"github.com/NimbleMarkets/ntcharts/linechart/timeserieslinechart"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"yourbot/internal/app"
+	"github.com/Bradthebrad/nullbot/pkg/app"
 )
 
 var usageTabs = []string{"Summary", "Chart", "Models", "Recent", "Pricing"}

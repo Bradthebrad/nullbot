@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"tinychain/callbacks"
-	"tinychain/lc"
+	"github.com/Bradthebrad/tinychain/callbacks"
+	"github.com/Bradthebrad/tinychain/lc"
 )
 
 type UsageRecord struct {

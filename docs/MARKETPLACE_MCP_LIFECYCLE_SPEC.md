@@ -210,7 +210,7 @@ When enabling an MCP server, NullBot copies or merges this into `config.EnabledM
 
 ## Agent Reinitialization
 
-Current runtime builds an agent bundle with built-in tools plus enabled MCP tools in `internal/app/runtime.go`.
+Current runtime builds an agent bundle with built-in tools plus enabled MCP tools in `pkg/app/runtime.go`.
 
 Required behavior:
 
@@ -300,7 +300,7 @@ skills/
 The `mcp-skill` should teach the agent:
 
 - how NullBot MCP market packages are structured;
-- how to use `tinychain/mcp` to build a Go stdio MCP server;
+- how to use `github.com/Bradthebrad/tinychain/mcp` to build a Go stdio MCP server;
 - how to expose `streamable-http` and `sse` flags;
 - how to write README/release notes;
 - how to build stripped Windows binaries;
@@ -354,7 +354,7 @@ All errors should be logged to `~/.nullbot/logs/nullbot.log` and reflected in `m
 
 ### Phase 1: Data Model And Manifest
 
-- Add `internal/app/market.go`.
+- Add `pkg/app/market.go`.
 - Define `MarketManifest`, `MarketSource`, `MarketPackage`, `MarketAsset`, `InstalledPackage`.
 - Seed default `sources.json`.
 - Implement load/save/merge state.

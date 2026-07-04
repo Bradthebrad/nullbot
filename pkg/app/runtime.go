@@ -10,12 +10,12 @@ import (
 	"strings"
 	"time"
 
-	tcagent "tinychain/agent"
-	"tinychain/anthropic"
-	"tinychain/callbacks"
-	"tinychain/lc"
-	"tinychain/mcp"
-	"tinychain/openai"
+	tcagent "github.com/Bradthebrad/tinychain/agent"
+	"github.com/Bradthebrad/tinychain/anthropic"
+	"github.com/Bradthebrad/tinychain/callbacks"
+	"github.com/Bradthebrad/tinychain/lc"
+	"github.com/Bradthebrad/tinychain/mcp"
+	"github.com/Bradthebrad/tinychain/openai"
 )
 
 type runtimeBundle struct {

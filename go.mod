@@ -1,4 +1,4 @@
-module yourbot
+module github.com/Bradthebrad/nullbot
 
 go 1.26.4
 
@@ -10,12 +10,10 @@ require (
 	github.com/charmbracelet/glamour v1.0.0
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
 	github.com/mattn/go-runewidth v0.0.17
-	tinychain v0.0.0
-	tinychain/agent v0.0.0
-	tinychain/mcp v0.0.0
 )
 
 require (
+	github.com/Bradthebrad/tinychain v0.2.0
 	github.com/alecthomas/chroma/v2 v2.20.0 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/aymerick/douceur v0.2.0 // indirect
@@ -46,9 +44,3 @@ require (
 	golang.org/x/term v0.36.0 // indirect
 	golang.org/x/text v0.30.0 // indirect
 )
-
-replace tinychain => ../tinychain/client
-
-replace tinychain/agent => ../tinychain/agent
-
-replace tinychain/mcp => ../tinychain/mcp

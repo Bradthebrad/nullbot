@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	tcagent "tinychain/agent"
+	tcagent "github.com/Bradthebrad/tinychain/agent"
 )
 
 func configWithCodexAuth(t *testing.T) Config {

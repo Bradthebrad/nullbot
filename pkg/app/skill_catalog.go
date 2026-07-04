@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	tcagent "tinychain/agent"
+	tcagent "github.com/Bradthebrad/tinychain/agent"
 )
 
 const maxSkillReadBytes = 192 * 1024

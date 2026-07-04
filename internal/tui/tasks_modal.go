@@ -8,7 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"yourbot/internal/app"
+	"github.com/Bradthebrad/nullbot/pkg/app"
 )
 
 func (m *Model) openTasksModal(reply app.Reply) {

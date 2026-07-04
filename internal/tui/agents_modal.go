@@ -7,7 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"yourbot/internal/app"
+	"github.com/Bradthebrad/nullbot/pkg/app"
 )
 
 func (m *Model) openAgentsModal(reply app.Reply) {

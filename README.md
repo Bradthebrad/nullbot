@@ -125,9 +125,11 @@ NullBot gives the model a small, local-only toolset by default:
 
 ## Development
 
-NullBot depends on sibling local modules from `tinychain`. From this repository:
+NullBot depends on tagged Go modules, including `github.com/Bradthebrad/tinychain`.
+From a fresh clone of this repository:
 
 ```powershell
+go mod download
 go test ./...
 go build -o nullbot.exe ./cmd/nullbot
 ```

@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"yourbot/internal/app"
+	"github.com/Bradthebrad/nullbot/pkg/app"
 )
 
 func renderMessages(messages []app.Message, width int) string {

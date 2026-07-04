@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"yourbot/internal/app"
+	"github.com/Bradthebrad/nullbot/pkg/app"
 
 	"github.com/atotto/clipboard"
 )

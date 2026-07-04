@@ -13,9 +13,9 @@ import (
 	"net/http"
 	"strings"
 
-	tcagent "tinychain/agent"
-	"tinychain/lc"
-	"tinychain/openai"
+	tcagent "github.com/Bradthebrad/tinychain/agent"
+	"github.com/Bradthebrad/tinychain/lc"
+	"github.com/Bradthebrad/tinychain/openai"
 )
 
 type CodexSubscriptionModel struct {

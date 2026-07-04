@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"strings"
 
-	"tinychain/lc"
+	"github.com/Bradthebrad/tinychain/lc"
 )
 
 var attachmentTokenPattern = regexp.MustCompile(`@file\("([^"]+)"\)|@file\(([^)]+)\)`)

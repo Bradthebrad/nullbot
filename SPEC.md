@@ -21,12 +21,12 @@ codebases.
 ## Architecture
 
 - `cmd/nullbot`: binary entrypoint.
-- `internal/app`: config, command routing, history, built-in tools, and runtime
+- `pkg/app`: config, command routing, history, built-in tools, and runtime
   state.
 - `internal/tui`: Bubble Tea TUI, layout, modal views, and key handling.
-- `tinychain/client`: provider request/response models and small clients.
-- `tinychain/agent`: model/tool loop, skills, subagents, compaction hooks.
-- `tinychain/mcp`: local and remote MCP tool transport.
+- `github.com/Bradthebrad/tinychain`: provider request/response models and small clients.
+- `github.com/Bradthebrad/tinychain/agent`: model/tool loop, skills, subagents, compaction hooks.
+- `github.com/Bradthebrad/tinychain/mcp`: local and remote MCP tool transport.
 
 The first UI is an embedded local web UI served from the binary. This keeps the
 artifact single-binary friendly with no frontend build step. A native desktop

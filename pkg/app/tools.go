@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"tinychain/agent"
+	"github.com/Bradthebrad/tinychain/agent"
 )
 
 func BuiltinTools(config Config, state *App) []agent.Tool {

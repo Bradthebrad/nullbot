@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	tcagent "tinychain/agent"
-	"tinychain/callbacks"
-	"tinychain/lc"
+	tcagent "github.com/Bradthebrad/tinychain/agent"
+	"github.com/Bradthebrad/tinychain/callbacks"
+	"github.com/Bradthebrad/tinychain/lc"
 )
 
 func (a *App) runPlanner(ctx context.Context, focus string) (Plan, error) {

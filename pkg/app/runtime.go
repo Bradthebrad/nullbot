@@ -29,7 +29,22 @@ func (a *App) runAgent(ctx context.Context, skillHints []string) Reply {
 	workCtx, taskID := a.beginWork(ctx)
 	var final string
 	var finalErr error
-	defer func() { a.endWork(taskID, final, finalErr) }()
+	scope := scopeFrom(workCtx)
+	if scope != nil {
+		scope.taskID = taskID
+		a.assignTaskScope(workCtx, taskID)
+	}
+	defer func() {
+		if scope != nil {
+			scope.inbox.Close()
+			scope.workers.Wait()
+			if finalErr == nil {
+				finalErr = workCtx.Err()
+			}
+			scope.err = finalErr
+		}
+		a.endWork(taskID, final, finalErr)
+	}()
 
 	bundle, err := a.buildRuntime(workCtx, skillHints)
 	if err != nil {
@@ -39,7 +54,11 @@ func (a *App) runAgent(ctx context.Context, skillHints []string) Reply {
 	}
 	defer closeAll(bundle.closers)
 
-	result, err := bundle.agent.InvokeMessages(workCtx, a.langChainHistory())
+	var inbox *tcagent.InstructionInbox
+	if scope != nil {
+		inbox = scope.inbox
+	}
+	result, err := bundle.agent.InvokeMessagesWithInbox(workCtx, a.langChainHistory(), inbox)
 	if err != nil {
 		finalErr = err
 		if workCtx.Err() != nil {
@@ -54,33 +73,47 @@ func (a *App) runAgent(ctx context.Context, skillHints []string) Reply {
 	return a.reply(final, "", "")
 }
 
-func (a *App) invokeAlsoObserver(ctx context.Context, snapshot AlsoSnapshot) (string, error) {
-	model, err := modelFromConfig(snapshot.Config)
+// runAlso uses an independent manager runtime with the same configured tools,
+// skills, MCP connections, and subagent support. It never commits primary history.
+func (a *App) runAlso(ctx context.Context, question string) Reply {
+	snapshot := a.alsoSnapshot(question)
+	workCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	taskID := a.startTask("Also", "also", question, cancel)
+	scope := scopeFrom(workCtx)
+	scope.taskID = taskID
+	a.assignTaskScope(workCtx, taskID)
+	a.retainPublicMessage(scope, taskID, runtimeAgentName(workCtx), "user", question)
+	var final string
+	var finalErr error
+	defer func() {
+		scope.inbox.Close()
+		scope.workers.Wait()
+		if finalErr == nil {
+			finalErr = workCtx.Err()
+		}
+		scope.err = finalErr
+		a.finishTask(taskID, final, finalErr)
+	}()
+	bundle, err := a.buildRuntime(workCtx, inlineSkillHints(question))
 	if err != nil {
-		return "", err
+		finalErr = err
+		return a.reply("Also error: "+err.Error(), "/also", "also")
 	}
-	system := strings.Join([]string{
-		"You are NullBot's side-channel observer agent.",
-		"Answer the user's /also question using only the provided snapshot of the active run, recent visible messages, runtime status, and activity log.",
-		"Do not steer, modify, cancel, or instruct the main agent. Do not ask the user to run slash commands.",
-		"If the question is unrelated to the active run, answer it normally from the available snapshot and clearly say when information is not available.",
-		"Be concise and practical.",
-	}, "\n")
+	defer closeAll(bundle.closers)
+	snapshot.Question = "See the following user message."
 	messages := []lc.BaseMessage{
-		lc.System(system),
-		lc.Human(formatAlsoSnapshot(snapshot)),
+		lc.Human("This is a separate Also task, not an instruction to the primary agent. Use your tools and workers to complete the user's request independently. Do not modify, cancel, or steer the primary invocation. The following is reference context only:\n" + formatAlsoSnapshot(snapshot)),
+		humanMessageWithAttachments(question, snapshot.Config),
 	}
-	msg, err := model.Call(ctx, messages, nil)
+	result, err := bundle.agent.InvokeMessages(workCtx, messages)
 	if err != nil {
-		return "", err
+		finalErr = err
+		return a.reply("Also error: "+err.Error(), "/also", "also")
 	}
-	for _, text := range lc.VisibleReasoning(msg) {
-		record := ActivityRecord{Time: time.Now().UTC(), Kind: "reasoning", Name: "also/agent", Status: "reasoning", Detail: text}
-		a.recordVisibleReasoning(record)
-		a.appendActivity(record)
-	}
-	a.recordUsageDirect("Also Observer", snapshot.Config.Model, messages, msg)
-	return lcContentText(msg.Content), nil
+	final = lcContentText(result.Output.Content)
+	a.retainPublicMessage(scope, taskID, runtimeAgentName(workCtx), "assistant", final)
+	return a.reply(final, "/also", "also", map[string]any{"question": question, "submission_id": scope.id})
 }
 
 func formatAlsoSnapshot(snapshot AlsoSnapshot) string {
@@ -157,7 +190,7 @@ func (a *App) buildRuntime(ctx context.Context, skillHints []string) (*runtimeBu
 		a.logInfo("runtime rebuild", "reason", dirtyReason)
 	}
 
-	model, err := modelFromConfig(config)
+	model, err := a.invocationModel(config, false)
 	if err != nil {
 		return nil, err
 	}
@@ -170,16 +203,17 @@ func (a *App) buildRuntime(ctx context.Context, skillHints []string) (*runtimeBu
 	tools := BuiltinToolsFor(config, a, true)
 	mcpTools, closers := a.loadMCPTools(ctx, config)
 	tools = append(tools, mcpTools...)
-	systemPrompt := baseSystemPrompt(config, skillHints, tools, skills)
+	systemPrompt := baseSystemPrompt(config, skillHints, tools, skills) + selectedSkillsPrompt(ctx)
 
 	return &runtimeBundle{
 		agent: tcagent.New(tcagent.Config{
+			Name:          runtimeAgentName(ctx),
 			Model:         model,
 			SystemPrompt:  systemPrompt,
 			Tools:         tools,
 			Skills:        skills,
 			MaxIterations: config.Agent.MaxIterations,
-			Callbacks:     callbacks.SinkFunc(a.handleAgentCallback),
+			Callbacks:     callbacks.SinkFunc(func(event callbacks.Event) { a.handleScopedCallback(ctx, event) }),
 			Context:       agentContextPolicy(config),
 		}),
 		closers: closers,
@@ -201,14 +235,40 @@ func (a *App) PromptDefaults() map[string]string {
 func (a *App) runSubagent(ctx context.Context, name, task string) (string, error) {
 	subCtx, cancel := context.WithCancel(ctx)
 	taskID := a.startTask(name, "subagent", task, cancel)
+	a.assignTaskScope(ctx, taskID)
 	defer cancel()
 	return a.executeSubagent(subCtx, taskID, name, task)
 }
 
 func (a *App) startSubagent(ctx context.Context, name, task string) (string, error) {
 	stateCtx, cancel := context.WithCancel(ctx)
-	taskID := a.startTask(name, "subagent", task, cancel)
+	a.mu.Lock()
+	limit := a.config.Agent.MaxSubagents
+	if limit <= 0 {
+		limit = 1
+	}
+	running := 0
+	for _, existing := range a.tasks {
+		if existing.Role == "subagent" && (existing.Status == TaskRunning || existing.Status == TaskCanceling) {
+			running++
+		}
+	}
+	if running >= limit {
+		a.mu.Unlock()
+		cancel()
+		return "", fmt.Errorf("subagent limit reached (%d running)", limit)
+	}
+	taskID := a.startTaskLocked(name, "subagent", task, cancel)
+	a.mu.Unlock()
+	a.assignTaskScope(ctx, taskID)
+	scope := scopeFrom(ctx)
+	if scope != nil {
+		scope.workers.Add(1)
+	}
 	go func() {
+		if scope != nil {
+			defer scope.workers.Done()
+		}
 		defer cancel()
 		_, _ = a.executeSubagent(stateCtx, taskID, name, task)
 	}()
@@ -220,7 +280,7 @@ func (a *App) executeSubagent(subCtx context.Context, taskID, name, task string)
 	config := a.config
 	a.mu.Unlock()
 
-	model, err := subagentModelFromConfig(config)
+	model, err := a.invocationModel(config, true)
 	if err != nil {
 		a.finishTask(taskID, "", err)
 		return "", err
@@ -237,6 +297,7 @@ func (a *App) executeSubagent(subCtx context.Context, taskID, name, task string)
 
 	system := subagentSystemPrompt(config, name, task, tools, skills)
 	sub := tcagent.New(tcagent.Config{
+		Name:          name + "/" + taskID,
 		Model:         model,
 		SystemPrompt:  system,
 		Tools:         tools,
@@ -245,21 +306,30 @@ func (a *App) executeSubagent(subCtx context.Context, taskID, name, task string)
 		Callbacks: callbacks.SinkFunc(func(event callbacks.Event) {
 			record := activityRecordFromCallback(event)
 			record.Name = name + "/" + record.Name
+			record.AgentID = name + "/" + taskID
+			record.TaskID = taskID
+			scopeActivity(subCtx, &record)
+			a.retainPublicCallback(subCtx, taskID, event)
 			a.recordTaskCallback(taskID, event)
 			a.recordUsageCallback(taskID, name, effectiveModelConfig(config, config.SubagentModel), event)
-			if record.Status == "reasoning" {
+			if record.Status == "reasoning" && record.Lane != "also" {
 				a.recordVisibleReasoning(record)
 			}
 			a.appendActivity(record)
 		}),
 		Context: agentContextPolicy(config),
 	})
-	result, err := sub.InvokeMessages(subCtx, lcMessagesWithTask(task))
+	inbox, releaseInbox := a.workerInstructionInbox(subCtx, taskID)
+	defer releaseInbox()
+	result, err := sub.InvokeMessagesWithInbox(subCtx, lcMessagesWithTask(task), inbox)
 	if err != nil {
 		a.finishTask(taskID, "", err)
 		return "", err
 	}
 	output := lcContentText(result.Output.Content)
+	if scope := scopeFrom(subCtx); scope != nil {
+		a.retainPublicMessage(scope, taskID, name+"/"+taskID, "assistant", output)
+	}
 	a.finishTask(taskID, output, nil)
 	return output, nil
 }
@@ -302,23 +372,35 @@ func subagentSystemPrompt(config Config, name, task string, tools []tcagent.Tool
 	return strings.TrimSpace(prompt)
 }
 
-func (a *App) handleAgentCallback(event callbacks.Event) {
-	record := activityRecordFromCallback(event)
-	if record.Status == "tool error" || record.Status == "model error" {
-		a.logError("agent callback error", "event", record.Kind, "name", record.Name, "detail", record.Detail)
+func runtimeAgentName(ctx context.Context) string {
+	if scope := scopeFrom(ctx); scope != nil {
+		return scope.lane + "/" + scope.id
 	}
+	return "main"
+}
+
+func (a *App) handleAgentCallback(event callbacks.Event) {
+	a.handleScopedCallback(context.Background(), event)
+}
+
+func (a *App) handleScopedCallback(ctx context.Context, event callbacks.Event) {
+	record := activityRecordFromCallback(event)
+	scopeActivity(ctx, &record)
 	a.mu.Lock()
 	taskID := a.activeTaskID
+	if scope := scopeFrom(ctx); scope != nil {
+		taskID = scope.taskID
+	}
+	record.TaskID = taskID
 	a.recordTaskActivityLocked(taskID, record)
+	config := a.config
 	a.mu.Unlock()
 	if event.Event == callbacks.EventLLMEnd {
 		a.addTaskUsage(taskID, usageFromLLMEnd(event))
 	}
-	a.mu.Lock()
-	config := a.config
-	a.mu.Unlock()
-	a.recordUsageCallback(taskID, DisplayName(config), effectiveModelConfig(config, config.Model), event)
-	if record.Status == "reasoning" {
+	a.retainPublicCallback(ctx, taskID, event)
+	a.recordUsageCallback(taskID, runtimeAgentName(ctx), effectiveModelConfig(config, config.Model), event)
+	if record.Status == "reasoning" && record.Lane != "also" {
 		a.recordVisibleReasoning(record)
 	}
 	a.appendActivity(record)
@@ -491,6 +573,9 @@ func loadSkills(config Config) ([]tcagent.Skill, error) {
 func (a *App) loadMCPTools(ctx context.Context, config Config) ([]tcagent.Tool, []func() error) {
 	var tools []tcagent.Tool
 	var closers []func() error
+	if !allProjectsFull(config) {
+		return tools, closers
+	}
 	for id, entry := range config.EnabledMCPServers {
 		if !entry.Enabled {
 			continue
@@ -518,7 +603,7 @@ func (a *App) loadMCPTools(ctx context.Context, config Config) ([]tcagent.Tool, 
 			continue
 		}
 		a.logInfo("mcp load done", "id", id, "tools", len(discovered))
-		tools = append(tools, discovered...)
+		tools = append(tools, guardExternalTools(a, discovered)...)
 		closers = append(closers, client.Close)
 	}
 	return tools, closers
@@ -622,14 +707,14 @@ func (a *App) langChainHistory() []lc.BaseMessage {
 	start := len(a.history) - limit
 	messages := make([]lc.BaseMessage, 0, limit)
 	for _, msg := range a.history[start:] {
-		if msg.VisibleOnly || strings.HasPrefix(strings.TrimSpace(msg.Content), "/") {
+		if msg.Lane == "also" || msg.VisibleOnly || strings.HasPrefix(strings.TrimSpace(msg.Content), "/") {
 			continue
 		}
 		switch msg.Role {
 		case "assistant":
 			messages = append(messages, lc.AI(msg.Content))
 		default:
-			messages = append(messages, humanMessageWithAttachments(msg.Content))
+			messages = append(messages, humanMessageWithAttachments(msg.Content, a.config))
 		}
 	}
 	return messages
@@ -793,4 +878,14 @@ func closeAll(closers []func() error) {
 	for _, closer := range closers {
 		_ = closer()
 	}
+}
+
+func (a *App) invocationModel(config Config, worker bool) (tcagent.Model, error) {
+	if a.modelFactory != nil {
+		return a.modelFactory(config, worker)
+	}
+	if worker {
+		return subagentModelFromConfig(config)
+	}
+	return modelFromConfig(config)
 }

@@ -58,6 +58,9 @@ func (a *App) Execute(ctx context.Context, input string) Reply {
 	if strings.HasPrefix(trimmed, "/") {
 		return a.executeSlash(ctx, trimmed)
 	}
+	if scopeFrom(ctx) == nil {
+		return a.Submit(ctx, input)
+	}
 	skills := inlineSkillHints(trimmed)
 	return a.runAgent(ctx, skills)
 }
@@ -113,8 +116,10 @@ func (a *App) executeSlash(ctx context.Context, input string) Reply {
 	case "/files":
 		return a.filesCommand(strings.TrimSpace(rest))
 	case "/clear":
-		a.clearHistory()
-		return a.reply("Cleared visible chat history.", name, "")
+		if !a.TryReplaceHistory(nil) {
+			return a.reply("Cannot clear history while work is active or queued.", name, "")
+		}
+		return a.reply("Cleared visible chat history.", name, "", map[string]any{"history_replace": true})
 	case "/copy":
 		output := a.LastOutput()
 		if output == "" {
@@ -135,9 +140,11 @@ func (a *App) executeSlash(ctx context.Context, input string) Reply {
 		reply.Data = map[string]any{"logs": a.Logs()}
 		return reply
 	case "/reset":
-		a.clearHistory()
+		if !a.TryReplaceHistory(nil) {
+			return a.reply("Cannot reset while work is active or queued.", name, "")
+		}
 		a.setPaused(false)
-		return a.reply("Reset current session state.", name, "")
+		return a.reply("Reset current session state.", name, "", map[string]any{"history_replace": true})
 	case "/name":
 		return a.nameCommand(strings.TrimSpace(rest))
 	case "/config":

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Bradthebrad/tinychain/streaming"
 	"io"
 	"net/http"
 	"strings"
@@ -236,14 +237,14 @@ func postCodexResponses(ctx context.Context, creds CodexRuntimeCredentials, payl
 		return codexResponsesResponse{}, codexHTTPError{Status: resp.StatusCode, Body: string(data)}
 	}
 	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
-		return decodeCodexResponseStream(resp.Body)
+		return decodeCodexResponseStreamContext(ctx, resp.Body)
 	}
 	data, readErr := io.ReadAll(resp.Body)
 	if readErr != nil {
 		return codexResponsesResponse{}, readErr
 	}
 	if isCodexStreamPayload(data) {
-		return decodeCodexResponseStream(bytes.NewReader(data))
+		return decodeCodexResponseStreamContext(ctx, bytes.NewReader(data))
 	}
 	var out codexResponsesResponse
 	if err := json.Unmarshal(data, &out); err != nil {
@@ -258,6 +259,9 @@ func isCodexStreamPayload(data []byte) bool {
 }
 
 func decodeCodexResponseStream(reader io.Reader) (codexResponsesResponse, error) {
+	return decodeCodexResponseStreamContext(context.Background(), reader)
+}
+func decodeCodexResponseStreamContext(ctx context.Context, reader io.Reader) (codexResponsesResponse, error) {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 
@@ -265,6 +269,7 @@ func decodeCodexResponseStream(reader io.Reader) (codexResponsesResponse, error)
 	var output []openai.ResponsesOutputItem
 	var outputText strings.Builder
 	var dataLines []string
+	completed := false
 
 	flush := func() error {
 		if len(dataLines) == 0 {
@@ -283,6 +288,7 @@ func decodeCodexResponseStream(reader io.Reader) (codexResponsesResponse, error)
 			var direct codexResponsesResponse
 			if err := json.Unmarshal([]byte(raw), &direct); err == nil && (direct.ID != "" || direct.Status != "" || len(direct.Output) > 0 || strings.TrimSpace(direct.OutputText) != "") {
 				out = direct
+				completed = direct.Status == "completed"
 			}
 			return nil
 		}
@@ -294,6 +300,9 @@ func decodeCodexResponseStream(reader io.Reader) (codexResponsesResponse, error)
 			return fmt.Errorf("codex stream error")
 		case "response.output_text.delta":
 			outputText.WriteString(event.Delta)
+			streaming.Emit(ctx, event.Delta, false)
+		case "response.reasoning_summary_text.delta":
+			streaming.Emit(ctx, event.Delta, true)
 		case "response.output_text.done":
 			if strings.TrimSpace(event.Text) != "" {
 				outputText.Reset()
@@ -304,6 +313,10 @@ func decodeCodexResponseStream(reader io.Reader) (codexResponsesResponse, error)
 				output = append(output, *event.Item)
 			}
 		case "response.completed", "response.incomplete", "response.failed":
+			completed = event.Type == "response.completed"
+			if event.Type == "response.incomplete" {
+				return errors.New("codex: incomplete response")
+			}
 			if event.Response != nil {
 				out = *event.Response
 			}
@@ -347,6 +360,9 @@ func decodeCodexResponseStream(reader io.Reader) (codexResponsesResponse, error)
 	}
 	if err := flush(); err != nil {
 		return out, err
+	}
+	if streaming.Enabled(ctx) && !completed {
+		return out, errors.New("codex: truncated response stream")
 	}
 	if len(out.Output) == 0 && len(output) > 0 {
 		out.Output = output

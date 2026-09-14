@@ -30,10 +30,8 @@ func TestSplitMarketPackageIDs(t *testing.T) {
 func TestHumanMessageWithImageAttachment(t *testing.T) {
 	dir := t.TempDir()
 	imagePath := filepath.Join(dir, "clipboard.png")
-	if err := os.WriteFile(imagePath, []byte("fake-png-bytes"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	msg := humanMessageWithAttachments(`look at @file("` + imagePath + `")`)
+	writeAttachmentTestPNG(t, imagePath)
+	msg := humanMessageWithAttachments(`look at @file("` + imagePath + `")`, Config{WorkspaceDir: dir})
 	if msg.Type != "human" {
 		t.Fatalf("message type = %q", msg.Type)
 	}
@@ -558,6 +556,9 @@ func TestLogsRecentToolReadsNullBotLogs(t *testing.T) {
 
 func TestLoadMCPToolsDiscoversStdioServer(t *testing.T) {
 	config := DefaultConfig()
+	config.WorkspaceDir = t.TempDir()
+	config.Projects = []Project{{ID: "test", Path: config.WorkspaceDir, Permission: "full"}}
+	config.PrimaryProjectID = "test"
 	config.AppDir = t.TempDir()
 	config.EnabledMCPServers = map[string]MCPEntry{
 		"helper": {

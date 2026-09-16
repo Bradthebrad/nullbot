@@ -35,6 +35,8 @@ func newSessionID() string {
 }
 
 func (a *App) persistMessage(message Message) {
+	a.persistMu.Lock()
+	defer a.persistMu.Unlock()
 	a.mu.Lock()
 	config := a.config
 	sessionID := a.sessionID

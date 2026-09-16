@@ -22,22 +22,25 @@ const (
 )
 
 type AgentTask struct {
-	ID         string           `json:"id"`
-	Name       string           `json:"name"`
-	Role       string           `json:"role"`
-	Prompt     string           `json:"prompt,omitempty"`
-	Status     TaskStatus       `json:"status"`
-	Current    string           `json:"current,omitempty"`
-	Result     string           `json:"result,omitempty"`
-	Error      string           `json:"error,omitempty"`
-	StartedAt  time.Time        `json:"started_at"`
-	UpdatedAt  time.Time        `json:"updated_at"`
-	FinishedAt time.Time        `json:"finished_at,omitempty"`
-	Activity   []ActivityRecord `json:"activity,omitempty"`
-	ToolCalls  []TaskToolCall   `json:"tool_calls,omitempty"`
-	Tokens     TaskTokens       `json:"tokens,omitempty"`
-	Cancelable bool             `json:"cancelable"`
-	CancelHint string           `json:"cancel_hint,omitempty"`
+	SubmissionID string           `json:"submission_id,omitempty"`
+	Lane         string           `json:"lane,omitempty"`
+	ParentTaskID string           `json:"parent_task_id,omitempty"`
+	ID           string           `json:"id"`
+	Name         string           `json:"name"`
+	Role         string           `json:"role"`
+	Prompt       string           `json:"prompt,omitempty"`
+	Status       TaskStatus       `json:"status"`
+	Current      string           `json:"current,omitempty"`
+	Result       string           `json:"result,omitempty"`
+	Error        string           `json:"error,omitempty"`
+	StartedAt    time.Time        `json:"started_at"`
+	UpdatedAt    time.Time        `json:"updated_at"`
+	FinishedAt   time.Time        `json:"finished_at,omitempty"`
+	Activity     []ActivityRecord `json:"activity,omitempty"`
+	ToolCalls    []TaskToolCall   `json:"tool_calls,omitempty"`
+	Tokens       TaskTokens       `json:"tokens,omitempty"`
+	Cancelable   bool             `json:"cancelable"`
+	CancelHint   string           `json:"cancel_hint,omitempty"`
 }
 
 type TaskToolCall struct {
@@ -70,6 +73,10 @@ type ThoughtSnapshot struct {
 func (a *App) startTask(name, role, prompt string, cancel func()) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return a.startTaskLocked(name, role, prompt, cancel)
+}
+
+func (a *App) startTaskLocked(name, role, prompt string, cancel func()) string {
 	a.ensureTasksLocked()
 	a.taskSeq++
 	id := fmt.Sprintf("task-%04d", a.taskSeq)
@@ -139,7 +146,7 @@ func (a *App) CancelTask(id string) bool {
 	a.mu.Lock()
 	a.ensureTasksLocked()
 	cancel := a.taskCancels[id]
-	if task := a.tasks[id]; task != nil {
+	if task := a.tasks[id]; task != nil && cancel != nil && (task.Status == TaskRunning || task.Status == TaskCanceling) {
 		task.Status = TaskCanceling
 		task.Current = "cancel requested"
 		task.UpdatedAt = time.Now().UTC()
@@ -364,7 +371,8 @@ func (a *App) ensureTasksLocked() {
 
 func activityRecordFromCallback(event callbacks.Event) ActivityRecord {
 	record := ActivityRecord{
-		Time: event.Time,
+		Time:    event.Time,
+		AgentID: event.AgentID, RunID: event.RunID, ParentRunID: event.ParentRunID,
 		Kind: string(event.Event),
 		Name: event.Name,
 	}
@@ -375,8 +383,14 @@ func activityRecordFromCallback(event callbacks.Event) ActivityRecord {
 	case callbacks.EventChatModelStart:
 		record.Status = "model start"
 		record.Detail = fmt.Sprintf("messages=%d", callbackMessageCount(event))
+	case callbacks.EventLLMCommentary:
+		record.Status = "commentary"
+		record.Detail = event.Data.Token
+	case callbacks.EventLLMNewToken:
+		record.Status = "response delta"
+		record.Detail = event.Data.Token
 	case callbacks.EventLLMReasoning:
-		record.Status = "reasoning"
+		record.Status = "reasoning delta"
 		record.Detail = event.Data.Token
 		if record.Detail == "" && event.Data.Chunk != nil {
 			record.Detail = event.Data.Chunk.Text
@@ -393,6 +407,9 @@ func activityRecordFromCallback(event callbacks.Event) ActivityRecord {
 	case callbacks.EventToolEnd:
 		record.Status = "tool complete"
 		record.Detail = "Tool call complete."
+		if event.Data.Output != nil {
+			record.Detail = "result: " + compactAny(event.Data.Output, 2000)
+		}
 	case callbacks.EventToolError:
 		record.Status = "tool error"
 		record.Detail = "error: " + event.Data.Error

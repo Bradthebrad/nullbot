@@ -3,13 +3,23 @@ package app
 import (
 	"context"
 	"fmt"
+	tcagent "github.com/Bradthebrad/tinychain/agent"
 	"strings"
 	"sync"
 	"time"
 )
 
 type App struct {
+	routingMu          sync.Mutex
+	requestReceipts    map[string]Submission
+	persistMu          sync.Mutex
+	modelFactory       func(Config, bool) (tcagent.Model, error)
 	mu                 sync.Mutex
+	submissions        map[string]*submissionJob
+	submissionOrder    []string
+	submissionSeq      uint64
+	primaryJob         *submissionJob
+	submissionQueue    []*submissionJob
 	config             Config
 	history            []Message
 	activity           []ActivityRecord
@@ -45,18 +55,28 @@ type AlsoSnapshot struct {
 }
 
 type Message struct {
-	Role        string    `json:"role"`
-	Content     string    `json:"content"`
-	Time        time.Time `json:"time"`
-	VisibleOnly bool      `json:"visible_only,omitempty"`
+	SubmissionID string    `json:"submission_id,omitempty"`
+	Lane         string    `json:"lane,omitempty"`
+	AgentID      string    `json:"agent_id,omitempty"`
+	TaskID       string    `json:"task_id,omitempty"`
+	Role         string    `json:"role"`
+	Content      string    `json:"content"`
+	Time         time.Time `json:"time"`
+	VisibleOnly  bool      `json:"visible_only,omitempty"`
 }
 
 type ActivityRecord struct {
-	Time   time.Time `json:"time"`
-	Kind   string    `json:"kind"`
-	Name   string    `json:"name,omitempty"`
-	Status string    `json:"status,omitempty"`
-	Detail string    `json:"detail,omitempty"`
+	SubmissionID string    `json:"submission_id,omitempty"`
+	Lane         string    `json:"lane,omitempty"`
+	AgentID      string    `json:"agent_id,omitempty"`
+	RunID        string    `json:"run_id,omitempty"`
+	ParentRunID  string    `json:"parent_run_id,omitempty"`
+	TaskID       string    `json:"task_id,omitempty"`
+	Time         time.Time `json:"time"`
+	Kind         string    `json:"kind"`
+	Name         string    `json:"name,omitempty"`
+	Status       string    `json:"status,omitempty"`
+	Detail       string    `json:"detail,omitempty"`
 }
 
 type Reply struct {
@@ -93,7 +113,7 @@ func (a *App) State() Reply {
 		Config:      a.config,
 		History:     append([]Message{}, a.history...),
 		Suggestions: commandNames(),
-		Data:        map[string]any{"runtime": RuntimeStatus(a.config), "tasks": a.taskSnapshotsLocked(), "schedules": a.scheduledSnapshotsLocked()},
+		Data:        map[string]any{"runtime": RuntimeStatus(a.config), "tasks": a.taskSnapshotsLocked(), "schedules": a.scheduledSnapshotsLocked(), "submissions": a.submissionStateLocked()},
 	}
 }
 
@@ -106,11 +126,24 @@ func (a *App) Config() Config {
 func (a *App) UpdateConfig(update func(*Config)) error {
 	a.mu.Lock()
 	config := a.config
+	config.Projects = append([]Project(nil), config.Projects...)
 	update(&config)
 	if config.AppDir == "" {
 		config.AppDir = a.config.AppDir
 	}
+	if config.WorkspaceDir != a.config.WorkspaceDir && config.PrimaryProjectID == a.config.PrimaryProjectID {
+		config.Projects = append([]Project(nil), config.Projects...)
+		for i := range config.Projects {
+			if config.Projects[i].ID == config.PrimaryProjectID {
+				config.Projects[i].Path = config.WorkspaceDir
+			}
+		}
+	}
 	config = normalizeConfig(config)
+	if err := ValidateProjects(config); err != nil {
+		a.mu.Unlock()
+		return err
+	}
 	a.mu.Unlock()
 
 	if err := SaveConfig(config); err != nil {
@@ -166,17 +199,43 @@ func (a *App) Submit(ctx context.Context, input string) Reply {
 }
 
 func (a *App) SubmitWithActivity(ctx context.Context, input string, sink func(ActivityRecord)) Reply {
+	if strings.HasPrefix(strings.TrimSpace(input), "/") {
+		return a.submitDirect(ctx, input, sink)
+	}
+	job, receipt := a.enqueueSubmission(ctx, input, "queue", sink)
+	if job == nil {
+		return a.reply(receipt.Error, "", "")
+	}
+	select {
+	case <-job.done:
+		return *cloneSubmission(job.Submission).Reply
+	case <-ctx.Done():
+		a.CancelQueuedSubmission(job.ID)
+		return a.reply(ctx.Err().Error(), "", "")
+	}
+}
+
+func (a *App) submitDirect(ctx context.Context, input string, sink func(ActivityRecord)) Reply {
 	a.mu.Lock()
 	activityStart := len(a.activity)
 	a.mu.Unlock()
 	if sink != nil {
-		unsubscribe := a.SubscribeActivity(sink)
+		unsubscribe := a.SubscribeActivity(func(record ActivityRecord) {
+			if scope := scopeFrom(ctx); scope != nil && record.SubmissionID != scope.id {
+				return
+			}
+			sink(record)
+		})
 		defer unsubscribe()
 	}
 
 	trimmed := strings.TrimSpace(input)
 	isSlash := strings.HasPrefix(trimmed, "/")
 	userMessage := Message{Role: "user", Content: input, Time: time.Now().UTC()}
+	if scope := scopeFrom(ctx); scope != nil {
+		userMessage.SubmissionID = scope.id
+		userMessage.Lane = scope.lane
+	}
 	if !isSlash {
 		a.mu.Lock()
 		a.history = append(a.history, userMessage)
@@ -188,6 +247,10 @@ func (a *App) SubmitWithActivity(ctx context.Context, input string, sink func(Ac
 	reply := a.Execute(ctx, input)
 
 	assistantMessage := Message{Role: "assistant", Content: reply.Message, Time: time.Now().UTC(), VisibleOnly: isSlash}
+	if scope := scopeFrom(ctx); scope != nil {
+		assistantMessage.SubmissionID = scope.id
+		assistantMessage.Lane = scope.lane
+	}
 	recordAssistant := !isSlash || shouldDisplaySlashReply(trimmed, reply)
 	a.mu.Lock()
 	if recordAssistant {
@@ -209,66 +272,17 @@ func (a *App) SubmitWithActivity(ctx context.Context, input string, sink func(Ac
 }
 
 func (a *App) RunAlsoObserver(ctx context.Context, question string) Reply {
-	question = strings.TrimSpace(question)
-	if question == "" {
-		return a.reply("Usage: /also <question>", "/also", "also")
+	job, receipt := a.enqueueSubmission(ctx, question, "also", nil)
+	if job == nil {
+		return a.reply(receipt.Error, "/also", "also")
 	}
-	snapshot := a.alsoSnapshot(question)
-	observeCtx, cancel := context.WithCancel(ctx)
-	taskID := a.startTask("Also Observer", "also", question, cancel)
-	defer cancel()
-	var records []ActivityRecord
-	record := ActivityRecord{
-		Time:   time.Now().UTC(),
-		Kind:   "also",
-		Name:   "/also",
-		Status: "observer start",
-		Detail: question,
+	select {
+	case <-job.done:
+		return *cloneSubmission(job.Submission).Reply
+	case <-ctx.Done():
+		a.CancelQueuedSubmission(job.ID)
+		return a.reply(ctx.Err().Error(), "", "")
 	}
-	records = append(records, record)
-	a.appendActivity(record)
-	a.recordTaskActivity(taskID, record)
-	answer, err := a.invokeAlsoObserver(observeCtx, snapshot)
-	if err != nil {
-		record = ActivityRecord{
-			Time:   time.Now().UTC(),
-			Kind:   "also",
-			Name:   "/also",
-			Status: "observer error",
-			Detail: err.Error(),
-		}
-		records = append(records, record)
-		a.appendActivity(record)
-		a.recordTaskActivity(taskID, record)
-		a.finishTask(taskID, "", err)
-		a.logError("also observer failed", "error", err)
-		reply := a.reply("Also observer error: "+err.Error(), "/also", "also", map[string]any{"question": question, "activity": snapshot.Activity})
-		if !snapshot.Active {
-			reply.Activity = records
-		}
-		return reply
-	}
-	record = ActivityRecord{
-		Time:   time.Now().UTC(),
-		Kind:   "also",
-		Name:   "/also",
-		Status: "observer done",
-		Detail: truncate(answer, 220),
-	}
-	records = append(records, record)
-	a.appendActivity(record)
-	a.recordTaskActivity(taskID, record)
-	a.finishTask(taskID, answer, nil)
-	a.logInfo("also observer response", "chars", len(answer))
-	reply := a.reply(answer, "/also", "also", map[string]any{
-		"question": question,
-		"active":   snapshot.Active,
-		"activity": snapshot.Activity,
-	})
-	if !snapshot.Active {
-		reply.Activity = records
-	}
-	return reply
 }
 
 func (a *App) alsoSnapshot(question string) AlsoSnapshot {
@@ -359,6 +373,7 @@ func (a *App) recordVisibleReasoning(record ActivityRecord) {
 	a.mu.Lock()
 	a.history = append(a.history, message)
 	a.mu.Unlock()
+	a.persistMessage(message)
 }
 
 func ReasoningMessageFromRecord(record ActivityRecord) (Message, bool) {
@@ -376,6 +391,7 @@ func ReasoningMessageFromRecord(record ActivityRecord) (Message, bool) {
 		record.Time = time.Now().UTC()
 	}
 	return Message{
+		SubmissionID: record.SubmissionID, Lane: record.Lane, AgentID: record.AgentID, TaskID: record.TaskID,
 		Role:        "reasoning",
 		Content:     text,
 		Time:        record.Time,
@@ -456,25 +472,22 @@ func (a *App) Resume() {
 }
 
 func (a *App) setPaused(paused bool) {
-	var fallbackCancel context.CancelFunc
 	a.mu.Lock()
 	a.paused = paused
-	if paused && a.activeCancel != nil {
-		a.activeCancel()
-	} else if paused {
-		for id, task := range a.tasks {
-			if task.Status == TaskRunning && a.taskCancels[id] != nil {
-				fallbackCancel = a.taskCancels[id]
-				task.Status = TaskCanceling
-				task.Current = "cancel requested"
-				task.UpdatedAt = time.Now().UTC()
-				break
-			}
-		}
+	cancel := a.activeCancel
+	var next *submissionJob
+	if !paused && a.primaryJob == nil && len(a.submissionQueue) > 0 {
+		next = a.submissionQueue[0]
+		a.submissionQueue = a.submissionQueue[1:]
+		next.Status = "running"
+		a.primaryJob = next
 	}
 	a.mu.Unlock()
-	if fallbackCancel != nil {
-		fallbackCancel()
+	if paused && cancel != nil {
+		cancel()
+	}
+	if next != nil {
+		go a.executeSubmission(next)
 	}
 	if paused {
 		a.logInfo("pause requested")
@@ -489,9 +502,9 @@ func (a *App) clearHistory() {
 }
 
 func (a *App) ReplaceHistory(messages []Message) {
-	a.mu.Lock()
-	a.history = append([]Message{}, messages...)
-	a.mu.Unlock()
+	if !a.TryReplaceHistory(messages) {
+		return
+	}
 	a.appendActivity(ActivityRecord{
 		Time:   time.Now().UTC(),
 		Kind:   "history",
@@ -506,8 +519,10 @@ func (a *App) beginWork(parent context.Context) (context.Context, string) {
 	ctx, cancel := context.WithCancel(parent)
 	a.mu.Lock()
 	name := DisplayName(a.config)
-	a.paused = false
 	a.activeCancel = cancel
+	if a.paused {
+		cancel()
+	}
 	a.mu.Unlock()
 	taskID := a.startTask(name, "primary", "Primary agent turn", cancel)
 	a.mu.Lock()
@@ -520,8 +535,13 @@ func (a *App) endWork(taskID string, result string, err error) {
 	a.finishTask(taskID, result, err)
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.activeCancel = nil
-	a.activeTaskID = ""
+	if a.activeTaskID == taskID {
+		if a.activeCancel != nil {
+			a.activeCancel()
+		}
+		a.activeCancel = nil
+		a.activeTaskID = ""
+	}
 }
 
 func (a *App) logInfo(message string, fields ...any) {

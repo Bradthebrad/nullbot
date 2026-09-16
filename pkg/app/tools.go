@@ -47,7 +47,8 @@ func BuiltinToolsFor(config Config, state *App, includeSpawner bool) []agent.Too
 	if includeSpawner {
 		tools = append(tools, spawnSubagentTool(state), subagentStatusTool(state), subagentWaitTool(state))
 	}
-	return tools
+	tools = append(tools, projectFileTools(state)...)
+	return guardBuiltinTools(state, tools)
 }
 
 func plansListTool(state *App) agent.Tool {
@@ -661,7 +662,7 @@ func subagentStatusTool(state *App) agent.Tool {
 		Func: func(ctx context.Context, args map[string]any) (string, error) {
 			id := strings.TrimSpace(stringArg(args, "task_id"))
 			if id != "" {
-				task, ok := state.TaskDetails(id)
+				task, ok := state.ownedTaskDetails(ctx, id)
 				if !ok {
 					return "", fmt.Errorf("task not found: %s", id)
 				}
@@ -669,7 +670,7 @@ func subagentStatusTool(state *App) agent.Tool {
 			}
 			var tasks []AgentTask
 			for _, task := range state.TaskSnapshots() {
-				if task.Role == "subagent" {
+				if task.Role == "subagent" && taskOwnedBy(ctx, task) {
 					tasks = append(tasks, task)
 				}
 			}
@@ -703,7 +704,7 @@ func subagentWaitTool(state *App) agent.Tool {
 			tick := time.NewTicker(100 * time.Millisecond)
 			defer tick.Stop()
 			for {
-				task, ok := state.TaskDetails(id)
+				task, ok := state.ownedTaskDetails(ctx, id)
 				if !ok {
 					return "", fmt.Errorf("task not found: %s", id)
 				}

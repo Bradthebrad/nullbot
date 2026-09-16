@@ -14,6 +14,8 @@ const DefaultPrefix = "Null"
 const defaultMaxIterations = 20
 
 type Config struct {
+	Projects            []Project           `json:"projects"`
+	PrimaryProjectID    string              `json:"primary_project_id"`
 	BrandPrefix         string              `json:"brand_prefix"`
 	BotName             string              `json:"bot_name,omitempty"`
 	Tagline             string              `json:"tagline"`
@@ -70,7 +72,8 @@ type EditorConfig struct {
 }
 
 type UIConfig struct {
-	Theme string `json:"theme"`
+	Theme                 string `json:"theme"`
+	SuggestMatchingSkills bool   `json:"suggest_matching_skills"`
 }
 
 type MCPEntry struct {
@@ -161,6 +164,8 @@ func loadOrInit(config Config) (Config, error) {
 		return Config{}, err
 	}
 	data = bytes.TrimPrefix(data, []byte{0xEF, 0xBB, 0xBF})
+	config.Projects = nil
+ config.PrimaryProjectID = ""
 	if err := json.Unmarshal(data, &config); err != nil {
 		return Config{}, err
 	}
@@ -249,6 +254,7 @@ func normalizeConfig(config Config) Config {
 	if config.EnabledMCPServers == nil {
 		config.EnabledMCPServers = map[string]MCPEntry{}
 	}
+	normalizeProjects(&config)
 	config.EnabledMCPServers = syncMCPWorkspaceArgs(config.EnabledMCPServers, config.WorkspaceDir)
 	if config.PermissionDefaults == nil {
 		config.PermissionDefaults = map[string]string{"coding": "deny", "shell": "ask", "network": "ask"}

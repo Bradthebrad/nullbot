@@ -29,31 +29,7 @@ func workspaceRoot(config Config) (string, error) {
 }
 
 func safeWorkspacePath(config Config, rel string) (string, error) {
-	root, err := workspaceRoot(config)
-	if err != nil {
-		return "", err
-	}
-	rel = strings.TrimSpace(rel)
-	if rel == "" || rel == "." {
-		return root, nil
-	}
-	if filepath.IsAbs(rel) {
-		rel = filepath.Clean(rel)
-	} else {
-		rel = filepath.Join(root, rel)
-	}
-	abs, err := filepath.Abs(rel)
-	if err != nil {
-		return "", err
-	}
-	rootWithSep := root
-	if !strings.HasSuffix(rootWithSep, string(os.PathSeparator)) {
-		rootWithSep += string(os.PathSeparator)
-	}
-	if abs != root && !strings.HasPrefix(abs, rootWithSep) {
-		return "", fmt.Errorf("path escapes workspace: %s", rel)
-	}
-	return abs, nil
+	return CheckProjectPath(config, rel, false, false)
 }
 
 func listWorkspaceDir(config Config, rel string, maxItems int) (string, error) {
@@ -151,7 +127,7 @@ func removeWorkspacePath(config Config, rel string, recursive bool, dirsOnly boo
 	if strings.TrimSpace(rel) == "" {
 		return "", fmt.Errorf("path is required")
 	}
-	path, err := safeWorkspacePath(config, rel)
+	path, err := CheckProjectPath(config, rel, true, true)
 	if err != nil {
 		return "", err
 	}

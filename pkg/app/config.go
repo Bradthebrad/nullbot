@@ -83,6 +83,12 @@ type MCPEntry struct {
 	Env       map[string]string `json:"env,omitempty"`
 	Transport string            `json:"transport"`
 	Enabled   bool              `json:"enabled"`
+	// Headers are sent with every request to a remote (HTTP) server, for
+	// example an Authorization header.
+	Headers map[string]string `json:"headers,omitempty"`
+	// ToolPolicies overrides the capability a tool is treated as needing:
+	// auto, read, write, delete, execute or blocked.
+	ToolPolicies map[string]string `json:"tool_policies,omitempty"`
 }
 
 func DefaultConfig() Config {
@@ -165,7 +171,7 @@ func loadOrInit(config Config) (Config, error) {
 	}
 	data = bytes.TrimPrefix(data, []byte{0xEF, 0xBB, 0xBF})
 	config.Projects = nil
- config.PrimaryProjectID = ""
+	config.PrimaryProjectID = ""
 	if err := json.Unmarshal(data, &config); err != nil {
 		return Config{}, err
 	}

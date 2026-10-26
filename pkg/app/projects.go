@@ -12,10 +12,13 @@ type Project struct {
 	Name       string `json:"name"`
 	Path       string `json:"path"`
 	Permission string `json:"permission"`
+	// Allow lists extra capabilities (write, delete, execute) for the custom
+	// permission. Read is always included.
+	Allow []string `json:"allow,omitempty"`
 }
 
-// Full permits unsandboxed external tools/processes, not filesystem isolation.
-const FullAccessWarning = "Full allows unsandboxed MCP servers and commands, which can access paths outside projects. All projects must be Full to enable external tools. Existing processes are not revoked."
+// FullAccessWarning explains what the Full permission means.
+const FullAccessWarning = "Full lets tools run programs and commands in this project. Tool servers are separate programs: NullBot checks every tool call's paths against your project permissions, but it cannot sandbox what a server's own code does."
 
 func effectiveProjects(c Config) []Project {
 	if len(c.Projects) != 0 {
@@ -50,8 +53,13 @@ func ValidateProjects(c Config) error {
 			return fmt.Errorf("project IDs must be nonempty and unique")
 		}
 		seen[p.ID] = true
-		if p.Permission != "read-only" && p.Permission != "read-write" && p.Permission != "full" {
+		if !ValidPermission(p.Permission) {
 			return fmt.Errorf("invalid permission for project %s", p.ID)
+		}
+		for _, allowed := range p.Allow {
+			if _, ok := capabilityRank[Capability(strings.ToLower(strings.TrimSpace(allowed)))]; !ok {
+				return fmt.Errorf("invalid custom capability %q for project %s", allowed, p.ID)
+			}
 		}
 		if !filepath.IsAbs(p.Path) {
 			return fmt.Errorf("project path must be absolute: %s", p.Path)
@@ -139,10 +147,10 @@ func CheckProjectPath(c Config, path string, write, tree bool) (string, error) {
 			matched = true
 		}
 		if inside || (tree && pathWithin(target, root)) {
-			if p.Permission != "read-only" && p.Permission != "read-write" && p.Permission != "full" {
+			if !ValidPermission(p.Permission) {
 				return "", fmt.Errorf("invalid project permission")
 			}
-			if write && p.Permission == "read-only" {
+			if write && !ProjectAllows(p, CapWrite) {
 				return "", fmt.Errorf("project %s is read-only", p.Name)
 			}
 			if write && tree && pathWithin(target, root) {

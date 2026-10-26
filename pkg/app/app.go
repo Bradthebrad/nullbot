@@ -12,6 +12,7 @@ import (
 type App struct {
 	routingMu          sync.Mutex
 	requestReceipts    map[string]Submission
+	receiptOrder       []string
 	persistMu          sync.Mutex
 	modelFactory       func(Config, bool) (tcagent.Model, error)
 	mu                 sync.Mutex
@@ -41,7 +42,16 @@ type App struct {
 	schedules          map[string]*ScheduledTask
 	scheduleSeq        int
 	schedulerCancel    context.CancelFunc
+	mcpPool            *mcpPool
+	changeSinks        map[int]func(string)
+	changeSinkSeq      int
+	activitySeq        uint64
 }
+
+const (
+	activityRingSize = 400
+	logRingSize      = 200
+)
 
 type AlsoSnapshot struct {
 	Question   string
@@ -66,6 +76,9 @@ type Message struct {
 }
 
 type ActivityRecord struct {
+	// Seq increases by one for every record the app publishes, so consumers
+	// can deduplicate and order records without comparing payloads.
+	Seq          uint64    `json:"seq,omitempty"`
 	SubmissionID string    `json:"submission_id,omitempty"`
 	Lane         string    `json:"lane,omitempty"`
 	AgentID      string    `json:"agent_id,omitempty"`
@@ -77,6 +90,34 @@ type ActivityRecord struct {
 	Name         string    `json:"name,omitempty"`
 	Status       string    `json:"status,omitempty"`
 	Detail       string    `json:"detail,omitempty"`
+
+	// Structured tool-call fields (see docs/ACTIVITY_API.md). RunID holds the
+	// provider tool call id for tool records; CallID repeats it explicitly.
+	CallID      string         `json:"call_id,omitempty"`
+	Tool        string         `json:"tool,omitempty"`
+	Title       string         `json:"title,omitempty"`
+	Server      string         `json:"server,omitempty"`
+	ServerTitle string         `json:"server_title,omitempty"`
+	Source      string         `json:"source,omitempty"`
+	ReadOnly    *bool          `json:"read_only,omitempty"`
+	Destructive *bool          `json:"destructive,omitempty"`
+	Args        map[string]any `json:"args,omitempty"`
+	Result      string         `json:"result,omitempty"`
+	ResultMeta  map[string]any `json:"result_meta,omitempty"`
+	Error       string         `json:"error,omitempty"`
+	DurationMs  int64          `json:"duration_ms,omitempty"`
+	Permission  map[string]any `json:"permission,omitempty"`
+}
+
+// IsStreamDelta reports whether a record is a token-level streaming fragment.
+// Deltas are delivered live to subscribers but never stored in activity or
+// task buffers.
+func (r ActivityRecord) IsStreamDelta() bool {
+	switch r.Status {
+	case "response delta", "reasoning delta", "commentary delta":
+		return true
+	}
+	return false
 }
 
 type Reply struct {
@@ -154,8 +195,13 @@ func (a *App) UpdateConfig(update func(*Config)) error {
 	a.mu.Lock()
 	a.config = config
 	a.logger = NewLogger(config)
+	pool := a.mcpPool
 	a.mu.Unlock()
 	a.logInfo("config saved", "app_dir", config.AppDir, "provider", config.Model.Provider, "model", config.Model.Model)
+	if pool != nil {
+		go pool.Reconfigure(config)
+	}
+	a.notifyChange(ChangeConfig)
 	return nil
 }
 
@@ -202,13 +248,13 @@ func (a *App) SubmitWithActivity(ctx context.Context, input string, sink func(Ac
 	if strings.HasPrefix(strings.TrimSpace(input), "/") {
 		return a.submitDirect(ctx, input, sink)
 	}
-	job, receipt := a.enqueueSubmission(ctx, input, "queue", sink)
+	job, receipt := a.enqueueSubmissionWith(ctx, input, "queue", sink, true)
 	if job == nil {
 		return a.reply(receipt.Error, "", "")
 	}
 	select {
 	case <-job.done:
-		return *cloneSubmission(job.Submission).Reply
+		return a.takeFullReply(job)
 	case <-ctx.Done():
 		a.CancelQueuedSubmission(job.ID)
 		return a.reply(ctx.Err().Error(), "", "")
@@ -256,7 +302,10 @@ func (a *App) submitDirect(ctx context.Context, input string, sink func(Activity
 	if recordAssistant {
 		a.history = append(a.history, assistantMessage)
 	}
-	a.logs = append(a.logs, time.Now().UTC().Format(time.RFC3339)+" "+reply.Message)
+	a.logs = append(a.logs, time.Now().UTC().Format(time.RFC3339)+" "+truncate(reply.Message, 500))
+	if len(a.logs) > logRingSize {
+		a.logs = append([]string(nil), a.logs[len(a.logs)-logRingSize:]...)
+	}
 	reply.Config = a.config
 	reply.History = append([]Message{}, a.history...)
 	if activityStart > len(a.activity) {
@@ -272,13 +321,13 @@ func (a *App) submitDirect(ctx context.Context, input string, sink func(Activity
 }
 
 func (a *App) RunAlsoObserver(ctx context.Context, question string) Reply {
-	job, receipt := a.enqueueSubmission(ctx, question, "also", nil)
+	job, receipt := a.enqueueSubmissionWith(ctx, question, "also", nil, true)
 	if job == nil {
 		return a.reply(receipt.Error, "/also", "also")
 	}
 	select {
 	case <-job.done:
-		return *cloneSubmission(job.Submission).Reply
+		return a.takeFullReply(job)
 	case <-ctx.Done():
 		a.CancelQueuedSubmission(job.ID)
 		return a.reply(ctx.Err().Error(), "", "")
@@ -332,9 +381,14 @@ func shouldDisplaySlashReply(input string, reply Reply) bool {
 
 func (a *App) appendActivity(record ActivityRecord) {
 	a.mu.Lock()
-	a.activity = append(a.activity, record)
-	if len(a.activity) > 400 {
-		a.activity = a.activity[len(a.activity)-400:]
+	a.activitySeq++
+	record.Seq = a.activitySeq
+	if !record.IsStreamDelta() {
+		a.activity = append(a.activity, record)
+		if len(a.activity) > activityRingSize {
+			// Copy so the dropped prefix can be collected.
+			a.activity = append([]ActivityRecord(nil), a.activity[len(a.activity)-activityRingSize:]...)
+		}
 	}
 	sinks := make([]func(ActivityRecord), 0, len(a.activitySinks))
 	for _, sink := range a.activitySinks {
@@ -343,6 +397,12 @@ func (a *App) appendActivity(record ActivityRecord) {
 	a.mu.Unlock()
 	for _, sink := range sinks {
 		sink(record)
+	}
+	if record.TaskID != "" {
+		switch record.Status {
+		case "tool start", "tool complete", "tool error", "model start", "agent complete", "model error":
+			a.notifyChange(ChangeTasks)
+		}
 	}
 }
 

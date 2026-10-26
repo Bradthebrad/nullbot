@@ -21,6 +21,8 @@ NullBot is designed to feel like a real local assistant without quietly becoming
 | Logs | Writes runtime logs to `~/.nullbot/logs/nullbot.log` and exposes recent log lines to the bot through a constrained built-in tool. |
 | MCP | Lists configured MCP servers and cached market packages; external powers are expected to come from separate MCP binaries. |
 | Safety | No built-in arbitrary shell, code editing, email, browser, or broad filesystem access. Add those only through explicit MCP tooling. |
+| Projects | Every tool call, built-in or MCP (local or remote), is checked against per-project permissions: read only, read & write, full, or custom. The primary project is the default working directory. See [docs/PERMISSIONS.md](docs/PERMISSIONS.md). |
+| MCP pool | Enabled MCP servers start once, in parallel, and are shared by the manager, subagents and Also runs; they restart after a crash and stop when idle. |
 
 ## Optional Email, Drive, and Messaging Accounts
 

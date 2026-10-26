@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -315,4 +316,41 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+const modelCatalogTTL = 10 * time.Minute
+
+var modelCatalogCache struct {
+	sync.Mutex
+	key     string
+	fetched time.Time
+	groups  []ModelGroup
+}
+
+// CachedModelGroups returns the provider model catalog, fetching it at most
+// once per TTL for the same set of credentials. Pass refresh to force a fetch.
+func CachedModelGroups(ctx context.Context, config Config, refresh bool) []ModelGroup {
+	keys, _ := LoadAPIKeys(config)
+	key := fmt.Sprintf("%t|%s|%s|%s", CodexAuthPresent(config), MaskSecret(keys.OpenAI), MaskSecret(keys.OpenRouter), config.AppDir)
+	modelCatalogCache.Lock()
+	if !refresh && modelCatalogCache.key == key && time.Since(modelCatalogCache.fetched) < modelCatalogTTL && modelCatalogCache.groups != nil {
+		groups := cloneModelGroups(modelCatalogCache.groups)
+		modelCatalogCache.Unlock()
+		return groups
+	}
+	modelCatalogCache.Unlock()
+	groups := DiscoverModelGroups(ctx, config)
+	modelCatalogCache.Lock()
+	modelCatalogCache.key, modelCatalogCache.fetched, modelCatalogCache.groups = key, time.Now(), cloneModelGroups(groups)
+	modelCatalogCache.Unlock()
+	return groups
+}
+
+func cloneModelGroups(groups []ModelGroup) []ModelGroup {
+	out := make([]ModelGroup, len(groups))
+	for i, g := range groups {
+		g.Models = append([]ModelOption(nil), g.Models...)
+		out[i] = g
+	}
+	return out
 }

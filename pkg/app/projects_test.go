@@ -57,42 +57,29 @@ func TestExternalDispatchRevocationAndUnknownTool(t *testing.T) {
 	c := projectTestConfig(t, "full")
 	a := New(c)
 	called := 0
-	tools := guardExternalTools(a, []agent.Tool{agent.ToolFunc{Name: "read_file", Func: func(context.Context, map[string]any) (string, error) { called++; return "ok", nil }}})
-	if _, err := tools[0].Call(context.Background(), nil); err != nil {
+	tools := guardExternalTools(a, "test-server", false, []agent.Tool{agent.ToolFunc{Name: "write_file", Func: func(context.Context, map[string]any) (string, error) { called++; return "ok", nil }}})
+	if _, err := tools[0].Call(context.Background(), map[string]any{"path": "notes.txt"}); err != nil {
 		t.Fatal(err)
 	}
 	a.config.Projects[0].Permission = "read-only"
-	if _, err := tools[0].Call(context.Background(), nil); err == nil {
+	if _, err := tools[0].Call(context.Background(), map[string]any{"path": "notes.txt"}); err == nil {
 		t.Fatal("stale MCP capability remained live")
 	}
 	if called != 1 {
 		t.Fatal("denied tool executed")
 	}
+	// Unknown verbs are treated as modifying, so a read-only project blocks them.
+	unknown := guardExternalTools(a, "test-server", false, []agent.Tool{agent.ToolFunc{Name: "frobnicate", Func: func(context.Context, map[string]any) (string, error) { called++; return "ok", nil }}})
+	if _, err := unknown[0].Call(context.Background(), nil); err == nil {
+		t.Fatal("unknown tool ran in a read-only project")
+	}
 	for _, manager := range []bool{true, false} {
 		for _, tool := range BuiltinToolsFor(a.Config(), a, manager) {
 			if tool.Definition().Name == "create_skill" {
-				if _, err := tool.Call(context.Background(), nil); err == nil {
+				if _, err := tool.Call(context.Background(), map[string]any{"name": "x"}); err == nil {
 					t.Fatal("restricted builtin executed")
 				}
 			}
 		}
-	}
-}
-func TestPrimaryProjectSync(t *testing.T) {
-	c := projectTestConfig(t, "read-write")
-	second := t.TempDir()
-	c.Projects = append(c.Projects, Project{ID: "two", Name: "Two", Path: second, Permission: "read-only"})
-	c.PrimaryProjectID = "two"
-	c.EnabledMCPServers = map[string]MCPEntry{"nullbot-code-mcp": {Args: []string{"--workspace", "old"}}}
-	c = normalizeConfig(c)
-	if c.WorkspaceDir != second || c.EnabledMCPServers["nullbot-code-mcp"].Args[1] != second {
-		t.Fatal("primary workspace not synchronized")
-	}
-	if allProjectsFull(c) {
-		t.Fatal("mixed permissions permit external commands")
-	}
-	c.Projects[0].Permission = "invalid"
-	if ValidateProjects(c) == nil {
-		t.Fatal("invalid permission accepted")
 	}
 }

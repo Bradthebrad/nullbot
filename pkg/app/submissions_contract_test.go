@@ -48,9 +48,12 @@ func TestSubmissionPauseDedupQueueRemovalAndHistoryCAS(t *testing.T) {
 		t.Fatal("stale compaction overwrote history")
 	}
 	completed.Reply.Message = "mutated"
-	completed.Reply.History = nil
-	if got := waitSubmission(t, a, first.ID); got.Reply.Message != "done" || len(got.Reply.History) == 0 {
+	if got := waitSubmission(t, a, first.ID); got.Reply.Message != "done" {
 		t.Fatal("snapshot aliases stored reply")
+	}
+	// Retained jobs keep a slim reply; history has a single owner (the App).
+	if got := waitSubmission(t, a, first.ID); len(got.Reply.History) != 0 {
+		t.Fatal("retained job copied conversation history")
 	}
 }
 

@@ -23,8 +23,6 @@ type runtimeBundle struct {
 	closers []func() error
 }
 
-const mcpDiscoveryTimeout = 5 * time.Second
-
 func (a *App) runAgent(ctx context.Context, skillHints []string) Reply {
 	workCtx, taskID := a.beginWork(ctx)
 	var final string
@@ -344,6 +342,7 @@ func subagentSystemPrompt(config Config, name, task string, tools []tcagent.Tool
 	if root, err := workspaceRoot(config); err == nil {
 		fmt.Fprintf(&b, "Configured workspace: %s\n", root)
 	}
+	b.WriteString(projectsPrompt(config))
 	if len(tools) > 0 {
 		b.WriteString("Available tools:\n")
 		for _, tool := range tools {
@@ -370,6 +369,31 @@ func subagentSystemPrompt(config Config, name, task string, tools []tcagent.Tool
 		}
 	}
 	return strings.TrimSpace(prompt)
+}
+
+// projectsPrompt tells the model which directories it may use and what each
+// permits, so it plans within them instead of discovering denials by trial.
+func projectsPrompt(config Config) string {
+	projects := effectiveProjects(config)
+	if len(projects) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("Projects and permissions (enforced on every tool call, including MCP tools):\n")
+	for _, p := range projects {
+		marker := ""
+		if p.ID == config.PrimaryProjectID {
+			marker = " [primary: relative paths and tools that take no path run here]"
+		}
+		caps := ProjectCapabilities(p)
+		names := make([]string, len(caps))
+		for i, c := range caps {
+			names[i] = string(c)
+		}
+		fmt.Fprintf(&b, "- %s: %s (allows %s)%s\n", projectDisplayName(p), p.Path, strings.Join(names, ", "), marker)
+	}
+	b.WriteString("Paths outside these projects are denied. If a call is denied with \"permission denied\", do not retry it; tell the user which project permission would allow it.\n")
+	return b.String()
 }
 
 func runtimeAgentName(ctx context.Context) string {
@@ -570,43 +594,14 @@ func loadSkills(config Config) ([]tcagent.Skill, error) {
 	return skills, nil
 }
 
+// loadMCPTools returns tools from the shared MCP session pool. Servers start
+// on first use and stay running across turns; every call is authorized
+// against project permissions when it runs. The closers slice is kept for
+// callers that predate the pool and is always empty.
 func (a *App) loadMCPTools(ctx context.Context, config Config) ([]tcagent.Tool, []func() error) {
-	var tools []tcagent.Tool
-	var closers []func() error
-	if !allProjectsFull(config) {
-		return tools, closers
-	}
-	for id, entry := range config.EnabledMCPServers {
-		if !entry.Enabled {
-			continue
-		}
-		entry.Env = mcpRuntimeEnv(config, id, entry)
-		loadCtx, cancel := context.WithTimeout(ctx, mcpDiscoveryTimeout)
-		a.logInfo("mcp load start", "id", id, "transport", entry.Transport, "command", entry.Command)
-		client, err := mcpClientForEntry(ctx, entry)
-		if err != nil {
-			cancel()
-			a.logError("mcp connect failed", "id", id, "error", err)
-			continue
-		}
-		if _, err := client.Initialize(loadCtx); err != nil {
-			cancel()
-			_ = client.Close()
-			a.logError("mcp initialize failed", "id", id, "error", err)
-			continue
-		}
-		discovered, err := mcp.AgentTools(loadCtx, client)
-		cancel()
-		if err != nil {
-			_ = client.Close()
-			a.logError("mcp tools/list failed", "id", id, "error", err)
-			continue
-		}
-		a.logInfo("mcp load done", "id", id, "tools", len(discovered))
-		tools = append(tools, guardExternalTools(a, discovered)...)
-		closers = append(closers, client.Close)
-	}
-	return tools, closers
+	waitCtx, cancel := context.WithTimeout(ctx, mcpStartTimeout)
+	defer cancel()
+	return a.mcp().Tools(waitCtx, config), nil
 }
 
 func mcpRuntimeEnv(config Config, id string, entry MCPEntry) map[string]string {
@@ -729,6 +724,7 @@ func baseSystemPrompt(config Config, skillHints []string, tools []tcagent.Tool, 
 	if root, err := workspaceRoot(config); err == nil {
 		fmt.Fprintf(&b, "Configured workspace: %s\n", root)
 	}
+	b.WriteString(projectsPrompt(config))
 	fmt.Fprintf(&b, "You may spawn up to %d concurrent named subagents with `spawn_subagent` when decomposition helps. `spawn_subagent` returns a task id immediately; use `subagent_wait` or `subagent_status` to collect results before synthesizing. Give each subagent a narrow task. Subagents use `%s/%s` unless configured otherwise.\n", config.Agent.MaxSubagents, config.SubagentModel.Provider, config.SubagentModel.Model)
 	b.WriteString("Available built-in tools are constrained to NullBot app data and configured workspace browsing: listing config-directory files, reading small config-directory text files, listing skills, reading installed skill markdown progressively with `skill_read`, creating SKILL.md files under the configured skills directory, listing/reading/updating saved JSON plans, refreshing/listing/installing market packages, enabling/disabling/removing installed MCP servers, listing configured MCP servers, summarizing recent visible chat history, reading compact persisted session history, and reading recent NullBot runtime log lines.\n")
 	if len(tools) > 0 {

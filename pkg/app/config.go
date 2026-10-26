@@ -209,6 +209,19 @@ func loadOrInit(config Config) (Config, error) {
 	if err := json.Unmarshal(data, &config); err != nil {
 		return Config{}, err
 	}
+	// The defaults filled in the new ratios before the file was read; a file
+	// from before they existed must not keep them over its own threshold.
+	var raw struct {
+		Compaction map[string]json.RawMessage `json:"compaction"`
+	}
+	if json.Unmarshal(data, &raw) == nil && raw.Compaction != nil {
+		if _, ok := raw.Compaction["summarize_ratio"]; !ok {
+			config.Compaction.SummarizeRatio = 0
+		}
+		if _, ok := raw.Compaction["shorten_ratio"]; !ok {
+			config.Compaction.ShortenRatio = 0
+		}
+	}
 	config = normalizeConfig(config)
 	if config.AppDir == "" {
 		config.AppDir = DefaultAppDir(config.BrandPrefix)
@@ -273,10 +286,16 @@ func normalizeCompaction(c CompactionConfig) CompactionConfig {
 	if c.ToolDigestChars <= 0 {
 		c.ToolDigestChars = 600
 	}
-	for key, tokens := range c.ContextWindows {
-		if tokens < 1024 || strings.TrimSpace(key) == "" {
-			delete(c.ContextWindows, key)
+	// Build a new map: configs are copied by value, so the map is shared
+	// with running agents and must never be changed in place.
+	if len(c.ContextWindows) > 0 {
+		windows := make(map[string]int, len(c.ContextWindows))
+		for key, tokens := range c.ContextWindows {
+			if tokens >= 1024 && strings.TrimSpace(key) != "" {
+				windows[key] = tokens
+			}
 		}
+		c.ContextWindows = windows
 	}
 	return c
 }

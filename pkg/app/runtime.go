@@ -192,6 +192,9 @@ func (a *App) buildRuntime(ctx context.Context, skillHints []string) (*runtimeBu
 	if err != nil {
 		return nil, err
 	}
+	// Usage and learned context sizes belong to the model this run uses,
+	// even if the setting changes while it runs.
+	runModel := effectiveModelConfig(config, config.Model)
 
 	skills, err := loadSkills(config)
 	if err != nil {
@@ -211,7 +214,7 @@ func (a *App) buildRuntime(ctx context.Context, skillHints []string) (*runtimeBu
 			Tools:         tools,
 			Skills:        skills,
 			MaxIterations: config.Agent.MaxIterations,
-			Callbacks:     callbacks.SinkFunc(func(event callbacks.Event) { a.handleScopedCallback(ctx, event) }),
+			Callbacks:     callbacks.SinkFunc(func(event callbacks.Event) { a.handleRunCallback(ctx, event, runModel) }),
 			Context:       agentContextPolicy(config, config.Model),
 		}),
 		closers: closers,
@@ -408,6 +411,12 @@ func (a *App) handleAgentCallback(event callbacks.Event) {
 }
 
 func (a *App) handleScopedCallback(ctx context.Context, event callbacks.Event) {
+	a.handleRunCallback(ctx, event, ModelConfig{})
+}
+
+// handleRunCallback records a callback from a run of model. An empty model
+// means the configured one.
+func (a *App) handleRunCallback(ctx context.Context, event callbacks.Event, model ModelConfig) {
 	record := activityRecordFromCallback(event)
 	scopeActivity(ctx, &record)
 	a.mu.Lock()
@@ -423,7 +432,10 @@ func (a *App) handleScopedCallback(ctx context.Context, event callbacks.Event) {
 		a.addTaskUsage(taskID, usageFromLLMEnd(event))
 	}
 	a.retainPublicCallback(ctx, taskID, event)
-	a.recordUsageCallback(taskID, runtimeAgentName(ctx), effectiveModelConfig(config, config.Model), event)
+	if strings.TrimSpace(model.Model) == "" {
+		model = effectiveModelConfig(config, config.Model)
+	}
+	a.recordUsageCallback(taskID, runtimeAgentName(ctx), model, event)
 	if record.Status == "reasoning" && record.Lane != "also" {
 		a.recordVisibleReasoning(record)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -33,6 +34,7 @@ func (a *App) CompactConversation(ctx context.Context, focus string) (Compaction
 	}
 	config := a.config
 	history := append([]Message(nil), a.history...)
+	session := a.sessionID
 	a.mu.Unlock()
 
 	var messages []lc.BaseMessage
@@ -83,14 +85,12 @@ func (a *App) CompactConversation(ctx context.Context, focus string) (Compaction
 	}
 	var parts []string
 	for _, msg := range next {
-		if msg.Type == lc.RoleSystem {
-			parts = append(parts, strings.TrimSpace(lcContentText(msg.Content)))
-		}
+		parts = append(parts, strings.TrimSpace(lcContentText(msg.Content)))
 	}
 	record := Message{Role: compactionRole, Content: strings.Join(parts, "\n\n"), Time: time.Now().UTC()}
 
 	a.mu.Lock()
-	if a.busyLocked() || len(a.history) != len(history) {
+	if a.busyLocked() || a.sessionID != session || !reflect.DeepEqual(a.history, history) {
 		a.mu.Unlock()
 		return CompactionResult{}, errors.New("the conversation changed while it was being compacted; compact again")
 	}

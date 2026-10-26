@@ -3,9 +3,13 @@ package app
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	tcagent "github.com/Bradthebrad/tinychain/agent"
 	"github.com/Bradthebrad/tinychain/callbacks"
@@ -235,5 +239,86 @@ func TestContextWindowOverrideIsSetAndCleared(t *testing.T) {
 	}
 	if w := a.ContextWindowFor("anthropic", cfg.Model.Model); w.Source == "override" {
 		t.Fatalf("override not cleared: %+v", w)
+	}
+}
+
+func TestOldThresholdMigratesWhenLoadedFromDisk(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"app_dir":`+strconv.Quote(dir)+`,"compaction":{"enabled":true,"threshold_ratio":0.5}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultConfig()
+	cfg.AppDir = dir
+	loaded, err := loadOrInit(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := loaded.Compaction; c.SummarizeRatio != 0.5 || c.ShortenRatio >= 0.5 {
+		t.Fatalf("customized threshold lost on load: %+v", c)
+	}
+}
+
+func TestNormalizingNeverChangesASharedMap(t *testing.T) {
+	shared := map[string]int{"openai/a": 500, "openai/b": 90000}
+	c := normalizeCompaction(CompactionConfig{ContextWindows: shared})
+	if len(shared) != 2 || len(c.ContextWindows) != 1 {
+		t.Fatalf("shared %v, normalized %v", shared, c.ContextWindows)
+	}
+}
+
+type failingSummary struct{}
+
+func (failingSummary) Call(_ context.Context, _ []lc.BaseMessage, tools []tcagent.Tool) (lc.BaseMessage, error) {
+	if len(tools) == 0 {
+		return lc.BaseMessage{}, fmt.Errorf("401 unauthorized")
+	}
+	return lc.AI("ok"), nil
+}
+
+func TestCompactSavesNothingWhenTheModelFails(t *testing.T) {
+	a := New(contextTestConfig(t))
+	a.modelFactory = func(Config, bool) (tcagent.Model, error) { return failingSummary{}, nil }
+	a.mu.Lock()
+	a.history = []Message{{Role: "user", Content: "hi"}, {Role: "assistant", Content: "hello"}}
+	a.mu.Unlock()
+	if _, err := a.CompactConversation(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("err %v", err)
+	}
+	for _, msg := range a.State().History {
+		if msg.Role == compactionRole {
+			t.Fatal("a compaction was saved although the summary failed")
+		}
+	}
+}
+
+// switchingModel opens another session while it summarizes.
+type switchingModel struct{ app *App }
+
+func (m switchingModel) Call(_ context.Context, _ []lc.BaseMessage, tools []tcagent.Tool) (lc.BaseMessage, error) {
+	m.app.mu.Lock()
+	m.app.sessionID = "another-session"
+	m.app.mu.Unlock()
+	return lc.AI("SUMMARY"), nil
+}
+
+func TestCompactDoesNotLandInAnotherSession(t *testing.T) {
+	a := New(contextTestConfig(t))
+	a.modelFactory = func(Config, bool) (tcagent.Model, error) { return switchingModel{app: a}, nil }
+	a.mu.Lock()
+	a.history = []Message{{Role: "user", Content: "hi"}, {Role: "assistant", Content: "hello"}}
+	a.mu.Unlock()
+	if _, err := a.CompactConversation(context.Background(), ""); err == nil {
+		t.Fatal("compaction applied to the session opened meanwhile")
+	}
+}
+
+func TestOldLearnedSizesExpire(t *testing.T) {
+	cfg := contextTestConfig(t)
+	key := ModelKey(cfg.Model.Provider, cfg.Model.Model)
+	windowStore.Lock()
+	windowStore.loaded[contextWindowsPath(cfg)] = map[string]savedWindow{key: {ContextWindow: ContextWindow{Tokens: 50000, Source: "learned"}, Time: time.Now().Add(-8 * 24 * time.Hour)}}
+	windowStore.Unlock()
+	if w := ResolveContextWindow(cfg, cfg.Model); w.Tokens != 200000 {
+		t.Fatalf("an old learned size still applies: %+v", w)
 	}
 }

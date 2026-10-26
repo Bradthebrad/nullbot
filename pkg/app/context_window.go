@@ -73,7 +73,11 @@ func ResolveContextWindow(config Config, model ModelConfig) ContextWindow {
 		return ContextWindow{Tokens: tokens, Source: "override", Detail: "Set in Settings"}
 	}
 	if saved, ok := savedContextWindows(config)[key]; ok && saved.Tokens > 0 {
-		return saved.ContextWindow
+		// An old learned size gives way to the family's size; the provider's
+		// list or the next error will correct it again.
+		if saved.Source != "learned" || time.Since(saved.Time) < learnedWindowTTL {
+			return saved.ContextWindow
+		}
 	}
 	if tokens := builtinWindow(model.Model); tokens > 0 {
 		return ContextWindow{Tokens: tokens, Source: "built-in", Detail: "Typical for this model family"}
@@ -105,9 +109,12 @@ func savedContextWindows(config Config) map[string]savedWindow {
 	if strings.TrimSpace(config.AppDir) == "" {
 		return nil
 	}
-	path := contextWindowsPath(config)
 	windowStore.Lock()
 	defer windowStore.Unlock()
+	return loadWindowsLocked(contextWindowsPath(config))
+}
+
+func loadWindowsLocked(path string) map[string]savedWindow {
 	if cached, ok := windowStore.loaded[path]; ok {
 		return cached
 	}
@@ -119,63 +126,57 @@ func savedContextWindows(config Config) map[string]savedWindow {
 	return out
 }
 
-// recordContextWindows saves sizes a provider reported. A size learned from
-// an error is kept over a reported one only while the reported one is larger
-// than what the provider actually accepted.
-func recordContextWindows(config Config, provider string, sizes map[string]int, source, detail string) {
+// learnedWindowTTL is how long a size named in an error is trusted over the
+// provider's own figure. OpenRouter, for one, names the limit of whichever
+// endpoint served the request, which may be smaller than the model's.
+const learnedWindowTTL = 7 * 24 * time.Hour
+
+// recordContextWindows saves sizes and reports whether anything changed.
+// A recent learned size is kept over a larger reported one: it is what the
+// provider actually accepted.
+func recordContextWindows(config Config, provider string, sizes map[string]int, source, detail string) bool {
 	if len(sizes) == 0 || strings.TrimSpace(config.AppDir) == "" {
-		return
-	}
-	current := savedContextWindows(config)
-	pending := false
-	for model, tokens := range sizes {
-		if old, ok := current[ModelKey(provider, model)]; tokens >= 1024 && (!ok || old.Tokens != tokens || old.Source != source) {
-			pending = true
-			break
-		}
-	}
-	if !pending {
-		return
+		return false
 	}
 	path := contextWindowsPath(config)
 	windowStore.Lock()
 	defer windowStore.Unlock()
-	next := make(map[string]savedWindow, len(current)+len(sizes))
-	for key, value := range current {
-		next[key] = value
-	}
-	changed := false
+	current := loadWindowsLocked(path)
 	now := time.Now().UTC()
+	var next map[string]savedWindow
 	for model, tokens := range sizes {
 		if tokens < 1024 {
 			continue
 		}
 		key := ModelKey(provider, model)
-		old, exists := next[key]
+		old, exists := current[key]
 		if exists && old.Tokens == tokens && old.Source == source {
 			continue
 		}
-		if exists && old.Source == "learned" && source == "provider" && old.Tokens < tokens {
+		if exists && old.Source == "learned" && source == "provider" && old.Tokens < tokens && now.Sub(old.Time) < learnedWindowTTL {
 			continue
 		}
+		if next == nil {
+			next = make(map[string]savedWindow, len(current)+len(sizes))
+			for k, v := range current {
+				next[k] = v
+			}
+		}
 		next[key] = savedWindow{ContextWindow: ContextWindow{Tokens: tokens, Source: source, Detail: detail}, Time: now}
-		changed = true
 	}
-	if !changed {
-		return
+	if next == nil {
+		return false
 	}
 	windowStore.loaded[path] = next
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err == nil {
+		if data, err := json.MarshalIndent(next, "", "  "); err == nil {
+			tmp := path + ".tmp"
+			if err := os.WriteFile(tmp, data, 0o600); err == nil {
+				_ = os.Rename(tmp, path)
+			}
+		}
 	}
-	data, err := json.MarshalIndent(next, "", "  ")
-	if err != nil {
-		return
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err == nil {
-		_ = os.Rename(tmp, path)
-	}
+	return true
 }
 
 // learnContextWindow keeps a size a provider named in a context-length error.
@@ -184,8 +185,9 @@ func (a *App) learnContextWindow(model ModelConfig, tokens int) {
 	config := a.config
 	a.mu.Unlock()
 	model = effectiveModelConfig(config, model)
-	recordContextWindows(config, model.Provider, map[string]int{model.Model: tokens}, "learned", "Named by the provider in an error")
-	a.logInfo("context window learned", "model", ModelKey(model.Provider, model.Model), "tokens", tokens)
+	if recordContextWindows(config, model.Provider, map[string]int{model.Model: tokens}, "learned", "Named by the provider in an error") {
+		a.logInfo("context window learned", "model", ModelKey(model.Provider, model.Model), "tokens", tokens)
+	}
 }
 
 // ContextWindowFor reports the context size NullBot plans for with a model.
@@ -217,14 +219,17 @@ func (a *App) SetContextWindowOverride(provider, model string, tokens int) error
 	}
 	key := ModelKey(provider, model)
 	return a.UpdateConfig(func(config *Config) {
+		// A new map: the old one is shared with running agents.
+		windows := make(map[string]int, len(config.Compaction.ContextWindows)+1)
+		for k, v := range config.Compaction.ContextWindows {
+			windows[k] = v
+		}
 		if tokens == 0 {
-			delete(config.Compaction.ContextWindows, key)
-			return
+			delete(windows, key)
+		} else {
+			windows[key] = tokens
 		}
-		if config.Compaction.ContextWindows == nil {
-			config.Compaction.ContextWindows = map[string]int{}
-		}
-		config.Compaction.ContextWindows[key] = tokens
+		config.Compaction.ContextWindows = windows
 	})
 }
 

@@ -196,6 +196,16 @@ func (a *App) ContextWindowFor(provider, model string) ContextWindow {
 	return ResolveContextWindow(config, ModelConfig{Provider: provider, Model: model})
 }
 
+// BaseContextWindowFor reports the size a model would get without your
+// override: what its provider reported, what was learned, or its family's.
+func (a *App) BaseContextWindowFor(provider, model string) ContextWindow {
+	a.mu.Lock()
+	config := a.config
+	a.mu.Unlock()
+	config.Compaction.ContextWindows = nil
+	return ResolveContextWindow(config, ModelConfig{Provider: provider, Model: model})
+}
+
 // SetContextWindowOverride sets the context size used for a model. Zero
 // removes the override, so the reported or typical size applies again.
 func (a *App) SetContextWindowOverride(provider, model string, tokens int) error {

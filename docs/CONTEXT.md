@@ -10,7 +10,7 @@ NullBot looks up the selected model's window, in this order:
 
 | Source | Where it comes from |
 | --- | --- |
-| Your override | Settings → Models, saved as `compaction.context_windows["provider/model"]`. |
+| Your override | Settings → Agent, under each model, saved as `compaction.context_windows["provider/model"]`. |
 | Provider | The size the provider's model list reports: Anthropic (`max_input_tokens`), OpenRouter (`context_length`) and Codex (`context_window`). Saved in `models/context_windows.json`, so it is known offline and after a restart. OpenAI's model list doesn't report sizes. |
 | Learned | A context-length error that names the real limit ("maximum context length is 128000 tokens"). Used for the rest of the request and saved. |
 | Built-in | The documented size of the model family: Claude 200,000; GPT-5 272,000 (input); GPT-4.1 1,047,576; GPT-4o 128,000; o-series 200,000; Gemini 2.5 1,048,576. |
@@ -72,5 +72,6 @@ Settings → Agent → Context:
 | Size for an unknown model | `compaction.approx_token_limit` | 64,000 |
 | What summaries should keep | `compaction.default_focus` | — |
 
-A model's window can be overridden in Settings → Models. `threshold_ratio`, the
-former single threshold, becomes `summarize_ratio` if you had changed it.
+A model's window can be overridden in Settings → Agent, under the manager and
+subagent models; Settings → Models shows each model's window. `threshold_ratio`,
+the former single threshold, becomes `summarize_ratio` if you had changed it.

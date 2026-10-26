@@ -700,7 +700,7 @@ func (a *App) langChainHistory() []lc.BaseMessage {
 	start := len(a.history) - limit
 	messages := make([]lc.BaseMessage, 0, limit)
 	for _, msg := range a.history[start:] {
-		if msg.Lane == "also" || msg.VisibleOnly || strings.HasPrefix(strings.TrimSpace(msg.Content), "/") {
+		if msg.Lane == "also" || msg.VisibleOnly || isCommandMessage(msg.Content) {
 			continue
 		}
 		switch msg.Role {

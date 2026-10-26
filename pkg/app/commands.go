@@ -55,6 +55,13 @@ func (a *App) Execute(ctx context.Context, input string) Reply {
 	if trimmed == "" {
 		return a.reply("Type a message or slash command.", "", "")
 	}
+	ctx, rest, err := withSkillInvocation(ctx, a.Config(), trimmed)
+	if err != nil {
+		return a.reply(err.Error(), "", "")
+	}
+	if rest != trimmed {
+		input, trimmed = rest, rest
+	}
 	if strings.HasPrefix(trimmed, "/") {
 		return a.executeSlash(ctx, trimmed)
 	}
@@ -246,6 +253,14 @@ func inlineSkillHints(input string) []string {
 		}
 	}
 	return hints
+}
+
+// isCommandMessage reports whether a message is a built-in slash command,
+// which is UI control rather than conversation. Messages that merely start
+// with a slash, such as a path, are conversation.
+func isCommandMessage(content string) bool {
+	fields := strings.Fields(content)
+	return len(fields) > 0 && isSlashCommand(fields[0])
 }
 
 func isSlashCommand(token string) bool {

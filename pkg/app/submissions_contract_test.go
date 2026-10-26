@@ -124,7 +124,7 @@ func TestSubmissionSteerTargetAndSelectedSkills(t *testing.T) {
 	}
 	first := a.SubmitRouted(context.Background(), "begin", "send")
 	awaitSignal(t, started)
-	ctx := context.WithValue(context.Background(), selectedSkillsKey{}, "selected skill payload")
+	ctx := context.WithValue(context.Background(), selectedSkillsKey{}, selectedSkills{blocks: []string{"selected skill payload"}})
 	if r := a.SubmitRoutedRequest(ctx, "correct course", "steer", "wrong", "other-job"); r.Status != "rejected" {
 		t.Fatal(r)
 	}

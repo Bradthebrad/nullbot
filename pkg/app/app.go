@@ -245,6 +245,10 @@ func (a *App) Submit(ctx context.Context, input string) Reply {
 }
 
 func (a *App) SubmitWithActivity(ctx context.Context, input string, sink func(ActivityRecord)) Reply {
+	ctx, input, err := withSkillInvocation(ctx, a.Config(), input)
+	if err != nil {
+		return a.reply(err.Error(), "", "")
+	}
 	if strings.HasPrefix(strings.TrimSpace(input), "/") {
 		return a.submitDirect(ctx, input, sink)
 	}

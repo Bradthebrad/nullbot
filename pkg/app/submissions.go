@@ -155,6 +155,10 @@ func (a *App) enqueueSubmissionWith(ctx context.Context, input, mode string, sin
 	if strings.TrimSpace(input) == "" {
 		return reject("Message is empty")
 	}
+	ctx, input, err := withSkillInvocation(ctx, a.Config(), input)
+	if err != nil {
+		return reject(err.Error())
+	}
 	if strings.HasPrefix(strings.TrimSpace(input), "/") {
 		return reject("Use the command API for slash commands")
 	}

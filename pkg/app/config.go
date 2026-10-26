@@ -74,6 +74,10 @@ type EditorConfig struct {
 type UIConfig struct {
 	Theme                 string `json:"theme"`
 	SuggestMatchingSkills bool   `json:"suggest_matching_skills"`
+	// Appearance is system, light or dark (desktop UI). Accent names the
+	// signal color used for live state and focus.
+	Appearance string `json:"appearance,omitempty"`
+	Accent     string `json:"accent,omitempty"`
 }
 
 type MCPEntry struct {

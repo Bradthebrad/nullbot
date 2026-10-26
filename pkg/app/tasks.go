@@ -425,6 +425,7 @@ func activityRecordFromCallback(event callbacks.Event) ActivityRecord {
 	case callbacks.EventChatModelStart:
 		record.Status = "model start"
 		record.Detail = fmt.Sprintf("messages=%d", callbackMessageCount(event))
+		record.Context = contextFields(event.Data.Extra)
 	case callbacks.EventLLMCommentary:
 		record.Status = "commentary"
 		record.Detail = event.Data.Token
@@ -450,6 +451,9 @@ func activityRecordFromCallback(event callbacks.Event) ActivityRecord {
 	case callbacks.EventToolEnd:
 		record.Status = "tool complete"
 		applyToolFields(&record, event)
+		if guard, ok := event.Data.Extra["context_guard"].(map[string]any); ok {
+			record.Context = guard
+		}
 		record.Detail = "Tool call complete."
 		if event.Data.Output != nil {
 			text := fmt.Sprint(event.Data.Output)
@@ -459,20 +463,30 @@ func activityRecordFromCallback(event callbacks.Event) ActivityRecord {
 	case callbacks.EventToolError:
 		record.Status = "tool error"
 		applyToolFields(&record, event)
+		if guard, ok := event.Data.Extra["context_guard"].(map[string]any); ok {
+			record.Context = guard
+		}
 		record.Error = truncate(event.Data.Error, 2000)
 		record.Detail = "error: " + event.Data.Error
 	case callbacks.EventChainStart:
 		if event.Name == "context_compaction" {
 			record.Status = "context compact start"
-			record.Detail = compactAny(event.Data.Extra, 220)
+			record.Context = contextFields(event.Data.Extra)
+			record.Detail = fmt.Sprintf("Summarizing %v earlier messages at about %s tokens.", event.Data.Extra["old_messages"], tokenText(event.Data.Extra["context_tokens"]))
 		} else {
 			record.Status = "chain start"
 		}
 	case callbacks.EventChainEnd:
-		if event.Name == "context_compaction" {
+		switch event.Name {
+		case "context_compaction":
 			record.Status = "context compact complete"
-			record.Detail = compactAny(event.Data.Extra, 220)
-		} else {
+			record.Context = contextFields(event.Data.Extra)
+			record.Detail = fmt.Sprintf("Summarized %v earlier messages: %s → %s tokens.", event.Data.Extra["summarized"], tokenText(event.Data.Extra["before_tokens"]), tokenText(event.Data.Extra["after_tokens"]))
+		case "context_shorten":
+			record.Status = "context shortened"
+			record.Context = contextFields(event.Data.Extra)
+			record.Detail = fmt.Sprintf("Shortened %v earlier tool results: %s → %s tokens.", event.Data.Extra["shortened"], tokenText(event.Data.Extra["before_tokens"]), tokenText(event.Data.Extra["after_tokens"]))
+		default:
 			record.Status = "chain complete"
 		}
 	case callbacks.EventChainError:
@@ -482,6 +496,30 @@ func activityRecordFromCallback(event callbacks.Event) ActivityRecord {
 		record.Status = string(event.Event)
 	}
 	return record
+}
+
+// contextFields keeps the numeric context measurements of a callback.
+func contextFields(extra map[string]any) map[string]any {
+	if extra == nil {
+		return nil
+	}
+	out := map[string]any{}
+	for _, key := range []string{"context_tokens", "context_window", "context_ratio", "tool_tokens", "shorten_at", "summarize_at", "learned_window", "before_tokens", "after_tokens", "shortened", "summarized", "old_messages", "recent_messages", "force"} {
+		if value, ok := extra[key]; ok {
+			out[key] = value
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func tokenText(value any) string {
+	if n, ok := value.(int); ok {
+		return formatTokens(n)
+	}
+	return fmt.Sprint(value)
 }
 
 const (

@@ -20,6 +20,10 @@ type ModelOption struct {
 	Responses        bool   `json:"responses"`
 	APIKeyEnv        string `json:"api_key_env"`
 	OpenAICompatible bool   `json:"openai_compatible,omitempty"`
+	// ContextWindow is the size NullBot plans for with this model, and
+	// ContextSource where it came from (see ContextWindow.Source).
+	ContextWindow int    `json:"context_window,omitempty"`
+	ContextSource string `json:"context_source,omitempty"`
 }
 
 type ModelGroup struct {
@@ -142,11 +146,11 @@ func DiscoverModelGroups(ctx context.Context, config Config) []ModelGroup {
 		{Provider: "openrouter", Models: staticProviderModels("openrouter")},
 	}
 	if CodexAuthPresent(config) {
-		models, err := FetchCodexModels(ctx, config)
+		models, err := FetchCodexModelInfo(ctx, config)
 		if err != nil {
 			groups[0].Error = err.Error()
 		} else if len(models) > 0 {
-			groups[0].Models = codexModelOptions(models)
+			groups[0].Models = codexModelInfoOptions(models)
 		}
 	}
 	if keys.OpenAI != "" {
@@ -157,6 +161,14 @@ func DiscoverModelGroups(ctx context.Context, config Config) []ModelGroup {
 			groups[1].Models = models
 		}
 	}
+	if keys.Anthropic != "" {
+		models, err := fetchAnthropicModels(ctx, keys.Anthropic)
+		if err != nil {
+			groups[2].Error = err.Error()
+		} else if len(models) > 0 {
+			groups[2].Models = models
+		}
+	}
 	if keys.OpenRouter != "" {
 		models, err := fetchOpenRouterModels(ctx, keys.OpenRouter)
 		if err != nil {
@@ -165,7 +177,71 @@ func DiscoverModelGroups(ctx context.Context, config Config) []ModelGroup {
 			groups[3].Models = models
 		}
 	}
+	for g := range groups {
+		reported := map[string]int{}
+		for _, model := range groups[g].Models {
+			if model.ContextWindow > 0 {
+				reported[model.ID] = model.ContextWindow
+			}
+		}
+		recordContextWindows(config, groups[g].Provider, reported, "provider", "Reported by "+providerTitle(groups[g].Provider))
+		for i, model := range groups[g].Models {
+			window := ResolveContextWindow(config, ModelConfig{Provider: model.Provider, Model: model.ID})
+			groups[g].Models[i].ContextWindow = window.Tokens
+			groups[g].Models[i].ContextSource = window.Source
+		}
+	}
 	return groups
+}
+
+func providerTitle(provider string) string {
+	switch provider {
+	case "openai":
+		return "OpenAI"
+	case "anthropic":
+		return "Anthropic"
+	case "openrouter":
+		return "OpenRouter"
+	case "codex":
+		return "Codex"
+	}
+	return provider
+}
+
+func fetchAnthropicModels(ctx context.Context, apiKey string) ([]ModelOption, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.anthropic.com/v1/models?limit=1000", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("x-api-key", apiKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
+	var resp struct {
+		Data []struct {
+			ID             string `json:"id"`
+			DisplayName    string `json:"display_name"`
+			MaxInputTokens int    `json:"max_input_tokens"`
+		} `json:"data"`
+	}
+	if err := doJSON(req, &resp); err != nil {
+		return nil, err
+	}
+	models := make([]ModelOption, 0, len(resp.Data))
+	for _, model := range resp.Data {
+		if strings.TrimSpace(model.ID) == "" {
+			continue
+		}
+		models = append(models, ModelOption{
+			Provider:      "anthropic",
+			ID:            model.ID,
+			Name:          firstNonEmpty(model.DisplayName, model.ID),
+			Description:   "Anthropic model.",
+			Reasoning:     !strings.HasPrefix(model.ID, "claude-3"),
+			APIKeyEnv:     "ANTHROPIC_API_KEY",
+			ContextWindow: model.MaxInputTokens,
+		})
+	}
+	sortModels(models)
+	return models, nil
 }
 
 func codexModelOptions(ids []string) []ModelOption {
@@ -185,6 +261,20 @@ func codexModelOptions(ids []string) []ModelOption {
 		})
 	}
 	sortModels(out)
+	return out
+}
+
+func codexModelInfoOptions(models []CodexModelInfo) []ModelOption {
+	ids := make([]string, 0, len(models))
+	windows := map[string]int{}
+	for _, model := range models {
+		ids = append(ids, model.Slug)
+		windows[model.Slug] = model.ContextWindow
+	}
+	out := codexModelOptions(ids)
+	for i := range out {
+		out[i].ContextWindow = windows[out[i].ID]
+	}
 	return out
 }
 
@@ -261,9 +351,13 @@ func fetchOpenRouterModels(ctx context.Context, apiKey string) ([]ModelOption, e
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	var resp struct {
 		Data []struct {
-			ID          string `json:"id"`
-			Name        string `json:"name"`
-			Description string `json:"description"`
+			ID            string `json:"id"`
+			Name          string `json:"name"`
+			Description   string `json:"description"`
+			ContextLength int    `json:"context_length"`
+			TopProvider   struct {
+				ContextLength int `json:"context_length"`
+			} `json:"top_provider"`
 		} `json:"data"`
 	}
 	if err := doJSON(req, &resp); err != nil {
@@ -279,10 +373,20 @@ func fetchOpenRouterModels(ctx context.Context, apiKey string) ([]ModelOption, e
 			Reasoning:        strings.Contains(strings.ToLower(model.ID), "gpt-5") || strings.Contains(strings.ToLower(model.ID), "reason"),
 			OpenAICompatible: true,
 			APIKeyEnv:        "OPENROUTER_API_KEY",
+			ContextWindow:    firstPositive(model.TopProvider.ContextLength, model.ContextLength),
 		})
 	}
 	sortModels(models)
 	return models, nil
+}
+
+func firstPositive(values ...int) int {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 func doJSON(req *http.Request, out any) error {

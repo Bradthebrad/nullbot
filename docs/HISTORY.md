@@ -5,7 +5,7 @@ app folder:
 
 | File | What it holds |
 | --- | --- |
-| `history/<session>.jsonl` | Every message, one per line: requests, answers, public reasoning summaries, commentary and steering. Never trimmed. |
+| `history/<session>.jsonl` | Every message, one per line: requests, answers, public reasoning summaries, commentary, steering and compaction summaries (role `compaction`). Never trimmed. |
 | `history/activity/<session>.jsonl` | Every finished tool call: tool, server, arguments, a preview of the result (about 2,000 characters) or the error, how long it took, which agent ran it, and the permission decision. Model errors too. |
 | `artifacts/<session>-assistant-<time>.md` | Each answer as its own Markdown file. |
 
@@ -25,3 +25,6 @@ All four are read-only and work in any project.
 
 The desktop app's History view uses the same search, with filters for time
 and for messages or tool calls.
+
+How much of the conversation each new request carries, and how a long request
+is kept inside the model's window, is described in [CONTEXT.md](CONTEXT.md).

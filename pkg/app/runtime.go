@@ -212,7 +212,7 @@ func (a *App) buildRuntime(ctx context.Context, skillHints []string) (*runtimeBu
 			Skills:        skills,
 			MaxIterations: config.Agent.MaxIterations,
 			Callbacks:     callbacks.SinkFunc(func(event callbacks.Event) { a.handleScopedCallback(ctx, event) }),
-			Context:       agentContextPolicy(config),
+			Context:       agentContextPolicy(config, config.Model),
 		}),
 		closers: closers,
 	}, nil
@@ -315,7 +315,7 @@ func (a *App) executeSubagent(subCtx context.Context, taskID, name, task string)
 			}
 			a.appendActivity(record)
 		}),
-		Context: agentContextPolicy(config),
+		Context: agentContextPolicy(config, config.SubagentModel),
 	})
 	inbox, releaseInbox := a.workerInstructionInbox(subCtx, taskID)
 	defer releaseInbox()
@@ -543,32 +543,34 @@ func effectiveModelConfig(config Config, model ModelConfig) ModelConfig {
 	return model
 }
 
-func agentContextPolicy(config Config) tcagent.ContextPolicy {
-	compaction := config.Compaction
-	ratio := compaction.ThresholdRatio
-	if ratio <= 0 || ratio >= 1 {
-		ratio = 0.75
-	}
-	maxTokens := compaction.ApproxTokenLimit
-	if maxTokens <= 0 {
-		maxTokens = 64000
-	}
-	keepLast := compaction.KeepLastMessages
-	if keepLast <= 0 {
-		keepLast = 12
-	}
-	safetyChars := compaction.ToolResultCharLimit
-	if safetyChars <= 0 {
-		safetyChars = 12000
+// preservedTools are tools whose results are never shortened: a skill's
+// instructions must reach the model word for word.
+var preservedTools = []string{"skill_read"}
+
+// historyNote is added to every summary so the agent knows the original
+// messages are still on disk.
+const historyNote = "Everything summarized here is still saved: history_session_read reads this session's messages at full length, with the tool calls between them, and history_search searches every session."
+
+func agentContextPolicy(config Config, model ModelConfig) tcagent.ContextPolicy {
+	compaction := normalizeCompaction(config.Compaction)
+	window := ResolveContextWindow(config, model)
+	reserve := 0
+	if output := effectiveModelConfig(config, model).MaxTokens; output > 0 && output < window.Tokens/2 {
+		reserve = output
 	}
 	return tcagent.ContextPolicy{
 		Enabled:               compaction.Enabled,
-		MaxTokens:             maxTokens,
-		ThresholdRatio:        ratio,
-		ThresholdTokens:       int(float64(maxTokens) * ratio),
-		KeepLastMessages:      keepLast,
+		MaxTokens:             window.Tokens,
+		SoftRatio:             compaction.ShortenRatio,
+		HardRatio:             compaction.SummarizeRatio,
+		KeepLastMessages:      compaction.KeepLastMessages,
 		MaxMessages:           compaction.MessageCountLimit,
-		ToolResultSafetyChars: safetyChars,
+		ToolResultSafetyChars: compaction.ToolResultCharLimit,
+		ToolDigestChars:       compaction.ToolDigestChars,
+		PreserveTools:         preservedTools,
+		ReserveTokens:         reserve,
+		Focus:                 compaction.DefaultFocus,
+		Note:                  historyNote,
 	}
 }
 
@@ -690,27 +692,85 @@ func mcpClientForEntry(ctx context.Context, entry MCPEntry) (*mcp.Client, error)
 	}
 }
 
+// langChainHistory is the conversation sent with a new request. It starts
+// from the latest compaction summary, if any, and takes messages newest
+// first while they fit in HistoryRatio of the model's context window. When
+// older messages don't fit, a note tells the agent how to read them.
 func (a *App) langChainHistory() []lc.BaseMessage {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	limit := a.config.Compaction.KeepLastMessages
-	if limit <= 0 || limit > len(a.history) {
-		limit = len(a.history)
+	config := a.config
+	history := append([]Message(nil), a.history...)
+	session := a.sessionID
+	a.mu.Unlock()
+	return carriedHistory(config, history, session)
+}
+
+// compactionRole marks a summary made by Compact. Requests after it start
+// from the summary instead of the messages before it.
+const compactionRole = "compaction"
+
+func carriedHistory(config Config, history []Message, session string) []lc.BaseMessage {
+	compaction := normalizeCompaction(config.Compaction)
+	window := ResolveContextWindow(config, config.Model)
+	budget := int(float64(window.Tokens) * compaction.HistoryRatio)
+	start := 0
+	var summary string
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role == compactionRole {
+			start, summary = i+1, history[i].Content
+			break
+		}
 	}
-	start := len(a.history) - limit
-	messages := make([]lc.BaseMessage, 0, limit)
-	for _, msg := range a.history[start:] {
-		if msg.Lane == "also" || msg.VisibleOnly || isCommandMessage(msg.Content) {
+	var eligible []Message
+	for _, msg := range history[start:] {
+		if msg.Lane == "also" || msg.VisibleOnly || isCommandMessage(msg.Content) || (msg.Role != "user" && msg.Role != "assistant") {
 			continue
 		}
-		switch msg.Role {
-		case "assistant":
-			messages = append(messages, lc.AI(msg.Content))
-		default:
-			messages = append(messages, humanMessageWithAttachments(msg.Content, a.config))
-		}
+		eligible = append(eligible, msg)
 	}
-	return messages
+	picked := make([]lc.BaseMessage, 0, len(eligible))
+	used, first := 0, len(eligible)
+	for i := len(eligible) - 1; i >= 0; i-- {
+		message := carriedMessage(eligible[i], config)
+		tokens := tcagent.EstimateTokens([]lc.BaseMessage{message})
+		if used+tokens > budget && len(picked) > 0 {
+			break
+		}
+		used += tokens
+		picked = append(picked, message)
+		first = i
+	}
+	// A conversation sent to the model starts with a request.
+	for len(picked) > 0 && picked[len(picked)-1].Type != lc.RoleHuman {
+		picked = picked[:len(picked)-1]
+		first++
+	}
+	var out []lc.BaseMessage
+	if strings.TrimSpace(summary) != "" {
+		out = append(out, lc.System(summary))
+	}
+	if first > 0 {
+		out = append(out, lc.System(omittedHistoryNote(first, session)))
+	}
+	for i := len(picked) - 1; i >= 0; i-- {
+		out = append(out, picked[i])
+	}
+	return out
+}
+
+func carriedMessage(msg Message, config Config) lc.BaseMessage {
+	if msg.Role == "assistant" {
+		return lc.AI(msg.Content)
+	}
+	return humanMessageWithAttachments(msg.Content, config)
+}
+
+func omittedHistoryNote(count int, session string) string {
+	where := "this session"
+	if session != "" {
+		where = "session " + session
+	}
+	return fmt.Sprintf("%d earlier messages in this conversation are left out here to save room. They are saved: history_session_read reads them from %s (start at 0), and history_search finds anything said or done in any session.", count, where)
 }
 
 func baseSystemPrompt(config Config, skillHints []string, tools []tcagent.Tool, skills []tcagent.Skill) string {

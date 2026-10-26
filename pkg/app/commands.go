@@ -114,7 +114,7 @@ func (a *App) executeSlash(ctx context.Context, input string) Reply {
 	case "/analyze":
 		return a.reply(focused("Analysis panel opened", rest), name, "analyze")
 	case "/compact":
-		return a.compactCommand(strings.TrimSpace(rest))
+		return a.compactCommand(ctx, strings.TrimSpace(rest))
 	case "/init":
 		if err := EnsureAppDir(a.config); err != nil {
 			return a.reply("Init failed: "+err.Error(), name, "")

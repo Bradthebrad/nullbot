@@ -17,7 +17,8 @@ NullBot is designed to feel like a real local assistant without quietly becoming
 | Activity | Streams model and tool activity live into the activity panel so you can see what the bot is doing before the final answer lands. |
 | Config | Stores app settings in `~/.nullbot/config.json` and API keys in `~/.nullbot/api/keys.json`. |
 | Skills | Reads installed `SKILL.md` files and includes a built-in `create_skill` tool that can write one skill or a batch of skills into safe subdirectories. |
-| History | Persists chat history to `~/.nullbot/history`, keeps recent context compact, and lets the bot inspect recent or prior session history through constrained tools. |
+| History | Persists every message and tool call to `~/.nullbot/history`; agents search and read it with `history_search` and `history_session_read`. See [docs/HISTORY.md](docs/HISTORY.md). |
+| Context | Measures every request against the selected model's context window. Shortens tool results the model has read from 60% full, summarizes older messages from 85%, and cuts any tool result that wouldn't fit to a preview with its size. See [docs/CONTEXT.md](docs/CONTEXT.md). |
 | Logs | Writes runtime logs to `~/.nullbot/logs/nullbot.log` and exposes recent log lines to the bot through a constrained built-in tool. |
 | MCP | Lists configured MCP servers and cached market packages; external powers are expected to come from separate MCP binaries. |
 | Safety | No built-in arbitrary shell, code editing, email, browser, or broad filesystem access. Add those only through explicit MCP tooling. |

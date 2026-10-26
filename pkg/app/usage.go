@@ -109,7 +109,18 @@ func usagePath(config Config) string {
 
 func (a *App) recordUsageCallback(taskID, agentName string, model ModelConfig, event callbacks.Event) {
 	switch event.Event {
+	case callbacks.EventChainEnd:
+		// The summary call made by compaction isn't a model turn, so its usage
+		// arrives with the compaction event.
+		if event.Name == "context_compaction" {
+			if usage, ok := event.Data.Extra["summary_usage"].(*lc.UsageMetadata); ok && usage != nil {
+				a.recordUsageDirect(firstNonEmptyPlanValue(agentName, "agent")+" summary", model, nil, lc.BaseMessage{UsageMetadata: usage})
+			}
+		}
 	case callbacks.EventChatModelStart:
+		if learned, ok := event.Data.Extra["learned_window"].(int); ok && learned > 0 {
+			a.learnContextWindow(model, learned)
+		}
 		a.setTaskPendingInput(taskID, estimateMessagesTokens(event))
 	case callbacks.EventLLMEnd:
 		usage := usageFromLLMEnd(event)

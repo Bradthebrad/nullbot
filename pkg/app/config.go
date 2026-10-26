@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -49,14 +50,40 @@ type AgentConfig struct {
 	UseResponses  bool `json:"use_responses"`
 }
 
+// CompactionConfig controls how NullBot keeps requests inside each model's
+// context window. See docs/CONTEXT.md.
 type CompactionConfig struct {
-	Enabled             bool    `json:"enabled"`
-	ApproxTokenLimit    int     `json:"approx_token_limit"`
-	ThresholdRatio      float64 `json:"threshold_ratio,omitempty"`
-	MessageCountLimit   int     `json:"message_count_limit"`
-	KeepLastMessages    int     `json:"keep_last_messages"`
-	ToolResultCharLimit int     `json:"tool_result_char_limit"`
-	DefaultFocus        string  `json:"default_focus,omitempty"`
+	Enabled bool `json:"enabled"`
+	// ApproxTokenLimit is the context size used for a model whose size is
+	// unknown: no override, nothing reported by its provider, and not a
+	// family NullBot knows.
+	ApproxTokenLimit int `json:"approx_token_limit"`
+	// ContextWindows overrides a model's context size, keyed
+	// "provider/model".
+	ContextWindows map[string]int `json:"context_windows,omitempty"`
+	// ShortenRatio is how full the context gets before earlier tool results
+	// are shortened to the tool, its arguments and the start of its output.
+	ShortenRatio float64 `json:"shorten_ratio,omitempty"`
+	// SummarizeRatio is how full it gets before the model summarizes
+	// older messages.
+	SummarizeRatio float64 `json:"summarize_ratio,omitempty"`
+	// ThresholdRatio is the former single threshold. A customized value
+	// becomes SummarizeRatio.
+	ThresholdRatio float64 `json:"threshold_ratio,omitempty"`
+	// HistoryRatio is how much of the window earlier messages in the
+	// conversation may take when a new request starts.
+	HistoryRatio float64 `json:"history_ratio,omitempty"`
+	// MessageCountLimit also starts shortening at this many messages in one
+	// request.
+	MessageCountLimit int `json:"message_count_limit"`
+	// KeepLastMessages is used only when a model's size can't be measured.
+	KeepLastMessages int `json:"keep_last_messages"`
+	// ToolResultCharLimit is the most of an oversized tool result shown.
+	ToolResultCharLimit int `json:"tool_result_char_limit"`
+	// ToolDigestChars is how much of a tool's output a shortened result
+	// keeps.
+	ToolDigestChars int    `json:"tool_digest_chars,omitempty"`
+	DefaultFocus    string `json:"default_focus,omitempty"`
 }
 
 type PromptConfig struct {
@@ -113,10 +140,13 @@ func DefaultConfig() Config {
 		Compaction: CompactionConfig{
 			Enabled:             true,
 			ApproxTokenLimit:    64000,
-			ThresholdRatio:      0.75,
+			ShortenRatio:        0.60,
+			SummarizeRatio:      0.85,
+			HistoryRatio:        0.30,
 			MessageCountLimit:   80,
 			KeepLastMessages:    12,
 			ToolResultCharLimit: 12000,
+			ToolDigestChars:     600,
 		},
 		Editor: EditorConfig{
 			Command: defaultEditor(),
@@ -221,6 +251,36 @@ func EnsureAppDir(config Config) error {
 	return ensureDefaultSkill(defaultSkillPath(config))
 }
 
+func normalizeCompaction(c CompactionConfig) CompactionConfig {
+	if c.SummarizeRatio <= 0 || c.SummarizeRatio >= 1 {
+		c.SummarizeRatio = 0.85
+		// 0.75 was the old default; anything else was chosen on purpose.
+		if c.ThresholdRatio > 0 && c.ThresholdRatio < 1 && c.ThresholdRatio != 0.75 {
+			c.SummarizeRatio = c.ThresholdRatio
+		}
+	}
+	c.ThresholdRatio = 0
+	if c.ShortenRatio <= 0 {
+		c.ShortenRatio = 0.60
+	}
+	if c.ShortenRatio >= c.SummarizeRatio {
+		c.ShortenRatio = c.SummarizeRatio * 0.7
+	}
+	if c.HistoryRatio <= 0 {
+		c.HistoryRatio = 0.30
+	}
+	c.HistoryRatio = math.Min(math.Max(c.HistoryRatio, 0.05), c.ShortenRatio)
+	if c.ToolDigestChars <= 0 {
+		c.ToolDigestChars = 600
+	}
+	for key, tokens := range c.ContextWindows {
+		if tokens < 1024 || strings.TrimSpace(key) == "" {
+			delete(c.ContextWindows, key)
+		}
+	}
+	return c
+}
+
 func normalizeConfig(config Config) Config {
 	if config.Agent.MaxIterations <= 0 || config.Agent.MaxIterations == 8 {
 		config.Agent.MaxIterations = defaultMaxIterations
@@ -228,9 +288,7 @@ func normalizeConfig(config Config) Config {
 	if config.Agent.MaxSubagents <= 0 {
 		config.Agent.MaxSubagents = 3
 	}
-	if config.Compaction.ThresholdRatio <= 0 || config.Compaction.ThresholdRatio >= 1 {
-		config.Compaction.ThresholdRatio = 0.75
-	}
+	config.Compaction = normalizeCompaction(config.Compaction)
 	if config.Compaction.ApproxTokenLimit <= 0 {
 		config.Compaction.ApproxTokenLimit = 64000
 	}

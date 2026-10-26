@@ -107,6 +107,11 @@ type ActivityRecord struct {
 	Error       string         `json:"error,omitempty"`
 	DurationMs  int64          `json:"duration_ms,omitempty"`
 	Permission  map[string]any `json:"permission,omitempty"`
+
+	// Context reports context use on model starts and compaction records:
+	// context_tokens, context_window, shorten_at, summarize_at, and for
+	// compaction before_tokens, after_tokens, shortened or summarized.
+	Context map[string]any `json:"context,omitempty"`
 }
 
 // IsStreamDelta reports whether a record is a token-level streaming fragment.

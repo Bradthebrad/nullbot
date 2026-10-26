@@ -223,6 +223,26 @@ func ResolveCodexRuntimeCredentials(ctx context.Context, config Config, forceRef
 }
 
 func FetchCodexModels(ctx context.Context, config Config) ([]string, error) {
+	models, err := FetchCodexModelInfo(ctx, config)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(models))
+	for _, model := range models {
+		out = append(out, model.Slug)
+	}
+	return out, nil
+}
+
+// CodexModelInfo is one model the Codex subscription offers.
+type CodexModelInfo struct {
+	Slug          string
+	ContextWindow int
+}
+
+// FetchCodexModelInfo lists the subscription's models with their context
+// windows, when the service reports them.
+func FetchCodexModelInfo(ctx context.Context, config Config) ([]CodexModelInfo, error) {
 	creds, err := ResolveCodexRuntimeCredentials(ctx, config, false)
 	if err != nil {
 		return nil, err
@@ -345,7 +365,7 @@ func importCodexCLIAuth() (codexAuthStore, error) {
 	}, nil
 }
 
-func fetchCodexModelsWithToken(ctx context.Context, accessToken string) ([]string, error) {
+func fetchCodexModelsWithToken(ctx context.Context, accessToken string) ([]CodexModelInfo, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, defaultCodexBackendURL+"/models?client_version=1.0.0", nil)
 	if err != nil {
 		return nil, err
@@ -368,16 +388,17 @@ func fetchCodexModelsWithToken(ctx context.Context, accessToken string) ([]strin
 	}
 	var decoded struct {
 		Models []struct {
-			Slug       string `json:"slug"`
-			Name       string `json:"name"`
-			Visibility string `json:"visibility"`
-			Priority   int    `json:"priority"`
+			Slug          string `json:"slug"`
+			Name          string `json:"name"`
+			Visibility    string `json:"visibility"`
+			Priority      int    `json:"priority"`
+			ContextWindow int    `json:"context_window"`
 		} `json:"models"`
 	}
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return nil, err
 	}
-	models := make([]string, 0, len(decoded.Models))
+	models := make([]CodexModelInfo, 0, len(decoded.Models))
 	seen := map[string]bool{}
 	for _, model := range decoded.Models {
 		slug := strings.TrimSpace(model.Slug)
@@ -385,7 +406,7 @@ func fetchCodexModelsWithToken(ctx context.Context, accessToken string) ([]strin
 			continue
 		}
 		seen[slug] = true
-		models = append(models, slug)
+		models = append(models, CodexModelInfo{Slug: slug, ContextWindow: model.ContextWindow})
 	}
 	return models, nil
 }

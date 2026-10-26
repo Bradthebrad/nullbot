@@ -37,8 +37,9 @@ func configFields(config app.Config) []configField {
 		{Label: "Max Subagents", Key: "max_subagents", Value: strconv.Itoa(config.Agent.MaxSubagents)},
 		{Label: "Use Responses", Key: "use_responses", Value: strconv.FormatBool(config.Agent.UseResponses)},
 		{Label: "Auto Compact", Key: "compact_enabled", Value: strconv.FormatBool(config.Compaction.Enabled)},
-		{Label: "Token Threshold", Key: "compact_tokens", Value: strconv.Itoa(config.Compaction.ApproxTokenLimit)},
-		{Label: "Keep Last Messages", Key: "keep_last", Value: strconv.Itoa(config.Compaction.KeepLastMessages)},
+		{Label: "Context Size If Unknown", Key: "compact_tokens", Value: strconv.Itoa(config.Compaction.ApproxTokenLimit)},
+		{Label: "Shorten Tool Results At %", Key: "shorten_pct", Value: strconv.Itoa(int(config.Compaction.ShortenRatio*100 + 0.5))},
+		{Label: "Summarize At %", Key: "summarize_pct", Value: strconv.Itoa(int(config.Compaction.SummarizeRatio*100 + 0.5))},
 		{Label: "Editor", Key: "editor", Value: config.Editor.Command},
 		{Label: "Workspace", Key: "workspace", Value: config.WorkspaceDir},
 	}
@@ -180,7 +181,8 @@ func (m *Model) saveConfigFields() error {
 		config.Agent.UseResponses = parseBool(values["use_responses"])
 		config.Compaction.Enabled = parseBool(values["compact_enabled"])
 		config.Compaction.ApproxTokenLimit = parseIntDefault(values["compact_tokens"], config.Compaction.ApproxTokenLimit)
-		config.Compaction.KeepLastMessages = parseIntDefault(values["keep_last"], config.Compaction.KeepLastMessages)
+		config.Compaction.ShortenRatio = float64(parseIntDefault(values["shorten_pct"], int(config.Compaction.ShortenRatio*100+0.5))) / 100
+		config.Compaction.SummarizeRatio = float64(parseIntDefault(values["summarize_pct"], int(config.Compaction.SummarizeRatio*100+0.5))) / 100
 		config.Editor.Command = values["editor"]
 		config.WorkspaceDir = values["workspace"]
 	})

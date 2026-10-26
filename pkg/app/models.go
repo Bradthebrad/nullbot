@@ -346,6 +346,30 @@ func CachedModelGroups(ctx context.Context, config Config, refresh bool) []Model
 	return groups
 }
 
+// PeekModelGroups returns the cached catalog without any network call. fresh
+// is false when the cache is empty, stale or for other credentials; callers
+// can then fetch with CachedModelGroups in the background.
+func PeekModelGroups(config Config) (groups []ModelGroup, fresh bool) {
+	keys, _ := LoadAPIKeys(config)
+	key := fmt.Sprintf("%t|%s|%s|%s", CodexAuthPresent(config), MaskSecret(keys.OpenAI), MaskSecret(keys.OpenRouter), config.AppDir)
+	modelCatalogCache.Lock()
+	defer modelCatalogCache.Unlock()
+	if modelCatalogCache.groups != nil && modelCatalogCache.key == key {
+		return cloneModelGroups(modelCatalogCache.groups), time.Since(modelCatalogCache.fetched) < modelCatalogTTL
+	}
+	return StaticModelGroups(), false
+}
+
+// StaticModelGroups is the built-in catalog used before any fetch.
+func StaticModelGroups() []ModelGroup {
+	return []ModelGroup{
+		{Provider: "codex", Models: staticProviderModels("codex")},
+		{Provider: "openai", Models: staticProviderModels("openai")},
+		{Provider: "anthropic", Models: staticProviderModels("anthropic")},
+		{Provider: "openrouter", Models: staticProviderModels("openrouter")},
+	}
+}
+
 func cloneModelGroups(groups []ModelGroup) []ModelGroup {
 	out := make([]ModelGroup, len(groups))
 	for i, g := range groups {

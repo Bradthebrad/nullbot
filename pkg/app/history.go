@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -204,12 +205,6 @@ func listFilesByModTime(dir string, suffix string) []HistoryFile {
 			ModTime: info.ModTime(),
 		})
 	}
-	for i := 0; i < len(files); i++ {
-		for j := i + 1; j < len(files); j++ {
-			if files[j].ModTime.After(files[i].ModTime) {
-				files[i], files[j] = files[j], files[i]
-			}
-		}
-	}
+	sort.SliceStable(files, func(i, j int) bool { return files[i].ModTime.After(files[j].ModTime) })
 	return files
 }

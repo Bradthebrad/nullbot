@@ -32,6 +32,7 @@ func BuiltinToolsFor(config Config, state *App, includeSpawner bool) []agent.Too
 		historyRecentTool(state),
 		historySessionsTool(config),
 		historySessionReadTool(config),
+		historySearchTool(config),
 		logsRecentTool(state),
 		marketRefreshTool(state),
 		marketListAvailableTool(state),
@@ -364,31 +365,182 @@ func historySessionsTool(config Config) agent.Tool {
 
 func historySessionReadTool(config Config) agent.Tool {
 	return agent.ToolFunc{
-		Name:        "history_session_read",
-		Description: "Read a compact view of a persisted agent session by session_id. Use history_sessions first to discover ids.",
+		Name: "history_session_read",
+		Description: "Read part of a saved session by session_id: any range of its messages, at full length if asked, " +
+			"optionally with the tool calls made during it. Messages are numbered from 0; history_search results give the number " +
+			"of each match, so read around a match with start = index - 3. Without start, returns the last messages.",
 		Schema: agent.ToolSchema(map[string]any{
-			"session_id": agent.StringProperty("Session id from history_sessions, without .jsonl."),
-			"limit":      agent.NumberProperty("Maximum number of messages to return from the end of the session."),
+			"session_id":    agent.StringProperty("Session id from history_sessions or history_search, without .jsonl."),
+			"start":         agent.NumberProperty("First message number to return (0 is the first message). Negative counts back from the end. Omit for the last messages."),
+			"limit":         agent.NumberProperty("How many messages to return. Defaults to 10, at most 100."),
+			"full":          agent.BoolProperty("Return whole messages (up to 20,000 characters each) instead of 500-character previews."),
+			"include_tools": agent.BoolProperty("Interleave the tool calls made in this range, with their arguments and result previews."),
 		}, "session_id"),
 		Func: func(ctx context.Context, args map[string]any) (string, error) {
-			limit := 10
-			if raw, ok := args["limit"].(float64); ok && raw > 0 {
-				limit = int(raw)
+			limit := intArg(args, "limit", 10)
+			if limit <= 0 {
+				limit = 10
 			}
-			messages, err := readHistorySession(config, stringArg(args, "session_id"), limit)
+			if limit > 100 {
+				limit = 100
+			}
+			chars := 500
+			if boolArg(args, "full") {
+				chars = 20000
+			}
+			includeTools := boolArg(args, "include_tools")
+			entries, err := HistorySessionEntries(config, stringArg(args, "session_id"), includeTools)
 			if err != nil {
 				return "", err
 			}
-			if len(messages) == 0 {
+			var messages []int
+			for i, entry := range entries {
+				if entry.Kind == "message" {
+					messages = append(messages, i)
+				}
+			}
+			total := len(messages)
+			if total == 0 && !includeTools {
 				return "No messages found in that session.", nil
 			}
+			first := total - limit
+			if _, ok := args["start"]; ok {
+				first = intArg(args, "start", 0)
+				if first < 0 {
+					first = total + first
+				}
+			}
+			if first < 0 {
+				first = 0
+			}
+			last := first + limit
+			if last > total {
+				last = total
+			}
+			// The range spans entries from the first chosen message up to (not
+			// including) the message after the last chosen one, so tool calls made
+			// between them are included.
+			from, to := 0, len(entries)
+			if first < total {
+				from = messages[first]
+			} else {
+				from = len(entries)
+			}
+			if last < total {
+				to = messages[last]
+			}
+			if first == 0 {
+				from = 0
+			}
 			var b strings.Builder
-			for _, msg := range messages {
-				fmt.Fprintf(&b, "- %s: %s\n", msg.Role, truncate(msg.Content, 500))
+			fmt.Fprintf(&b, "Messages %d-%d of %d.\n", first, max(first, last-1), total)
+			for _, entry := range entries[from:to] {
+				if entry.Kind == "message" {
+					m := entry.Message
+					fmt.Fprintf(&b, "#%d [%s] %s: %s\n", entry.Index, historyStamp(m.Time), m.Role, clipRunes(strings.TrimSpace(m.Content), chars))
+					continue
+				}
+				t := entry.Tool
+				line := fmt.Sprintf("  tool #%d [%s] %s", entry.Index, historyStamp(t.Time), t.Tool)
+				if t.Server != "" {
+					line += " (" + t.Server + ")"
+				}
+				if t.AgentID != "" && t.AgentID != "main" {
+					line += " by " + t.AgentID
+				}
+				if len(t.Args) > 0 {
+					line += " args=" + compactAny(t.Args, 400)
+				}
+				switch {
+				case t.Error != "":
+					line += " error: " + clipRunes(t.Error, 300)
+				case t.Detail != "":
+					line += " " + clipRunes(t.Detail, 300)
+				case t.Result != "":
+					line += " result: " + clipRunes(strings.Join(strings.Fields(t.Result), " "), min(chars, 2000))
+				}
+				b.WriteString(line + "\n")
+			}
+			if last < total {
+				fmt.Fprintf(&b, "More follows: start=%d.", last)
 			}
 			return strings.TrimSpace(b.String()), nil
 		},
 	}
+}
+
+func historySearchTool(config Config) agent.Tool {
+	return agent.ToolFunc{
+		Name: "history_search",
+		Description: "Search every saved session: what was said (user, assistant, reasoning, commentary) and the tool calls made, " +
+			"newest first. Filter by words, role, tool, session and time. Each result gives its session_id and message or tool-call " +
+			"number; read around it with history_session_read.",
+		Schema: agent.ToolSchema(map[string]any{
+			"query":      agent.StringProperty("Words that must all appear, in any order, ignoring case. Put exact phrases in double quotes."),
+			"role":       agent.StringProperty("Only these kinds, comma-separated: user, assistant, reasoning, commentary, tool."),
+			"tool":       agent.StringProperty("Only tool calls whose tool or server name contains this, e.g. search_issues or gmail."),
+			"session_id": agent.StringProperty("Only this session."),
+			"since":      agent.StringProperty("Only after this time: a date (2026-10-01), an RFC 3339 time, or a span back from now (90m, 36h, 7d, 2w)."),
+			"until":      agent.StringProperty("Only before this time, in the same forms as since. A date includes that whole day."),
+			"limit":      agent.NumberProperty("Results per page. Defaults to 20, at most 100."),
+			"offset":     agent.NumberProperty("Results to skip, for the next page."),
+		}),
+		Func: func(ctx context.Context, args map[string]any) (string, error) {
+			now := time.Now()
+			since, err := ParseHistoryTime(stringArg(args, "since"), false, now)
+			if err != nil {
+				return "", err
+			}
+			until, err := ParseHistoryTime(stringArg(args, "until"), true, now)
+			if err != nil {
+				return "", err
+			}
+			var roles []string
+			for _, role := range strings.Split(stringArg(args, "role"), ",") {
+				if role = strings.ToLower(strings.TrimSpace(role)); role != "" {
+					roles = append(roles, role)
+				}
+			}
+			limit := intArg(args, "limit", defaultSearchLimit)
+			if limit > 100 {
+				limit = 100
+			}
+			offset := intArg(args, "offset", 0)
+			result, err := SearchHistory(config, HistoryQuery{
+				Text: stringArg(args, "query"), SessionID: stringArg(args, "session_id"), Roles: roles,
+				Tool: stringArg(args, "tool"), Since: since, Until: until, Limit: limit, Offset: offset,
+			})
+			if err != nil {
+				return "", err
+			}
+			if len(result.Hits) == 0 {
+				return fmt.Sprintf("No matches in %d session(s).", result.Searched), nil
+			}
+			var b strings.Builder
+			for _, hit := range result.Hits {
+				if hit.Kind == "tool" {
+					label := hit.Tool
+					if hit.Server != "" {
+						label += " (" + hit.Server + ")"
+					}
+					fmt.Fprintf(&b, "- %s tool #%d [%s] %s, %s: %s\n", hit.SessionID, hit.Index, historyStamp(hit.Time), label, strings.TrimPrefix(hit.Status, "tool "), hit.Snippet)
+					continue
+				}
+				fmt.Fprintf(&b, "- %s #%d [%s] %s: %s\n", hit.SessionID, hit.Index, historyStamp(hit.Time), hit.Role, hit.Snippet)
+			}
+			if result.More {
+				fmt.Fprintf(&b, "More results: offset=%d.", offset+len(result.Hits))
+			}
+			return strings.TrimSpace(b.String()), nil
+		},
+	}
+}
+
+func historyStamp(t time.Time) string {
+	if t.IsZero() {
+		return "time unknown"
+	}
+	return t.Local().Format("2006-01-02 15:04")
 }
 
 func logsRecentTool(state *App) agent.Tool {

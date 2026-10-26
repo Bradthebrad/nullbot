@@ -398,6 +398,7 @@ func (a *App) appendActivity(record ActivityRecord) {
 	for _, sink := range sinks {
 		sink(record)
 	}
+	a.persistActivity(record)
 	if record.TaskID != "" {
 		switch record.Status {
 		case "tool start", "tool complete", "tool error", "model start", "agent complete", "model error":

@@ -165,6 +165,7 @@ var internalBuiltins = map[string]string{
 	"history_recent":        "reads chat history",
 	"history_sessions":      "reads chat history",
 	"history_session_read":  "reads chat history",
+	"history_search":        "searches chat history",
 	"logs_recent":           "reads NullBot logs",
 	"market_list":           "reads the market index",
 	"market_refresh":        "refreshes the market index",

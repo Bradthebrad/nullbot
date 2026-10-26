@@ -317,11 +317,10 @@ func normalizeConfig(config Config) Config {
 	if config.Compaction.ToolResultCharLimit <= 0 {
 		config.Compaction.ToolResultCharLimit = 12000
 	}
-	if strings.TrimSpace(config.SubagentModel.Provider) == "" {
-		config.SubagentModel = config.Model
-	}
-	if strings.TrimSpace(config.SubagentModel.Model) == "" {
-		config.SubagentModel.Model = config.Model.Model
+	// An empty subagent model means "the same as the manager" and follows
+	// the manager when it changes; see effectiveModelConfig.
+	if sub := config.SubagentModel; strings.TrimSpace(sub.Model) == "" && strings.EqualFold(strings.TrimSpace(sub.Provider), strings.TrimSpace(config.Model.Provider)) {
+		config.SubagentModel.Provider = ""
 	}
 	if strings.TrimSpace(config.BrandPrefix) == "" {
 		config.BrandPrefix = DefaultPrefix

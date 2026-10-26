@@ -29,6 +29,8 @@ type App struct {
 	logger             *Logger
 	plan               string
 	paused             bool
+	control            *runControl
+	controlOnce        sync.Once
 	activeCancel       context.CancelFunc
 	activeTaskID       string
 	activitySinks      map[int]func(ActivityRecord)
@@ -530,6 +532,7 @@ func (a *App) RequestPause() {
 }
 
 func (a *App) Resume() {
+	a.gate().update(func() { a.control.paused = false })
 	a.setPaused(false)
 	a.appendActivity(ActivityRecord{
 		Time:   time.Now().UTC(),

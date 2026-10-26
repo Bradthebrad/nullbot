@@ -79,7 +79,7 @@ func (m *Model) renderModelsModal() string {
 	if m.modelTarget == "subagent" {
 		target = "subagent"
 	}
-	b.WriteString(renderMarkdown(fmt.Sprintf("Main: `%s / %s`\n\nSubagents: `%s / %s`\n\nTarget: `%s`\n\nUse `M` for main, `A` or `S` for subagents. `Enter` saves selected model to the target. Models refresh from providers when keys are set.", config.Model.Provider, config.Model.Model, config.SubagentModel.Provider, config.SubagentModel.Model, target), m.modal.Width))
+	b.WriteString(renderMarkdown(fmt.Sprintf("Main: `%s / %s`\n\nSubagents: `%s / %s`\n\nTarget: `%s`\n\nUse `M` for main, `A` or `S` for subagents. `Enter` saves selected model to the target. Models refresh from providers when keys are set.", config.Model.Provider, config.Model.Model, subagentLabel(config).Provider, subagentLabel(config).Model, target), m.modal.Width))
 	b.WriteString("\n\n")
 	flat := 0
 	for _, group := range m.modelGroups {
@@ -153,4 +153,13 @@ func keyAvailable(config app.Config, option app.ModelOption) bool {
 		return true
 	}
 	return os.Getenv(option.APIKeyEnv) != ""
+}
+
+// subagentLabel is the subagent model as it will run: an empty setting
+// means the same model as the manager.
+func subagentLabel(config app.Config) app.ModelConfig {
+	if config.SubagentModel.Provider == "" && config.SubagentModel.Model == "" {
+		return config.Model
+	}
+	return config.SubagentModel
 }

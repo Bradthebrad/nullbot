@@ -216,6 +216,7 @@ func (a *App) buildRuntime(ctx context.Context, skillHints []string) (*runtimeBu
 			MaxIterations: config.Agent.MaxIterations,
 			Callbacks:     callbacks.SinkFunc(func(event callbacks.Event) { a.handleRunCallback(ctx, event, runModel) }),
 			Context:       agentContextPolicy(config, config.Model),
+			Gate:          a.gate(),
 		}),
 		closers: closers,
 	}, nil
@@ -319,6 +320,7 @@ func (a *App) executeSubagent(subCtx context.Context, taskID, name, task string)
 			a.appendActivity(record)
 		}),
 		Context: agentContextPolicy(config, config.SubagentModel),
+		Gate:    a.gate(),
 	})
 	inbox, releaseInbox := a.workerInstructionInbox(subCtx, taskID)
 	defer releaseInbox()
@@ -797,7 +799,7 @@ func baseSystemPrompt(config Config, skillHints []string, tools []tcagent.Tool, 
 		fmt.Fprintf(&b, "Configured workspace: %s\n", root)
 	}
 	b.WriteString(projectsPrompt(config))
-	fmt.Fprintf(&b, "You may spawn up to %d concurrent named subagents with `spawn_subagent` when decomposition helps. `spawn_subagent` returns a task id immediately; use `subagent_wait` or `subagent_status` to collect results before synthesizing. Give each subagent a narrow task. Subagents use `%s/%s` unless configured otherwise.\n", config.Agent.MaxSubagents, config.SubagentModel.Provider, config.SubagentModel.Model)
+	fmt.Fprintf(&b, "You may spawn up to %d concurrent named subagents with `spawn_subagent` when decomposition helps. `spawn_subagent` returns a task id immediately; use `subagent_wait` or `subagent_status` to collect results before synthesizing. Give each subagent a narrow task. Subagents use `%s/%s`.\n", config.Agent.MaxSubagents, effectiveModelConfig(config, config.SubagentModel).Provider, effectiveModelConfig(config, config.SubagentModel).Model)
 	b.WriteString("Available built-in tools are constrained to NullBot app data and configured workspace browsing: listing config-directory files, reading small config-directory text files, listing skills, reading installed skill markdown progressively with `skill_read`, creating SKILL.md files under the configured skills directory, listing/reading/updating saved JSON plans, refreshing/listing/installing market packages, enabling/disabling/removing installed MCP servers, listing configured MCP servers, summarizing recent visible chat history, reading compact persisted session history, and reading recent NullBot runtime log lines.\n")
 	if len(tools) > 0 {
 		b.WriteString("Current tool inventory:\n")

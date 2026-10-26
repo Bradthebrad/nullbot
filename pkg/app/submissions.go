@@ -24,7 +24,11 @@ type Submission struct {
 	Error     string `json:"error,omitempty"`
 }
 type SubmissionSnapshot struct {
-	Paused    bool         `json:"paused"`
+	Paused bool `json:"paused"`
+	// RunPaused is set while running agents are held at their next step.
+	RunPaused bool `json:"run_paused,omitempty"`
+	// Stopping is set while the running request wraps up after Stop.
+	Stopping  bool         `json:"stopping,omitempty"`
 	Busy      bool         `json:"busy"`
 	PrimaryID string       `json:"primary_id,omitempty"`
 	Queue     []Submission `json:"queue"`
@@ -238,6 +242,7 @@ func (a *App) executeSubmission(job *submissionJob) {
 		reply = a.submitDirect(job.ctx, job.Input, job.sink)
 	}
 	job.scope.inbox.Close()
+	a.gate().clear(job.ID)
 	if job.Mode == "also" {
 		if reply.Data == nil {
 			reply.Data = map[string]any{}
@@ -318,6 +323,11 @@ func (a *App) steerPrimary(ctx context.Context, text, targetID string) Submissio
 		receipt.Error = "No active primary invocation"
 		return receipt
 	}
+	if a.gate().stopping(job.ID) {
+		a.mu.Unlock()
+		receipt.Error = "The current request is stopping"
+		return receipt
+	}
 	if targetID != "" && targetID != job.ID {
 		a.mu.Unlock()
 		receipt.Error = "Primary target changed"
@@ -340,9 +350,10 @@ func (a *App) SubmissionState() SubmissionSnapshot {
 	return a.submissionStateLocked()
 }
 func (a *App) submissionStateLocked() SubmissionSnapshot {
-	out := SubmissionSnapshot{Paused: a.paused, Busy: a.primaryJob != nil || len(a.submissionQueue) > 0, Queue: []Submission{}, Jobs: []Submission{}}
+	out := SubmissionSnapshot{Paused: a.paused, RunPaused: a.gate().isPaused(), Busy: a.primaryJob != nil || len(a.submissionQueue) > 0, Queue: []Submission{}, Jobs: []Submission{}}
 	if a.primaryJob != nil {
 		out.PrimaryID = a.primaryJob.ID
+		out.Stopping = a.gate().stopping(a.primaryJob.ID)
 	}
 	for _, job := range a.submissionQueue {
 		out.Queue = append(out.Queue, job.Submission)

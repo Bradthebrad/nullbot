@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -194,3 +195,30 @@ func (a *App) ContextWindowFor(provider, model string) ContextWindow {
 	a.mu.Unlock()
 	return ResolveContextWindow(config, ModelConfig{Provider: provider, Model: model})
 }
+
+// SetContextWindowOverride sets the context size used for a model. Zero
+// removes the override, so the reported or typical size applies again.
+func (a *App) SetContextWindowOverride(provider, model string, tokens int) error {
+	if strings.TrimSpace(model) == "" {
+		return errMissingModel
+	}
+	if tokens != 0 && (tokens < 1024 || tokens > 100_000_000) {
+		return errContextSize
+	}
+	key := ModelKey(provider, model)
+	return a.UpdateConfig(func(config *Config) {
+		if tokens == 0 {
+			delete(config.Compaction.ContextWindows, key)
+			return
+		}
+		if config.Compaction.ContextWindows == nil {
+			config.Compaction.ContextWindows = map[string]int{}
+		}
+		config.Compaction.ContextWindows[key] = tokens
+	})
+}
+
+var (
+	errMissingModel = errors.New("choose a model first")
+	errContextSize  = errors.New("context size must be between 1,024 and 100,000,000 tokens")
+)

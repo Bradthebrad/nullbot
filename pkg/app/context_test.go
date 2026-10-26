@@ -209,3 +209,31 @@ func TestContextActivityRecordsSayWhatHappened(t *testing.T) {
 		t.Fatalf("model start lacks context use: %+v", start)
 	}
 }
+
+func TestContextWindowOverrideIsSetAndCleared(t *testing.T) {
+	cfg := contextTestConfig(t)
+	a := New(cfg)
+	if err := a.SetContextWindowOverride("anthropic", cfg.Model.Model, 500); err == nil {
+		t.Fatal("tiny override accepted")
+	}
+	if err := a.SetContextWindowOverride("anthropic", cfg.Model.Model, 120000); err != nil {
+		t.Fatal(err)
+	}
+	if w := a.ContextWindowFor("anthropic", cfg.Model.Model); w.Tokens != 120000 || w.Source != "override" {
+		t.Fatalf("%+v", w)
+	}
+	groups, _ := PeekModelGroups(a.Config())
+	for _, group := range groups {
+		for _, model := range group.Models {
+			if model.Provider == "anthropic" && model.ID == cfg.Model.Model && model.ContextWindow != 120000 {
+				t.Fatalf("catalog shows %d", model.ContextWindow)
+			}
+		}
+	}
+	if err := a.SetContextWindowOverride("anthropic", cfg.Model.Model, 0); err != nil {
+		t.Fatal(err)
+	}
+	if w := a.ContextWindowFor("anthropic", cfg.Model.Model); w.Source == "override" {
+		t.Fatalf("override not cleared: %+v", w)
+	}
+}

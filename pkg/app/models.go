@@ -185,6 +185,14 @@ func DiscoverModelGroups(ctx context.Context, config Config) []ModelGroup {
 			}
 		}
 		recordContextWindows(config, groups[g].Provider, reported, "provider", "Reported by "+providerTitle(groups[g].Provider))
+	}
+	return withContextWindows(config, groups)
+}
+
+// withContextWindows fills in the size NullBot plans for with each model, so
+// overrides set after a fetch show without fetching again.
+func withContextWindows(config Config, groups []ModelGroup) []ModelGroup {
+	for g := range groups {
 		for i, model := range groups[g].Models {
 			window := ResolveContextWindow(config, ModelConfig{Provider: model.Provider, Model: model.ID})
 			groups[g].Models[i].ContextWindow = window.Tokens
@@ -433,14 +441,18 @@ var modelCatalogCache struct {
 
 // CachedModelGroups returns the provider model catalog, fetching it at most
 // once per TTL for the same set of credentials. Pass refresh to force a fetch.
+func modelCatalogKey(config Config, keys APIKeys) string {
+	return fmt.Sprintf("%t|%s|%s|%s|%s", CodexAuthPresent(config), MaskSecret(keys.OpenAI), MaskSecret(keys.Anthropic), MaskSecret(keys.OpenRouter), config.AppDir)
+}
+
 func CachedModelGroups(ctx context.Context, config Config, refresh bool) []ModelGroup {
 	keys, _ := LoadAPIKeys(config)
-	key := fmt.Sprintf("%t|%s|%s|%s", CodexAuthPresent(config), MaskSecret(keys.OpenAI), MaskSecret(keys.OpenRouter), config.AppDir)
+	key := modelCatalogKey(config, keys)
 	modelCatalogCache.Lock()
 	if !refresh && modelCatalogCache.key == key && time.Since(modelCatalogCache.fetched) < modelCatalogTTL && modelCatalogCache.groups != nil {
 		groups := cloneModelGroups(modelCatalogCache.groups)
 		modelCatalogCache.Unlock()
-		return groups
+		return withContextWindows(config, groups)
 	}
 	modelCatalogCache.Unlock()
 	groups := DiscoverModelGroups(ctx, config)
@@ -455,13 +467,13 @@ func CachedModelGroups(ctx context.Context, config Config, refresh bool) []Model
 // can then fetch with CachedModelGroups in the background.
 func PeekModelGroups(config Config) (groups []ModelGroup, fresh bool) {
 	keys, _ := LoadAPIKeys(config)
-	key := fmt.Sprintf("%t|%s|%s|%s", CodexAuthPresent(config), MaskSecret(keys.OpenAI), MaskSecret(keys.OpenRouter), config.AppDir)
+	key := modelCatalogKey(config, keys)
 	modelCatalogCache.Lock()
 	defer modelCatalogCache.Unlock()
 	if modelCatalogCache.groups != nil && modelCatalogCache.key == key {
-		return cloneModelGroups(modelCatalogCache.groups), time.Since(modelCatalogCache.fetched) < modelCatalogTTL
+		return withContextWindows(config, cloneModelGroups(modelCatalogCache.groups)), time.Since(modelCatalogCache.fetched) < modelCatalogTTL
 	}
-	return StaticModelGroups(), false
+	return withContextWindows(config, StaticModelGroups()), false
 }
 
 // StaticModelGroups is the built-in catalog used before any fetch.

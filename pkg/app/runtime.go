@@ -60,8 +60,10 @@ func (a *App) runAgent(ctx context.Context, skillHints []string) Reply {
 	if err != nil {
 		finalErr = err
 		if workCtx.Err() != nil {
-			a.logInfo("agent paused")
-			return a.reply("Paused.", "", "")
+			a.logInfo("agent stopped")
+			reply := a.reply("Stopped before finishing.", "", "")
+			reply.Data = map[string]any{"canceled": true}
+			return reply
 		}
 		a.logError("agent execution failed", "error", err)
 		return a.reply("Agent error: "+err.Error(), "", "")
@@ -449,11 +451,7 @@ func modelFromConfig(config Config) (tcagent.Model, error) {
 }
 
 func subagentModelFromConfig(config Config) (tcagent.Model, error) {
-	modelConfig := config.SubagentModel
-	if strings.TrimSpace(modelConfig.Provider) == "" || strings.TrimSpace(modelConfig.Model) == "" {
-		modelConfig = config.Model
-	}
-	return modelFromModelConfig(config, modelConfig)
+	return modelFromModelConfig(config, effectiveModelConfig(config, config.SubagentModel))
 }
 
 func modelFromModelConfig(config Config, modelConfig ModelConfig) (tcagent.Model, error) {
@@ -547,8 +545,10 @@ func RuntimeStatus(config Config) map[string]any {
 	}
 }
 
+// effectiveModelConfig is the model that will actually run: one without a
+// model ID means the manager's model.
 func effectiveModelConfig(config Config, model ModelConfig) ModelConfig {
-	if strings.TrimSpace(model.Provider) == "" && strings.TrimSpace(model.Model) == "" {
+	if strings.TrimSpace(model.Model) == "" {
 		model = config.Model
 	}
 	if strings.TrimSpace(model.Provider) == "" {

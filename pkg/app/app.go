@@ -29,6 +29,9 @@ type App struct {
 	logger             *Logger
 	plan               string
 	paused             bool
+	// halted is set by Stop everything until Resume: a run that starts in
+	// the meantime is cancelled at once. Pause only holds runs at the gate.
+	halted             bool
 	control            *runControl
 	controlOnce        sync.Once
 	activeCancel       context.CancelFunc
@@ -527,12 +530,21 @@ func (a *App) SetPlan(plan string) {
 	a.plan = plan
 }
 
+// RequestPause cancels the running request and holds the queue until
+// Resume. The desktop app's Pause, which holds runs at their next step, is
+// PauseRuns.
 func (a *App) RequestPause() {
+	a.mu.Lock()
+	a.halted = true
+	a.mu.Unlock()
 	a.setPaused(true)
 }
 
 func (a *App) Resume() {
 	a.gate().update(func() { a.control.paused = false })
+	a.mu.Lock()
+	a.halted = false
+	a.mu.Unlock()
 	a.setPaused(false)
 	a.appendActivity(ActivityRecord{
 		Time:   time.Now().UTC(),
@@ -593,7 +605,7 @@ func (a *App) beginWork(parent context.Context) (context.Context, string) {
 	a.mu.Lock()
 	name := DisplayName(a.config)
 	a.activeCancel = cancel
-	if a.paused {
+	if a.halted {
 		cancel()
 	}
 	a.mu.Unlock()

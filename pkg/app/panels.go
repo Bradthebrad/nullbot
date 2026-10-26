@@ -59,7 +59,9 @@ func (a *App) mcpPanelReply(message string) Reply {
 	return reply
 }
 
-func (a *App) planCommand(sub string) Reply {
+// planCommand runs in the request that asked for it, so Stop and Pause
+// reach the planner too.
+func (a *App) planCommand(ctx context.Context, sub string) Reply {
 	sub = strings.TrimSpace(sub)
 	if strings.HasPrefix(sub, "focus ") {
 		sub = strings.TrimSpace(strings.TrimPrefix(sub, "focus "))
@@ -81,7 +83,7 @@ func (a *App) planCommand(sub string) Reply {
 		return reply
 	}
 	if sub != "" {
-		plan, err := a.runPlanner(contextOrBackground(), sub)
+		plan, err := a.runPlanner(ctx, sub)
 		if err != nil {
 			reply := a.planPanelReply("Plan creation failed: " + err.Error())
 			reply.Data["error"] = err.Error()

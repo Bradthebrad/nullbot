@@ -134,6 +134,9 @@ func (a *App) finishTask(id, result string, err error) {
 		return
 	}
 	defer a.notifyChange(ChangeTasks)
+	// Runs after the lock below is released: a pause with nothing left to
+	// hold ends here.
+	defer a.releaseIdlePause()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.ensureTasksLocked()

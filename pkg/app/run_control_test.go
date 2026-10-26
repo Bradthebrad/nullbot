@@ -18,6 +18,8 @@ type loopModel struct {
 	n     int
 	calls chan int
 	steps int
+	// hold, when set, keeps the first call from returning until closed.
+	hold chan struct{}
 }
 
 func (m *loopModel) Call(_ context.Context, messages []lc.BaseMessage, _ []tcagent.Tool) (lc.BaseMessage, error) {
@@ -28,6 +30,9 @@ func (m *loopModel) Call(_ context.Context, messages []lc.BaseMessage, _ []tcage
 	select {
 	case m.calls <- n:
 	default:
+	}
+	if n == 1 && m.hold != nil {
+		<-m.hold
 	}
 	last := lcContentText(messages[len(messages)-1].Content)
 	if strings.Contains(last, "asked you to stop") {
@@ -62,17 +67,24 @@ func lastAssistant(a *App) string {
 
 func TestPauseHoldsTheRunAtItsNextStepAndResumeCarriesOn(t *testing.T) {
 	a := submissionTestApp(t)
-	model := &loopModel{calls: make(chan int, 16), steps: 2}
+	model := &loopModel{calls: make(chan int, 16), steps: 2, hold: make(chan struct{})}
 	a.modelFactory = func(Config, bool) (tcagent.Model, error) { return model, nil }
 	receipt := a.SubmitRouted(context.Background(), "read history", "send")
 	<-model.calls
 	a.PauseRuns()
+	close(model.hold)
 	time.Sleep(60 * time.Millisecond)
 	model.mu.Lock()
 	held := model.n
 	model.mu.Unlock()
 	state := a.SubmissionState()
 	if !state.RunPaused || state.PrimaryID != receipt.ID {
+		for _, m := range a.State().History {
+			t.Logf("%s: %s", m.Role, m.Content)
+		}
+		model.mu.Lock()
+		t.Logf("model calls %d", model.n)
+		model.mu.Unlock()
 		t.Fatalf("state while paused: %+v", state)
 	}
 	time.Sleep(60 * time.Millisecond)
@@ -193,4 +205,53 @@ func TestSubagentModelCanBeTheManagers(t *testing.T) {
 	if got := effectiveModelConfig(normalizeConfig(cfg), cfg.SubagentModel); got.Provider != "openai" {
 		t.Fatalf("a different provider for subagents: %+v", got)
 	}
+}
+
+func TestAPauseWithNothingLeftEndsByItself(t *testing.T) {
+	a := submissionTestApp(t)
+	model := &loopModel{calls: make(chan int, 16), steps: 0, hold: make(chan struct{})}
+	a.modelFactory = func(Config, bool) (tcagent.Model, error) { return model, nil }
+	receipt := a.SubmitRouted(context.Background(), "just answer", "send")
+	<-model.calls
+	a.PauseRuns() // lands while the final answer is being written
+	close(model.hold)
+	waitSubmission(t, a, receipt.ID)
+	waitFor(t, "the pause to end", func() bool {
+		s := a.SubmissionState()
+		return !s.Paused && !s.RunPaused
+	})
+	next := a.SubmitRouted(context.Background(), "next", "send")
+	if next.Status == "rejected" {
+		t.Fatalf("the next message was refused: %+v", next)
+	}
+	waitSubmission(t, a, next.ID)
+}
+
+func TestStopEverythingWithAnEmptyQueueLeavesNothingHeld(t *testing.T) {
+	a := submissionTestApp(t)
+	model := &loopModel{calls: make(chan int, 16), steps: 100}
+	a.modelFactory = func(Config, bool) (tcagent.Model, error) { return model, nil }
+	first := a.SubmitRouted(context.Background(), "keep reading", "send")
+	<-model.calls
+	a.StopEverything()
+	waitSubmission(t, a, first.ID)
+	waitFor(t, "nothing held", func() bool { return !a.SubmissionState().Paused })
+}
+
+func TestStopOnlyStopsTheRequestItWasMeantFor(t *testing.T) {
+	a := submissionTestApp(t)
+	model := &loopModel{calls: make(chan int, 16), steps: 100}
+	a.modelFactory = func(Config, bool) (tcagent.Model, error) { return model, nil }
+	first := a.SubmitRouted(context.Background(), "keep reading", "send")
+	<-model.calls
+	if err := a.StopRequest("some-earlier-request"); err == nil {
+		t.Fatal("stopped a request other than the one named")
+	}
+	if a.SubmissionState().Stopping {
+		t.Fatal("marked stopping")
+	}
+	if err := a.StopRequest(first.ID); err != nil {
+		t.Fatal(err)
+	}
+	waitSubmission(t, a, first.ID)
 }

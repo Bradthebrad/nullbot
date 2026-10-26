@@ -78,7 +78,7 @@ func (a *App) executeSlash(ctx context.Context, input string) Reply {
 	case "/help":
 		return Reply{Message: formatHelp(), Command: name, OpenPanel: "help", Config: a.config, Suggestions: commandNames()}
 	case "/plan":
-		return a.planCommand(strings.TrimSpace(rest))
+		return a.planCommand(ctx, strings.TrimSpace(rest))
 	case "/also":
 		if strings.TrimSpace(rest) == "" {
 			return a.reply("Usage: /also <message>", name, "")

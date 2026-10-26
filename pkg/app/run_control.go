@@ -121,6 +121,9 @@ func (a *App) ResumeRuns() {
 		id = a.primaryJob.ID
 	}
 	a.mu.Unlock()
+	a.mu.Lock()
+	a.halted = false
+	a.mu.Unlock()
 	a.setPaused(false)
 	if wasPaused {
 		a.appendActivity(ActivityRecord{Time: time.Now().UTC(), Kind: "runtime", Name: "runtime", SubmissionID: id, Status: "runs resumed", Detail: "Carrying on."})
@@ -132,11 +135,20 @@ func (a *App) ResumeRuns() {
 // StopCurrent asks the running request to wrap up: no more tool calls, and
 // a short account of what was done. Its subagents wrap up too.
 func (a *App) StopCurrent() error {
+	return a.StopRequest("")
+}
+
+// StopRequest is StopCurrent for one request: when targetID is set and a
+// different request is running by the time this arrives, nothing stops.
+func (a *App) StopRequest(targetID string) error {
 	a.mu.Lock()
 	job := a.primaryJob
 	a.mu.Unlock()
 	if job == nil {
 		return errNothingRunning
+	}
+	if targetID != "" && targetID != job.ID {
+		return errors.New("that request already finished")
 	}
 	a.gate().update(func() { a.control.stop[job.ID] = true })
 	a.appendActivity(ActivityRecord{Time: time.Now().UTC(), Kind: "runtime", Name: "runtime", SubmissionID: job.ID, Status: "stop requested", Detail: "Finishing the current step, then wrapping up."})
@@ -167,6 +179,9 @@ func (a *App) StopEverything() {
 		id = a.primaryJob.ID
 	}
 	a.mu.Unlock()
+	a.mu.Lock()
+	a.halted = true // a run that starts in the meantime is cancelled too
+	a.mu.Unlock()
 	a.setPaused(true) // holds the queue and cancels the manager's run
 	for _, cancel := range cancels {
 		cancel()
@@ -174,7 +189,40 @@ func (a *App) StopEverything() {
 	a.gate().update(func() { a.control.paused = false })
 	a.appendActivity(ActivityRecord{Time: time.Now().UTC(), Kind: "runtime", Name: "runtime", SubmissionID: id, Status: "stopped everything", Detail: "Stopped all running work. Queued requests wait until you resume."})
 	a.logInfo("stopped everything", "tasks", len(cancels))
+	a.releaseIdlePause()
 	a.notifyChange(ChangeTasks)
+	a.notifyChange(ChangeSubmissions)
+}
+
+// releaseIdlePause ends a pause or stop that has nothing left to hold: no
+// request running or waiting and no agent at work. Without this, a pause
+// that lands as the last answer is written would outlive the run, and the
+// next message would be refused.
+func (a *App) releaseIdlePause() {
+	a.mu.Lock()
+	idle := a.primaryJob == nil && len(a.submissionQueue) == 0
+	for _, job := range a.submissions {
+		if job.Status == "running" {
+			idle = false
+		}
+	}
+	a.ensureTasksLocked()
+	for _, task := range a.tasks {
+		if task.Status == TaskRunning || task.Status == TaskCanceling {
+			idle = false
+		}
+	}
+	held := a.paused
+	if idle {
+		a.paused = false
+		a.halted = false
+	}
+	a.mu.Unlock()
+	if !idle || (!held && !a.gate().isPaused()) {
+		return
+	}
+	a.gate().update(func() { a.control.paused = false })
+	a.appendActivity(ActivityRecord{Time: time.Now().UTC(), Kind: "runtime", Name: "runtime", Status: "pause ended", Detail: "Nothing was left to pause."})
 	a.notifyChange(ChangeSubmissions)
 }
 

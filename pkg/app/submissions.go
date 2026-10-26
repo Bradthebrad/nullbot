@@ -295,6 +295,8 @@ func (a *App) executeSubmission(job *submissionJob) {
 	a.notifyChange(ChangeHistory)
 	if next != nil {
 		go a.executeSubmission(next)
+	} else {
+		a.releaseIdlePause()
 	}
 }
 

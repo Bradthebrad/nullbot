@@ -127,7 +127,7 @@ func removeWorkspacePath(config Config, rel string, recursive bool, dirsOnly boo
 	if strings.TrimSpace(rel) == "" {
 		return "", fmt.Errorf("path is required")
 	}
-	path, err := CheckProjectPath(config, rel, true, true)
+	path, err := CheckProjectAccess(config, rel, CapDelete, true)
 	if err != nil {
 		return "", err
 	}

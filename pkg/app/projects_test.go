@@ -83,3 +83,31 @@ func TestExternalDispatchRevocationAndUnknownTool(t *testing.T) {
 		}
 	}
 }
+
+func TestProjectAccessByCapabilityAndLexicalGate(t *testing.T) {
+	c := projectTestConfig(t, "custom")
+	c.Projects[0].Allow = []string{"delete"}
+	file := filepath.Join(c.WorkspaceDir, "x.txt")
+	if err := os.WriteFile(file, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CheckProjectAccess(c, file, CapDelete, true); err != nil {
+		t.Fatalf("custom delete refused: %v", err)
+	}
+	if _, err := CheckProjectAccess(c, file, CapWrite, false); err == nil {
+		t.Fatal("custom delete-only granted write")
+	}
+	if _, err := removeWorkspacePath(c, "x.txt", false, false); err != nil {
+		t.Fatalf("delete tool refused a delete-only project: %v", err)
+	}
+	unc := "//host/share/x"
+	if filepath.Separator == '\\' {
+		unc = `\\host\share\x`
+	}
+	if PathLexicallyInProjects(c, unc) || PathLexicallyInProjects(c, filepath.Dir(c.WorkspaceDir)) {
+		t.Fatal("paths outside projects passed the lexical gate")
+	}
+	if !PathLexicallyInProjects(c, "sub/file.txt") {
+		t.Fatal("relative path inside the primary project refused")
+	}
+}

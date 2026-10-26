@@ -610,10 +610,8 @@ func (a *App) loadMCPTools(ctx context.Context, config Config) ([]tcagent.Tool, 
 }
 
 func mcpRuntimeEnv(config Config, id string, entry MCPEntry) map[string]string {
-	env := map[string]string{}
-	for key, value := range entry.Env {
-		env[key] = value
-	}
+	env := scopedMCPBaseEnv(entry)
+	addScopedServiceAccounts(config, id, entry, env)
 	if shouldPassWebEnvToMCP(id, entry) {
 		keys, _ := LoadAPIKeys(config)
 		if key := strings.TrimSpace(keys.ForProvider("brave")); key != "" {

@@ -22,6 +22,12 @@ NullBot is designed to feel like a real local assistant without quietly becoming
 | MCP | Lists configured MCP servers and cached market packages; external powers are expected to come from separate MCP binaries. |
 | Safety | No built-in arbitrary shell, code editing, email, browser, or broad filesystem access. Add those only through explicit MCP tooling. |
 
+## Optional Email, Drive, and Messaging Accounts
+
+The initial service-connector implementation adds separate `nullbot-emails-mcp`, `nullbot-drives-mcp`, and `nullbot-messages-mcp` packages plus local Accounts setup in NullBot UI. Credentials use Windows current-user DPAPI and are passed only to the matching verified, enabled stdio connector. Saving an account does not install, enable, connect, or send anything.
+
+See [service account setup, supported providers, security boundaries, and limitations](docs/SERVICE_ACCOUNTS.md). Account support includes separate Gmail REST OAuth and fixed-TLS Gmail IMAP/SMTP app-password setup, Discord bots, Telegram bot pending updates/numeric chat-ID sends, and outbound-only Signal through a separately installed unofficial loopback `signal-cli-rest-api` bridge. No personal messaging login, automatic installation, Signal linking, or live credential verification is performed. These packages remain unreleased until binaries and checksums are explicitly published; OAuth setup and access-token replacement are manual in this initial implementation.
+
 ## Quick Start
 
 Run it:

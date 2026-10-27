@@ -247,8 +247,23 @@ func defaultMarketManifest(config Config) MarketManifest {
 					URL:  "https://raw.githubusercontent.com/Bradthebrad/nullbot-skills/main/skills/mcp-skill/SKILL.md",
 				}},
 			},
+			skillMarketPackage("web-search", "Web Search Skill", "Search, triage results, fetch public pages safely, and pull readable text with NullBot Web MCP."),
+			skillMarketPackage("web-tools", "Web Tools Skill", "When to search and when to drive a browser, and the Web MCP safety rules."),
+			skillMarketPackage("browser-automation", "Browser Automation Skill", "Use the Web MCP browser tools safely: launch or attach, navigate, read, click, type, screenshots and tabs."),
+			skillMarketPackage("browser-research", "Browser Research Skill", "Multi-step research that combines search, safe fetches, rendered pages, screenshots and citations."),
 		},
 	}
+}
+
+// skillMarketPackage is a one-file skill from the nullbot-skills repository.
+func skillMarketPackage(id, name, description string) MarketPackage {
+	return MarketPackage{ID: id, Kind: "skill_pack", Name: name, Description: description,
+		Repo: "Bradthebrad/nullbot-skills", Permissions: []string{"skill_install"}, Status: "available",
+		SkillFiles: []MarketSkillFile{{
+			Name: id,
+			Path: "skills/" + id + "/SKILL.md",
+			URL:  "https://raw.githubusercontent.com/Bradthebrad/nullbot-skills/main/skills/" + id + "/SKILL.md",
+		}}}
 }
 
 func serviceMarketPackage(domain, label, description string, permissions []string) MarketPackage {

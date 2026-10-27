@@ -31,7 +31,7 @@ func TestHumanMessageWithImageAttachment(t *testing.T) {
 	dir := t.TempDir()
 	imagePath := filepath.Join(dir, "clipboard.png")
 	writeAttachmentTestPNG(t, imagePath)
-	msg := humanMessageWithAttachments(`look at @file("` + imagePath + `")`, Config{WorkspaceDir: dir})
+	msg := humanMessageWithAttachments(`look at @file("`+imagePath+`")`, Config{WorkspaceDir: dir})
 	if msg.Type != "human" {
 		t.Fatalf("message type = %q", msg.Type)
 	}

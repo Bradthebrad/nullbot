@@ -10,25 +10,25 @@ import (
 )
 
 type App struct {
-	routingMu          sync.Mutex
-	requestReceipts    map[string]Submission
-	receiptOrder       []string
-	persistMu          sync.Mutex
-	modelFactory       func(Config, bool) (tcagent.Model, error)
-	mu                 sync.Mutex
-	submissions        map[string]*submissionJob
-	submissionOrder    []string
-	submissionSeq      uint64
-	primaryJob         *submissionJob
-	submissionQueue    []*submissionJob
-	config             Config
-	history            []Message
-	activity           []ActivityRecord
-	sessionID          string
-	logs               []string
-	logger             *Logger
-	plan               string
-	paused             bool
+	routingMu       sync.Mutex
+	requestReceipts map[string]Submission
+	receiptOrder    []string
+	persistMu       sync.Mutex
+	modelFactory    func(Config, bool) (tcagent.Model, error)
+	mu              sync.Mutex
+	submissions     map[string]*submissionJob
+	submissionOrder []string
+	submissionSeq   uint64
+	primaryJob      *submissionJob
+	submissionQueue []*submissionJob
+	config          Config
+	history         []Message
+	activity        []ActivityRecord
+	sessionID       string
+	logs            []string
+	logger          *Logger
+	plan            string
+	paused          bool
 	// halted is set by Stop everything until Resume: a run that starts in
 	// the meantime is cancelled at once. Pause only holds runs at the gate.
 	halted             bool

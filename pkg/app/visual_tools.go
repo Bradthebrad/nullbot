@@ -73,11 +73,13 @@ func visualizeTool(state *App) agent.Tool {
 			if err != nil {
 				return "", err
 			}
-			live, err := state.createVisualization(ctx, spec)
+			live, waiter, err := state.createVisualization(ctx, spec)
 			if err != nil {
 				return "", err
 			}
+			state.visualMu.Lock()
 			meta := live.snapshot()
+			state.visualMu.Unlock()
 			if !meta.Wait {
 				return prettyJSON(map[string]any{
 					"id":       meta.ID,
@@ -87,7 +89,7 @@ func visualizeTool(state *App) agent.Tool {
 					"note":     "It is open in the app. When the person presses Send, their response arrives as a new message. Read their response and interactions any time with visualize_results.",
 				}), nil
 			}
-			status := state.awaitVisual(ctx, live, spec.Timeout)
+			status := state.awaitVisual(ctx, live, waiter, spec.Timeout)
 			current, err := state.Visualization(meta.ID)
 			if err != nil {
 				return "", err

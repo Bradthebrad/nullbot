@@ -56,6 +56,10 @@ type App struct {
 	visualsOn atomic.Bool
 	visualMu  sync.Mutex
 	visuals   map[string]*visualLive
+	// The key visual records are signed with, once read.
+	visualKeyMu   sync.Mutex
+	visualKeyPath string
+	visualKeyData []byte
 }
 
 const (

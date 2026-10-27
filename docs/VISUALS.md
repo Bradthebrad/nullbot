@@ -63,12 +63,25 @@ project allows writing and `.nullbot` is a plain folder (not a link).
 Otherwise it is in the app folder under `visualizations/<project id>`. The
 Visuals page in the app lists them by project.
 
+`.nullbot` gets a `.gitignore` that ignores everything in it, since records
+hold what the person typed and sent; delete that file to commit them.
+
+Each `visual.json` is signed with a key kept in the app folder
+(`visualizations/.key`). A record that doesn't verify (written by hand, copied
+from another computer, or shipped in a repository) is ignored: it isn't
+listed, opened or read back to the agent. A visual in a project that no longer
+allows writing stays as it was: it can be viewed, not recorded into, answered
+or deleted.
+
 ## Permissions
 
 `visualize` needs read access to the files it shows (checked like any tool's
 paths). `allow_network`, which lets an html or svg visual load from and talk
-to the internet, needs the Full permission in the project. Recording the
-visual's own folder is NullBot bookkeeping and needs no write access.
+to the internet, needs the Full permission everywhere the page can read: its
+site folder and every project inside it, or its project when it has no site
+folder. That is checked again each time the visual opens, so taking Full away
+takes the internet away. A page from a project is served only from its site
+folder, after links are followed, and never NullBot's records (`.nullbot`).
 
 ## How visuals are kept apart from the app
 
@@ -85,8 +98,16 @@ files and NullBot's bundled libraries (Chart.js at `/__nullbot/lib/chart.js`).
 The app also refuses to start inside a frame, so a visual that loads the
 app's own address gets a blank page with nothing that can reach NullBot.
 
-What a sandbox can't stop: a page can still navigate its own frame to a web
-address, which carries whatever the page puts in the URL. Links to the web are
-blocked by the bridge, but a script that sets `location` is not. Pages shown
-from a project can fetch that page's folder; treat a visual like any page you
-open.
+What a page policy can't stop, even with the network off:
+
+- navigating its own frame to a web address, which carries whatever the page
+  puts in the URL (the bridge blocks links to the web, not a script setting
+  `location`);
+- channels the policy doesn't cover, such as WebRTC connection setup and DNS
+  prefetching.
+
+Pages shown from a project can read that page's folder. Treat a visual like
+any web page you open.
+
+The Visuals page previews pages and drawings only when you press Show
+preview, since they run their own scripts.

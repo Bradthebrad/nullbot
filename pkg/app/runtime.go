@@ -670,8 +670,13 @@ func mcpRuntimeEnv(config Config, id string, entry MCPEntry) map[string]string {
 			env["GEMINI_API_KEY"] = key
 		}
 	}
-	env["NULLBOT_VISION_PROVIDER"] = config.Model.Provider
-	env["NULLBOT_VISION_MODEL"] = config.Model.Model
+	// The vision tools call OpenAI or OpenRouter. Suggest the chat model only
+	// when it comes from one of them; another provider's model name would be
+	// sent to the wrong API, so the server picks its own default instead.
+	if provider := strings.ToLower(config.Model.Provider); provider == "openai" || provider == "openrouter" {
+		env["NULLBOT_VISION_PROVIDER"] = provider
+		env["NULLBOT_VISION_MODEL"] = config.Model.Model
+	}
 	if len(env) == 0 {
 		return nil
 	}

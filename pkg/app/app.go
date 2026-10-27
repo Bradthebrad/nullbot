@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	tcagent "github.com/Bradthebrad/tinychain/agent"
 	"strings"
@@ -650,4 +651,39 @@ func (a *App) logError(message string, fields ...any) {
 	logger := a.logger
 	a.mu.Unlock()
 	logger.Error(message, fields...)
+}
+
+// Ask runs one request to completion for callers without a UI, such as the
+// headless command line. It reports how the request ended: "done", "error"
+// or "canceled", with the error when there was one. Slash commands run
+// directly and report "done".
+func (a *App) Ask(ctx context.Context, input string, sink func(ActivityRecord)) (Reply, string, error) {
+	ctx, input, err := withSkillInvocation(ctx, a.Config(), input)
+	if err != nil {
+		return a.reply(err.Error(), "", ""), "error", err
+	}
+	if strings.HasPrefix(strings.TrimSpace(input), "/") {
+		return a.submitDirect(ctx, input, sink), "done", nil
+	}
+	job, receipt := a.enqueueSubmissionWith(ctx, input, "queue", sink, true)
+	if job == nil {
+		return a.reply(receipt.Error, "", ""), "error", errors.New(receipt.Error)
+	}
+	select {
+	case <-job.done:
+	case <-ctx.Done():
+		a.CancelQueuedSubmission(job.ID)
+		<-job.done
+	}
+	reply := a.takeFullReply(job)
+	a.mu.Lock()
+	status, message := job.Status, job.Error
+	a.mu.Unlock()
+	if status == "done" {
+		return reply, status, nil
+	}
+	if message == "" {
+		message = status
+	}
+	return reply, status, errors.New(message)
 }

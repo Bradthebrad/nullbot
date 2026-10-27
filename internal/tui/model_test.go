@@ -237,15 +237,15 @@ func TestPathCompletionPickerForMultipleDirectories(t *testing.T) {
 
 func TestInlineHistorySuggestionCompletesFrequentCommand(t *testing.T) {
 	model := New(app.New(app.DefaultConfig()))
-	model.rememberInput("/files workspace C:\\Users\\brada")
-	model.rememberInput("/files workspace C:\\Users\\brada")
+	model.rememberInput("/files workspace C:\\Users\\you")
+	model.rememberInput("/files workspace C:\\Users\\you")
 	model.input.SetValue("/files")
 	model.updateInlineSuggestion()
-	if got := model.inlineSuggestion; got != "/files workspace C:\\Users\\brada" {
+	if got := model.inlineSuggestion; got != "/files workspace C:\\Users\\you" {
 		t.Fatalf("suggestion = %q", got)
 	}
 	model.completeInput()
-	if got := model.input.Value(); got != "/files workspace C:\\Users\\brada" {
+	if got := model.input.Value(); got != "/files workspace C:\\Users\\you" {
 		t.Fatalf("completed = %q", got)
 	}
 }

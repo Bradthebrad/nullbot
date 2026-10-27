@@ -12,10 +12,13 @@ type Project struct {
 	Name       string `json:"name"`
 	Path       string `json:"path"`
 	Permission string `json:"permission"`
+	// Allow lists extra capabilities (write, delete, execute) for the custom
+	// permission. Read is always included.
+	Allow []string `json:"allow,omitempty"`
 }
 
-// Full permits unsandboxed external tools/processes, not filesystem isolation.
-const FullAccessWarning = "Full allows unsandboxed MCP servers and commands, which can access paths outside projects. All projects must be Full to enable external tools. Existing processes are not revoked."
+// FullAccessWarning explains what the Full permission means.
+const FullAccessWarning = "Full lets tools run programs and commands in this project. Tool servers are separate programs: NullBot checks every tool call's paths against your project permissions, but it cannot sandbox what a server's own code does."
 
 func effectiveProjects(c Config) []Project {
 	if len(c.Projects) != 0 {
@@ -50,8 +53,13 @@ func ValidateProjects(c Config) error {
 			return fmt.Errorf("project IDs must be nonempty and unique")
 		}
 		seen[p.ID] = true
-		if p.Permission != "read-only" && p.Permission != "read-write" && p.Permission != "full" {
+		if !ValidPermission(p.Permission) {
 			return fmt.Errorf("invalid permission for project %s", p.ID)
+		}
+		for _, allowed := range p.Allow {
+			if _, ok := capabilityRank[Capability(strings.ToLower(strings.TrimSpace(allowed)))]; !ok {
+				return fmt.Errorf("invalid custom capability %q for project %s", allowed, p.ID)
+			}
 		}
 		if !filepath.IsAbs(p.Path) {
 			return fmt.Errorf("project path must be absolute: %s", p.Path)
@@ -121,8 +129,23 @@ func pathWithin(root, path string) bool {
 // CheckProjectPath uses the most restrictive overlapping grant. Tree mutations
 // cannot cross a protected nested project. This is a policy check, not an OS sandbox.
 func CheckProjectPath(c Config, path string, write, tree bool) (string, error) {
+	capability := CapRead
+	if write {
+		capability = CapWrite
+	}
+	return CheckProjectAccess(c, path, capability, tree)
+}
+
+// CheckProjectAccess is CheckProjectPath for a specific capability: every
+// project the path falls in (and, for tree operations, every project inside
+// the path) must allow it. Paths outside all projects are refused before any
+// filesystem access, so a path such as \\host\share never reaches the network.
+func CheckProjectAccess(c Config, path string, capability Capability, tree bool) (string, error) {
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(c.WorkspaceDir, path)
+	}
+	if !PathLexicallyInProjects(c, path) {
+		return "", fmt.Errorf("path is outside configured projects")
 	}
 	target, err := canonicalPath(path)
 	if err != nil {
@@ -139,13 +162,13 @@ func CheckProjectPath(c Config, path string, write, tree bool) (string, error) {
 			matched = true
 		}
 		if inside || (tree && pathWithin(target, root)) {
-			if p.Permission != "read-only" && p.Permission != "read-write" && p.Permission != "full" {
+			if !ValidPermission(p.Permission) {
 				return "", fmt.Errorf("invalid project permission")
 			}
-			if write && p.Permission == "read-only" {
-				return "", fmt.Errorf("project %s is read-only", p.Name)
+			if !ProjectAllows(p, capability) {
+				return "", fmt.Errorf("%s", deniedMessage(p, capability))
 			}
-			if write && tree && pathWithin(target, root) {
+			if capability != CapRead && tree && pathWithin(target, root) {
 				return "", fmt.Errorf("cannot mutate project root %s", p.Name)
 			}
 		}
@@ -154,4 +177,39 @@ func CheckProjectPath(c Config, path string, write, tree bool) (string, error) {
 		return "", fmt.Errorf("path is outside configured projects")
 	}
 	return target, nil
+}
+
+func deniedMessage(p Project, capability Capability) string {
+	switch capability {
+	case CapWrite:
+		return fmt.Sprintf("project %s is read-only", p.Name)
+	case CapDelete:
+		return fmt.Sprintf("project %s does not allow deleting files", p.Name)
+	case CapExecute:
+		return fmt.Sprintf("project %s does not allow running programs", p.Name)
+	}
+	return fmt.Sprintf("project %s does not allow %s", p.Name, capability)
+}
+
+// PathLexicallyInProjects reports whether path, cleaned but not resolved, lies
+// inside a project root. It touches no filesystem, so callers can refuse a
+// path (for example a UNC path to an unknown host) before doing any I/O.
+func PathLexicallyInProjects(c Config, path string) bool {
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(c.WorkspaceDir, path)
+	}
+	target := filepath.Clean(path)
+	for _, p := range effectiveProjects(c) {
+		if strings.TrimSpace(p.Path) == "" {
+			continue
+		}
+		root, err := filepath.Abs(filepath.Clean(p.Path))
+		if err != nil {
+			continue
+		}
+		if pathWithin(root, target) {
+			return true
+		}
+	}
+	return false
 }

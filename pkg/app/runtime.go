@@ -23,8 +23,6 @@ type runtimeBundle struct {
 	closers []func() error
 }
 
-const mcpDiscoveryTimeout = 5 * time.Second
-
 func (a *App) runAgent(ctx context.Context, skillHints []string) Reply {
 	workCtx, taskID := a.beginWork(ctx)
 	var final string
@@ -62,8 +60,10 @@ func (a *App) runAgent(ctx context.Context, skillHints []string) Reply {
 	if err != nil {
 		finalErr = err
 		if workCtx.Err() != nil {
-			a.logInfo("agent paused")
-			return a.reply("Paused.", "", "")
+			a.logInfo("agent stopped")
+			reply := a.reply("Stopped before finishing.", "", "")
+			reply.Data = map[string]any{"canceled": true}
+			return reply
 		}
 		a.logError("agent execution failed", "error", err)
 		return a.reply("Agent error: "+err.Error(), "", "")
@@ -194,6 +194,9 @@ func (a *App) buildRuntime(ctx context.Context, skillHints []string) (*runtimeBu
 	if err != nil {
 		return nil, err
 	}
+	// Usage and learned context sizes belong to the model this run uses,
+	// even if the setting changes while it runs.
+	runModel := effectiveModelConfig(config, config.Model)
 
 	skills, err := loadSkills(config)
 	if err != nil {
@@ -213,8 +216,9 @@ func (a *App) buildRuntime(ctx context.Context, skillHints []string) (*runtimeBu
 			Tools:         tools,
 			Skills:        skills,
 			MaxIterations: config.Agent.MaxIterations,
-			Callbacks:     callbacks.SinkFunc(func(event callbacks.Event) { a.handleScopedCallback(ctx, event) }),
-			Context:       agentContextPolicy(config),
+			Callbacks:     callbacks.SinkFunc(func(event callbacks.Event) { a.handleRunCallback(ctx, event, runModel) }),
+			Context:       agentContextPolicy(config, config.Model),
+			Gate:          a.gate(),
 		}),
 		closers: closers,
 	}, nil
@@ -317,7 +321,8 @@ func (a *App) executeSubagent(subCtx context.Context, taskID, name, task string)
 			}
 			a.appendActivity(record)
 		}),
-		Context: agentContextPolicy(config),
+		Context: agentContextPolicy(config, config.SubagentModel),
+		Gate:    a.gate(),
 	})
 	inbox, releaseInbox := a.workerInstructionInbox(subCtx, taskID)
 	defer releaseInbox()
@@ -344,12 +349,16 @@ func subagentSystemPrompt(config Config, name, task string, tools []tcagent.Tool
 	if root, err := workspaceRoot(config); err == nil {
 		fmt.Fprintf(&b, "Configured workspace: %s\n", root)
 	}
+	b.WriteString(projectsPrompt(config))
 	if len(tools) > 0 {
 		b.WriteString("Available tools:\n")
 		for _, tool := range tools {
 			def := tool.Definition()
 			fmt.Fprintf(&b, "- %s: %s\n", def.Name, def.Description)
 		}
+	}
+	if hasTool(tools, "visualize") {
+		b.WriteString(visualizeGuidance)
 	}
 	if len(skills) > 0 {
 		b.WriteString("Installed skills:\n")
@@ -372,6 +381,31 @@ func subagentSystemPrompt(config Config, name, task string, tools []tcagent.Tool
 	return strings.TrimSpace(prompt)
 }
 
+// projectsPrompt tells the model which directories it may use and what each
+// permits, so it plans within them instead of discovering denials by trial.
+func projectsPrompt(config Config) string {
+	projects := effectiveProjects(config)
+	if len(projects) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("Projects and permissions (enforced on every tool call, including MCP tools):\n")
+	for _, p := range projects {
+		marker := ""
+		if p.ID == config.PrimaryProjectID {
+			marker = " [primary: relative paths and tools that take no path run here]"
+		}
+		caps := ProjectCapabilities(p)
+		names := make([]string, len(caps))
+		for i, c := range caps {
+			names[i] = string(c)
+		}
+		fmt.Fprintf(&b, "- %s: %s (allows %s)%s\n", projectDisplayName(p), p.Path, strings.Join(names, ", "), marker)
+	}
+	b.WriteString("Paths outside these projects are denied. If a call is denied with \"permission denied\", do not retry it; tell the user which project permission would allow it.\n")
+	return b.String()
+}
+
 func runtimeAgentName(ctx context.Context) string {
 	if scope := scopeFrom(ctx); scope != nil {
 		return scope.lane + "/" + scope.id
@@ -384,6 +418,12 @@ func (a *App) handleAgentCallback(event callbacks.Event) {
 }
 
 func (a *App) handleScopedCallback(ctx context.Context, event callbacks.Event) {
+	a.handleRunCallback(ctx, event, ModelConfig{})
+}
+
+// handleRunCallback records a callback from a run of model. An empty model
+// means the configured one.
+func (a *App) handleRunCallback(ctx context.Context, event callbacks.Event, model ModelConfig) {
 	record := activityRecordFromCallback(event)
 	scopeActivity(ctx, &record)
 	a.mu.Lock()
@@ -399,7 +439,10 @@ func (a *App) handleScopedCallback(ctx context.Context, event callbacks.Event) {
 		a.addTaskUsage(taskID, usageFromLLMEnd(event))
 	}
 	a.retainPublicCallback(ctx, taskID, event)
-	a.recordUsageCallback(taskID, runtimeAgentName(ctx), effectiveModelConfig(config, config.Model), event)
+	if strings.TrimSpace(model.Model) == "" {
+		model = effectiveModelConfig(config, config.Model)
+	}
+	a.recordUsageCallback(taskID, runtimeAgentName(ctx), model, event)
 	if record.Status == "reasoning" && record.Lane != "also" {
 		a.recordVisibleReasoning(record)
 	}
@@ -411,11 +454,7 @@ func modelFromConfig(config Config) (tcagent.Model, error) {
 }
 
 func subagentModelFromConfig(config Config) (tcagent.Model, error) {
-	modelConfig := config.SubagentModel
-	if strings.TrimSpace(modelConfig.Provider) == "" || strings.TrimSpace(modelConfig.Model) == "" {
-		modelConfig = config.Model
-	}
-	return modelFromModelConfig(config, modelConfig)
+	return modelFromModelConfig(config, effectiveModelConfig(config, config.SubagentModel))
 }
 
 func modelFromModelConfig(config Config, modelConfig ModelConfig) (tcagent.Model, error) {
@@ -509,8 +548,10 @@ func RuntimeStatus(config Config) map[string]any {
 	}
 }
 
+// effectiveModelConfig is the model that will actually run: one without a
+// model ID means the manager's model.
 func effectiveModelConfig(config Config, model ModelConfig) ModelConfig {
-	if strings.TrimSpace(model.Provider) == "" && strings.TrimSpace(model.Model) == "" {
+	if strings.TrimSpace(model.Model) == "" {
 		model = config.Model
 	}
 	if strings.TrimSpace(model.Provider) == "" {
@@ -519,32 +560,34 @@ func effectiveModelConfig(config Config, model ModelConfig) ModelConfig {
 	return model
 }
 
-func agentContextPolicy(config Config) tcagent.ContextPolicy {
-	compaction := config.Compaction
-	ratio := compaction.ThresholdRatio
-	if ratio <= 0 || ratio >= 1 {
-		ratio = 0.75
-	}
-	maxTokens := compaction.ApproxTokenLimit
-	if maxTokens <= 0 {
-		maxTokens = 64000
-	}
-	keepLast := compaction.KeepLastMessages
-	if keepLast <= 0 {
-		keepLast = 12
-	}
-	safetyChars := compaction.ToolResultCharLimit
-	if safetyChars <= 0 {
-		safetyChars = 12000
+// preservedTools are tools whose results are never shortened: a skill's
+// instructions must reach the model word for word.
+var preservedTools = []string{"skill_read"}
+
+// historyNote is added to every summary so the agent knows the original
+// messages are still on disk.
+const historyNote = "Everything summarized here is still saved: history_session_read reads this session's messages at full length, with the tool calls between them, and history_search searches every session."
+
+func agentContextPolicy(config Config, model ModelConfig) tcagent.ContextPolicy {
+	compaction := normalizeCompaction(config.Compaction)
+	window := ResolveContextWindow(config, model)
+	reserve := 0
+	if output := effectiveModelConfig(config, model).MaxTokens; output > 0 && output < window.Tokens/2 {
+		reserve = output
 	}
 	return tcagent.ContextPolicy{
 		Enabled:               compaction.Enabled,
-		MaxTokens:             maxTokens,
-		ThresholdRatio:        ratio,
-		ThresholdTokens:       int(float64(maxTokens) * ratio),
-		KeepLastMessages:      keepLast,
+		MaxTokens:             window.Tokens,
+		SoftRatio:             compaction.ShortenRatio,
+		HardRatio:             compaction.SummarizeRatio,
+		KeepLastMessages:      compaction.KeepLastMessages,
 		MaxMessages:           compaction.MessageCountLimit,
-		ToolResultSafetyChars: safetyChars,
+		ToolResultSafetyChars: compaction.ToolResultCharLimit,
+		ToolDigestChars:       compaction.ToolDigestChars,
+		PreserveTools:         preservedTools,
+		ReserveTokens:         reserve,
+		Focus:                 compaction.DefaultFocus,
+		Note:                  historyNote,
 	}
 }
 
@@ -570,50 +613,19 @@ func loadSkills(config Config) ([]tcagent.Skill, error) {
 	return skills, nil
 }
 
+// loadMCPTools returns tools from the shared MCP session pool. Servers start
+// on first use and stay running across turns; every call is authorized
+// against project permissions when it runs. The closers slice is kept for
+// callers that predate the pool and is always empty.
 func (a *App) loadMCPTools(ctx context.Context, config Config) ([]tcagent.Tool, []func() error) {
-	var tools []tcagent.Tool
-	var closers []func() error
-	if !allProjectsFull(config) {
-		return tools, closers
-	}
-	for id, entry := range config.EnabledMCPServers {
-		if !entry.Enabled {
-			continue
-		}
-		entry.Env = mcpRuntimeEnv(config, id, entry)
-		loadCtx, cancel := context.WithTimeout(ctx, mcpDiscoveryTimeout)
-		a.logInfo("mcp load start", "id", id, "transport", entry.Transport, "command", entry.Command)
-		client, err := mcpClientForEntry(ctx, entry)
-		if err != nil {
-			cancel()
-			a.logError("mcp connect failed", "id", id, "error", err)
-			continue
-		}
-		if _, err := client.Initialize(loadCtx); err != nil {
-			cancel()
-			_ = client.Close()
-			a.logError("mcp initialize failed", "id", id, "error", err)
-			continue
-		}
-		discovered, err := mcp.AgentTools(loadCtx, client)
-		cancel()
-		if err != nil {
-			_ = client.Close()
-			a.logError("mcp tools/list failed", "id", id, "error", err)
-			continue
-		}
-		a.logInfo("mcp load done", "id", id, "tools", len(discovered))
-		tools = append(tools, guardExternalTools(a, discovered)...)
-		closers = append(closers, client.Close)
-	}
-	return tools, closers
+	waitCtx, cancel := context.WithTimeout(ctx, mcpStartTimeout)
+	defer cancel()
+	return a.mcp().Tools(waitCtx, config), nil
 }
 
 func mcpRuntimeEnv(config Config, id string, entry MCPEntry) map[string]string {
-	env := map[string]string{}
-	for key, value := range entry.Env {
-		env[key] = value
-	}
+	env := scopedMCPBaseEnv(entry)
+	addScopedServiceAccounts(config, id, entry, env)
 	if shouldPassWebEnvToMCP(id, entry) {
 		keys, _ := LoadAPIKeys(config)
 		if key := strings.TrimSpace(keys.ForProvider("brave")); key != "" {
@@ -697,27 +709,85 @@ func mcpClientForEntry(ctx context.Context, entry MCPEntry) (*mcp.Client, error)
 	}
 }
 
+// langChainHistory is the conversation sent with a new request. It starts
+// from the latest compaction summary, if any, and takes messages newest
+// first while they fit in HistoryRatio of the model's context window. When
+// older messages don't fit, a note tells the agent how to read them.
 func (a *App) langChainHistory() []lc.BaseMessage {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	limit := a.config.Compaction.KeepLastMessages
-	if limit <= 0 || limit > len(a.history) {
-		limit = len(a.history)
+	config := a.config
+	history := append([]Message(nil), a.history...)
+	session := a.sessionID
+	a.mu.Unlock()
+	return carriedHistory(config, history, session)
+}
+
+// compactionRole marks a summary made by Compact. Requests after it start
+// from the summary instead of the messages before it.
+const compactionRole = "compaction"
+
+func carriedHistory(config Config, history []Message, session string) []lc.BaseMessage {
+	compaction := normalizeCompaction(config.Compaction)
+	window := ResolveContextWindow(config, config.Model)
+	budget := int(float64(window.Tokens) * compaction.HistoryRatio)
+	start := 0
+	var summary string
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role == compactionRole {
+			start, summary = i+1, history[i].Content
+			break
+		}
 	}
-	start := len(a.history) - limit
-	messages := make([]lc.BaseMessage, 0, limit)
-	for _, msg := range a.history[start:] {
-		if msg.Lane == "also" || msg.VisibleOnly || strings.HasPrefix(strings.TrimSpace(msg.Content), "/") {
+	var eligible []Message
+	for _, msg := range history[start:] {
+		if msg.Lane == "also" || msg.VisibleOnly || isCommandMessage(msg.Content) || (msg.Role != "user" && msg.Role != "assistant") {
 			continue
 		}
-		switch msg.Role {
-		case "assistant":
-			messages = append(messages, lc.AI(msg.Content))
-		default:
-			messages = append(messages, humanMessageWithAttachments(msg.Content, a.config))
-		}
+		eligible = append(eligible, msg)
 	}
-	return messages
+	picked := make([]lc.BaseMessage, 0, len(eligible))
+	used, first := 0, len(eligible)
+	for i := len(eligible) - 1; i >= 0; i-- {
+		message := carriedMessage(eligible[i], config)
+		tokens := tcagent.EstimateTokens([]lc.BaseMessage{message})
+		if used+tokens > budget && len(picked) > 0 {
+			break
+		}
+		used += tokens
+		picked = append(picked, message)
+		first = i
+	}
+	// A conversation sent to the model starts with a request.
+	for len(picked) > 0 && picked[len(picked)-1].Type != lc.RoleHuman {
+		picked = picked[:len(picked)-1]
+		first++
+	}
+	var out []lc.BaseMessage
+	if strings.TrimSpace(summary) != "" {
+		out = append(out, lc.System(summary))
+	}
+	if first > 0 {
+		out = append(out, lc.System(omittedHistoryNote(first, session)))
+	}
+	for i := len(picked) - 1; i >= 0; i-- {
+		out = append(out, picked[i])
+	}
+	return out
+}
+
+func carriedMessage(msg Message, config Config) lc.BaseMessage {
+	if msg.Role == "assistant" {
+		return lc.AI(msg.Content)
+	}
+	return humanMessageWithAttachments(msg.Content, config)
+}
+
+func omittedHistoryNote(count int, session string) string {
+	where := "this session"
+	if session != "" {
+		where = "session " + session
+	}
+	return fmt.Sprintf("%d earlier messages in this conversation are left out here to save room. They are saved: history_session_read reads them from %s (start at 0), and history_search finds anything said or done in any session.", count, where)
 }
 
 func baseSystemPrompt(config Config, skillHints []string, tools []tcagent.Tool, skills []tcagent.Skill) string {
@@ -731,7 +801,8 @@ func baseSystemPrompt(config Config, skillHints []string, tools []tcagent.Tool, 
 	if root, err := workspaceRoot(config); err == nil {
 		fmt.Fprintf(&b, "Configured workspace: %s\n", root)
 	}
-	fmt.Fprintf(&b, "You may spawn up to %d concurrent named subagents with `spawn_subagent` when decomposition helps. `spawn_subagent` returns a task id immediately; use `subagent_wait` or `subagent_status` to collect results before synthesizing. Give each subagent a narrow task. Subagents use `%s/%s` unless configured otherwise.\n", config.Agent.MaxSubagents, config.SubagentModel.Provider, config.SubagentModel.Model)
+	b.WriteString(projectsPrompt(config))
+	fmt.Fprintf(&b, "You may spawn up to %d concurrent named subagents with `spawn_subagent` when decomposition helps. `spawn_subagent` returns a task id immediately; use `subagent_wait` or `subagent_status` to collect results before synthesizing. Give each subagent a narrow task. Subagents use `%s/%s`.\n", config.Agent.MaxSubagents, effectiveModelConfig(config, config.SubagentModel).Provider, effectiveModelConfig(config, config.SubagentModel).Model)
 	b.WriteString("Available built-in tools are constrained to NullBot app data and configured workspace browsing: listing config-directory files, reading small config-directory text files, listing skills, reading installed skill markdown progressively with `skill_read`, creating SKILL.md files under the configured skills directory, listing/reading/updating saved JSON plans, refreshing/listing/installing market packages, enabling/disabling/removing installed MCP servers, listing configured MCP servers, summarizing recent visible chat history, reading compact persisted session history, and reading recent NullBot runtime log lines.\n")
 	if len(tools) > 0 {
 		b.WriteString("Current tool inventory:\n")
@@ -739,6 +810,9 @@ func baseSystemPrompt(config Config, skillHints []string, tools []tcagent.Tool, 
 			def := tool.Definition()
 			fmt.Fprintf(&b, "- %s: %s\n", def.Name, def.Description)
 		}
+	}
+	if hasTool(tools, "visualize") {
+		b.WriteString(visualizeGuidance)
 	}
 	if len(skills) > 0 {
 		b.WriteString("Installed user skills:\n")

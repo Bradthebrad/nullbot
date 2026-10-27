@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,7 +59,9 @@ func (a *App) mcpPanelReply(message string) Reply {
 	return reply
 }
 
-func (a *App) planCommand(sub string) Reply {
+// planCommand runs in the request that asked for it, so Stop and Pause
+// reach the planner too.
+func (a *App) planCommand(ctx context.Context, sub string) Reply {
 	sub = strings.TrimSpace(sub)
 	if strings.HasPrefix(sub, "focus ") {
 		sub = strings.TrimSpace(strings.TrimPrefix(sub, "focus "))
@@ -82,7 +83,7 @@ func (a *App) planCommand(sub string) Reply {
 		return reply
 	}
 	if sub != "" {
-		plan, err := a.runPlanner(contextOrBackground(), sub)
+		plan, err := a.runPlanner(ctx, sub)
 		if err != nil {
 			reply := a.planPanelReply("Plan creation failed: " + err.Error())
 			reply.Data["error"] = err.Error()
@@ -203,13 +204,6 @@ func (a *App) skillsCommand(sub string) Reply {
 	return reply
 }
 
-func (a *App) compactCommand(focus string) Reply {
-	summary := a.compactSummary(focus)
-	reply := a.reply(summary, "/compact", "compact")
-	reply.Data = map[string]any{"summary": summary, "focus": focus}
-	return reply
-}
-
 func (a *App) filesCommand(sub string) Reply {
 	fields := strings.Fields(sub)
 	if len(fields) >= 2 && fields[0] == "workspace" {
@@ -277,25 +271,6 @@ func (a *App) removeFileCommand(command, sub string, dirsOnly bool) Reply {
 		return a.reply("Remove failed: "+err.Error(), command, "files")
 	}
 	return a.reply(message, command, "files")
-}
-
-func (a *App) compactSummary(focus string) string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	limit := a.config.Compaction.KeepLastMessages
-	if limit <= 0 || limit > len(a.history) {
-		limit = len(a.history)
-	}
-	start := len(a.history) - limit
-	var b strings.Builder
-	if strings.TrimSpace(focus) != "" {
-		fmt.Fprintf(&b, "Compaction focus: %s\n\n", strings.TrimSpace(focus))
-	}
-	fmt.Fprintf(&b, "Kept last %d messages verbatim out of %d visible messages.\n", limit, len(a.history))
-	for _, msg := range a.history[start:] {
-		fmt.Fprintf(&b, "- %s: %s\n", msg.Role, truncate(msg.Content, 220))
-	}
-	return strings.TrimSpace(b.String())
 }
 
 func scanSkillFiles(config Config) []string {

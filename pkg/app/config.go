@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -49,14 +50,40 @@ type AgentConfig struct {
 	UseResponses  bool `json:"use_responses"`
 }
 
+// CompactionConfig controls how NullBot keeps requests inside each model's
+// context window. See docs/CONTEXT.md.
 type CompactionConfig struct {
-	Enabled             bool    `json:"enabled"`
-	ApproxTokenLimit    int     `json:"approx_token_limit"`
-	ThresholdRatio      float64 `json:"threshold_ratio,omitempty"`
-	MessageCountLimit   int     `json:"message_count_limit"`
-	KeepLastMessages    int     `json:"keep_last_messages"`
-	ToolResultCharLimit int     `json:"tool_result_char_limit"`
-	DefaultFocus        string  `json:"default_focus,omitempty"`
+	Enabled bool `json:"enabled"`
+	// ApproxTokenLimit is the context size used for a model whose size is
+	// unknown: no override, nothing reported by its provider, and not a
+	// family NullBot knows.
+	ApproxTokenLimit int `json:"approx_token_limit"`
+	// ContextWindows overrides a model's context size, keyed
+	// "provider/model".
+	ContextWindows map[string]int `json:"context_windows,omitempty"`
+	// ShortenRatio is how full the context gets before earlier tool results
+	// are shortened to the tool, its arguments and the start of its output.
+	ShortenRatio float64 `json:"shorten_ratio,omitempty"`
+	// SummarizeRatio is how full it gets before the model summarizes
+	// older messages.
+	SummarizeRatio float64 `json:"summarize_ratio,omitempty"`
+	// ThresholdRatio is the former single threshold. A customized value
+	// becomes SummarizeRatio.
+	ThresholdRatio float64 `json:"threshold_ratio,omitempty"`
+	// HistoryRatio is how much of the window earlier messages in the
+	// conversation may take when a new request starts.
+	HistoryRatio float64 `json:"history_ratio,omitempty"`
+	// MessageCountLimit also starts shortening at this many messages in one
+	// request.
+	MessageCountLimit int `json:"message_count_limit"`
+	// KeepLastMessages is used only when a model's size can't be measured.
+	KeepLastMessages int `json:"keep_last_messages"`
+	// ToolResultCharLimit is the most of an oversized tool result shown.
+	ToolResultCharLimit int `json:"tool_result_char_limit"`
+	// ToolDigestChars is how much of a tool's output a shortened result
+	// keeps.
+	ToolDigestChars int    `json:"tool_digest_chars,omitempty"`
+	DefaultFocus    string `json:"default_focus,omitempty"`
 }
 
 type PromptConfig struct {
@@ -74,6 +101,10 @@ type EditorConfig struct {
 type UIConfig struct {
 	Theme                 string `json:"theme"`
 	SuggestMatchingSkills bool   `json:"suggest_matching_skills"`
+	// Appearance is system, light or dark (desktop UI). Accent names the
+	// signal color used for live state and focus.
+	Appearance string `json:"appearance,omitempty"`
+	Accent     string `json:"accent,omitempty"`
 }
 
 type MCPEntry struct {
@@ -83,6 +114,12 @@ type MCPEntry struct {
 	Env       map[string]string `json:"env,omitempty"`
 	Transport string            `json:"transport"`
 	Enabled   bool              `json:"enabled"`
+	// Headers are sent with every request to a remote (HTTP) server, for
+	// example an Authorization header.
+	Headers map[string]string `json:"headers,omitempty"`
+	// ToolPolicies overrides the capability a tool is treated as needing:
+	// auto, read, write, delete, execute or blocked.
+	ToolPolicies map[string]string `json:"tool_policies,omitempty"`
 }
 
 func DefaultConfig() Config {
@@ -103,10 +140,13 @@ func DefaultConfig() Config {
 		Compaction: CompactionConfig{
 			Enabled:             true,
 			ApproxTokenLimit:    64000,
-			ThresholdRatio:      0.75,
+			ShortenRatio:        0.60,
+			SummarizeRatio:      0.85,
+			HistoryRatio:        0.30,
 			MessageCountLimit:   80,
 			KeepLastMessages:    12,
 			ToolResultCharLimit: 12000,
+			ToolDigestChars:     600,
 		},
 		Editor: EditorConfig{
 			Command: defaultEditor(),
@@ -165,9 +205,22 @@ func loadOrInit(config Config) (Config, error) {
 	}
 	data = bytes.TrimPrefix(data, []byte{0xEF, 0xBB, 0xBF})
 	config.Projects = nil
- config.PrimaryProjectID = ""
+	config.PrimaryProjectID = ""
 	if err := json.Unmarshal(data, &config); err != nil {
 		return Config{}, err
+	}
+	// The defaults filled in the new ratios before the file was read; a file
+	// from before they existed must not keep them over its own threshold.
+	var raw struct {
+		Compaction map[string]json.RawMessage `json:"compaction"`
+	}
+	if json.Unmarshal(data, &raw) == nil && raw.Compaction != nil {
+		if _, ok := raw.Compaction["summarize_ratio"]; !ok {
+			config.Compaction.SummarizeRatio = 0
+		}
+		if _, ok := raw.Compaction["shorten_ratio"]; !ok {
+			config.Compaction.ShortenRatio = 0
+		}
 	}
 	config = normalizeConfig(config)
 	if config.AppDir == "" {
@@ -211,6 +264,42 @@ func EnsureAppDir(config Config) error {
 	return ensureDefaultSkill(defaultSkillPath(config))
 }
 
+func normalizeCompaction(c CompactionConfig) CompactionConfig {
+	if c.SummarizeRatio <= 0 || c.SummarizeRatio >= 1 {
+		c.SummarizeRatio = 0.85
+		// 0.75 was the old default; anything else was chosen on purpose.
+		if c.ThresholdRatio > 0 && c.ThresholdRatio < 1 && c.ThresholdRatio != 0.75 {
+			c.SummarizeRatio = c.ThresholdRatio
+		}
+	}
+	c.ThresholdRatio = 0
+	if c.ShortenRatio <= 0 {
+		c.ShortenRatio = 0.60
+	}
+	if c.ShortenRatio >= c.SummarizeRatio {
+		c.ShortenRatio = c.SummarizeRatio * 0.7
+	}
+	if c.HistoryRatio <= 0 {
+		c.HistoryRatio = 0.30
+	}
+	c.HistoryRatio = math.Min(math.Max(c.HistoryRatio, 0.05), c.ShortenRatio)
+	if c.ToolDigestChars <= 0 {
+		c.ToolDigestChars = 600
+	}
+	// Build a new map: configs are copied by value, so the map is shared
+	// with running agents and must never be changed in place.
+	if len(c.ContextWindows) > 0 {
+		windows := make(map[string]int, len(c.ContextWindows))
+		for key, tokens := range c.ContextWindows {
+			if tokens >= 1024 && strings.TrimSpace(key) != "" {
+				windows[key] = tokens
+			}
+		}
+		c.ContextWindows = windows
+	}
+	return c
+}
+
 func normalizeConfig(config Config) Config {
 	if config.Agent.MaxIterations <= 0 || config.Agent.MaxIterations == 8 {
 		config.Agent.MaxIterations = defaultMaxIterations
@@ -218,9 +307,7 @@ func normalizeConfig(config Config) Config {
 	if config.Agent.MaxSubagents <= 0 {
 		config.Agent.MaxSubagents = 3
 	}
-	if config.Compaction.ThresholdRatio <= 0 || config.Compaction.ThresholdRatio >= 1 {
-		config.Compaction.ThresholdRatio = 0.75
-	}
+	config.Compaction = normalizeCompaction(config.Compaction)
 	if config.Compaction.ApproxTokenLimit <= 0 {
 		config.Compaction.ApproxTokenLimit = 64000
 	}
@@ -230,11 +317,10 @@ func normalizeConfig(config Config) Config {
 	if config.Compaction.ToolResultCharLimit <= 0 {
 		config.Compaction.ToolResultCharLimit = 12000
 	}
-	if strings.TrimSpace(config.SubagentModel.Provider) == "" {
-		config.SubagentModel = config.Model
-	}
-	if strings.TrimSpace(config.SubagentModel.Model) == "" {
-		config.SubagentModel.Model = config.Model.Model
+	// An empty subagent model means "the same as the manager" and follows
+	// the manager when it changes; see effectiveModelConfig.
+	if sub := config.SubagentModel; strings.TrimSpace(sub.Model) == "" && strings.EqualFold(strings.TrimSpace(sub.Provider), strings.TrimSpace(config.Model.Provider)) {
+		config.SubagentModel.Provider = ""
 	}
 	if strings.TrimSpace(config.BrandPrefix) == "" {
 		config.BrandPrefix = DefaultPrefix

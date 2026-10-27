@@ -196,7 +196,7 @@ Install flow:
   "id": "nullbot-code-mcp",
   "name": "NullBot Code MCP",
   "transport": "stdio",
-  "command": "C:\\Users\\brada\\.nullbot\\mcp\\nullbot-code-mcp\\nullbot-code-mcp.exe",
+  "command": "C:\\Users\\you\\.nullbot\\mcp\\nullbot-code-mcp\\nullbot-code-mcp.exe",
   "args": ["--workspace", "{{workspace}}"],
   "enabled": false,
   "permissions": ["workspace_read", "workspace_write", "command_execute"],

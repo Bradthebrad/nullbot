@@ -24,7 +24,11 @@ type Submission struct {
 	Error     string `json:"error,omitempty"`
 }
 type SubmissionSnapshot struct {
-	Paused    bool         `json:"paused"`
+	Paused bool `json:"paused"`
+	// RunPaused is set while running agents are held at their next step.
+	RunPaused bool `json:"run_paused,omitempty"`
+	// Stopping is set while the running request wraps up after Stop.
+	Stopping  bool         `json:"stopping,omitempty"`
 	Busy      bool         `json:"busy"`
 	PrimaryID string       `json:"primary_id,omitempty"`
 	Queue     []Submission `json:"queue"`
@@ -36,7 +40,52 @@ type submissionJob struct {
 	sink  func(ActivityRecord)
 	done  chan struct{}
 	scope *invocationScope
+	// full holds the complete reply (history, config, activity) only for a
+	// synchronous caller waiting on this job; it is released once taken.
+	wantFull bool
+	full     *Reply
 }
+
+const (
+	retainedSubmissions = 32
+	retainedReceipts    = 256
+)
+
+// slimReply keeps what UIs need to report a finished job. History and config
+// have one owner (the App) and are never copied into retained jobs.
+func slimReply(reply Reply) *Reply {
+	slim := Reply{Message: reply.Message, Command: reply.Command, OpenPanel: reply.OpenPanel}
+	if len(reply.Data) > 0 {
+		slim.Data = map[string]any{}
+		for k, v := range reply.Data {
+			switch k {
+			case "submissions", "history", "tasks", "schedules", "runtime", "activity":
+				continue
+			}
+			slim.Data[k] = v
+		}
+	}
+	return &slim
+}
+
+// takeFullReply returns the waiter's complete reply, falling back to the slim
+// reply plus current state.
+func (a *App) takeFullReply(job *submissionJob) Reply {
+	a.mu.Lock()
+	full := job.full
+	job.full = nil
+	slim := job.Reply
+	a.mu.Unlock()
+	if full != nil {
+		return *full
+	}
+	reply := a.State()
+	if slim != nil {
+		reply.Message, reply.Command, reply.OpenPanel = slim.Message, slim.Command, slim.OpenPanel
+	}
+	return reply
+}
+
 type invocationScope struct {
 	id, lane, taskID string
 	inbox            *tcagent.InstructionInbox
@@ -82,11 +131,22 @@ func (a *App) SubmitRoutedRequest(ctx context.Context, input, mode, requestID, t
 			a.requestReceipts = map[string]Submission{}
 		}
 		a.requestReceipts[requestID] = receipt
+		a.receiptOrder = append(a.receiptOrder, requestID)
+		if over := len(a.receiptOrder) - retainedReceipts; over > 0 {
+			for _, old := range a.receiptOrder[:over] {
+				delete(a.requestReceipts, old)
+			}
+			a.receiptOrder = append([]string(nil), a.receiptOrder[over:]...)
+		}
 	}
 	return receipt
 }
 
 func (a *App) enqueueSubmission(ctx context.Context, input, mode string, sink func(ActivityRecord), requestIDs ...string) (*submissionJob, Submission) {
+	return a.enqueueSubmissionWith(ctx, input, mode, sink, false, requestIDs...)
+}
+
+func (a *App) enqueueSubmissionWith(ctx context.Context, input, mode string, sink func(ActivityRecord), wantFull bool, requestIDs ...string) (*submissionJob, Submission) {
 	if mode == "" {
 		mode = "send"
 	}
@@ -98,6 +158,10 @@ func (a *App) enqueueSubmission(ctx context.Context, input, mode string, sink fu
 	}
 	if strings.TrimSpace(input) == "" {
 		return reject("Message is empty")
+	}
+	ctx, input, err := withSkillInvocation(ctx, a.Config(), input)
+	if err != nil {
+		return reject(err.Error())
 	}
 	if strings.HasPrefix(strings.TrimSpace(input), "/") {
 		return reject("Use the command API for slash commands")
@@ -131,7 +195,7 @@ func (a *App) enqueueSubmission(ctx context.Context, input, mode string, sink fu
 		}
 		a.appendActivity(ActivityRecord{Time: time.Now().UTC(), Kind: "instruction", Status: status, Detail: in.Text, RunID: in.ID, SubmissionID: id, Lane: lane})
 	}}
-	job := &submissionJob{Submission: Submission{ID: id, Mode: mode, Input: input, Status: "queued"}, ctx: context.WithValue(ctx, invocationKey{}, scope), sink: sink, done: make(chan struct{}), scope: scope}
+	job := &submissionJob{Submission: Submission{ID: id, Mode: mode, Input: input, Status: "queued"}, ctx: context.WithValue(ctx, invocationKey{}, scope), sink: sink, done: make(chan struct{}), scope: scope, wantFull: wantFull}
 	if len(requestIDs) > 0 {
 		job.RequestID = requestIDs[0]
 	}
@@ -151,6 +215,7 @@ func (a *App) enqueueSubmission(ctx context.Context, input, mode string, sink fu
 	}
 	receipt := job.Submission
 	a.mu.Unlock()
+	a.notifyChange(ChangeSubmissions)
 	if start {
 		go a.executeSubmission(job)
 	} else if ctx.Done() != nil {
@@ -177,6 +242,7 @@ func (a *App) executeSubmission(job *submissionJob) {
 		reply = a.submitDirect(job.ctx, job.Input, job.sink)
 	}
 	job.scope.inbox.Close()
+	a.gate().clear(job.ID)
 	if job.Mode == "also" {
 		if reply.Data == nil {
 			reply.Data = map[string]any{}
@@ -192,7 +258,11 @@ func (a *App) executeSubmission(job *submissionJob) {
 	if reply.Data != nil {
 		delete(reply.Data, "submissions")
 	}
-	job.Reply = &reply
+	job.Reply = slimReply(reply)
+	if job.wantFull {
+		full := reply
+		job.full = &full
+	}
 	job.Status = "done"
 	if job.scope.err != nil {
 		job.Status = "error"
@@ -221,8 +291,12 @@ func (a *App) executeSubmission(job *submissionJob) {
 	close(job.done)
 	a.mu.Unlock()
 	a.appendActivity(ActivityRecord{Time: time.Now().UTC(), Kind: "submission", SubmissionID: job.ID, Lane: job.scope.lane, Status: "submission " + job.Status})
+	a.notifyChange(ChangeSubmissions)
+	a.notifyChange(ChangeHistory)
 	if next != nil {
 		go a.executeSubmission(next)
+	} else {
+		a.releaseIdlePause()
 	}
 }
 
@@ -251,6 +325,11 @@ func (a *App) steerPrimary(ctx context.Context, text, targetID string) Submissio
 		receipt.Error = "No active primary invocation"
 		return receipt
 	}
+	if a.gate().stopping(job.ID) {
+		a.mu.Unlock()
+		receipt.Error = "The current request is stopping"
+		return receipt
+	}
 	if targetID != "" && targetID != job.ID {
 		a.mu.Unlock()
 		receipt.Error = "Primary target changed"
@@ -273,9 +352,10 @@ func (a *App) SubmissionState() SubmissionSnapshot {
 	return a.submissionStateLocked()
 }
 func (a *App) submissionStateLocked() SubmissionSnapshot {
-	out := SubmissionSnapshot{Paused: a.paused, Busy: a.primaryJob != nil || len(a.submissionQueue) > 0, Queue: []Submission{}, Jobs: []Submission{}}
+	out := SubmissionSnapshot{Paused: a.paused, RunPaused: a.gate().isPaused(), Busy: a.primaryJob != nil || len(a.submissionQueue) > 0, Queue: []Submission{}, Jobs: []Submission{}}
 	if a.primaryJob != nil {
 		out.PrimaryID = a.primaryJob.ID
+		out.Stopping = a.gate().stopping(a.primaryJob.ID)
 	}
 	for _, job := range a.submissionQueue {
 		out.Queue = append(out.Queue, job.Submission)
@@ -329,6 +409,7 @@ func (a *App) CancelQueuedSubmission(id string) bool {
 	if removed != nil {
 		removed.scope.inbox.Close()
 		a.appendActivity(ActivityRecord{Time: time.Now().UTC(), Kind: "submission", SubmissionID: removed.ID, Lane: "primary", Status: "submission canceled"})
+		a.notifyChange(ChangeSubmissions)
 	}
 	return removed != nil
 }
@@ -357,6 +438,7 @@ func (a *App) tryReplaceHistory(before, messages []Message, compare bool) bool {
 		}
 	}
 	a.history = append([]Message{}, messages...)
+	go a.notifyChange(ChangeHistory)
 	return true
 }
 
@@ -398,7 +480,7 @@ func cloneSubmission(in Submission) Submission {
 	return in
 }
 func (a *App) pruneSubmissionsLocked() {
-	const retained = 64
+	const retained = retainedSubmissions
 	completed := 0
 	for _, id := range a.submissionOrder {
 		s := a.submissions[id].Status

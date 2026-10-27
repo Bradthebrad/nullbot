@@ -48,7 +48,8 @@ func (a *App) runPlanner(ctx context.Context, focus string) (Plan, error) {
 			}
 			a.appendActivity(record)
 		}),
-		Context: agentContextPolicy(config),
+		Context: agentContextPolicy(config, config.Model),
+		Gate:    a.gate(),
 	})
 	result, err := planner.InvokeMessages(planCtx, []lc.BaseMessage{lc.Human(plannerTask(config, focus))})
 	if err != nil {
@@ -150,7 +151,8 @@ func (a *App) executePlanWithTask(execCtx context.Context, taskID, id string) (P
 			}
 			a.appendActivity(record)
 		}),
-		Context: agentContextPolicy(config),
+		Context: agentContextPolicy(config, config.Model),
+		Gate:    a.gate(),
 	})
 
 	rounds := 0

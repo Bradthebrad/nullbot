@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Bradthebrad/tinychain/callbacks"
@@ -108,7 +109,18 @@ func usagePath(config Config) string {
 
 func (a *App) recordUsageCallback(taskID, agentName string, model ModelConfig, event callbacks.Event) {
 	switch event.Event {
+	case callbacks.EventChainEnd:
+		// The summary call made by compaction isn't a model turn, so its usage
+		// arrives with the compaction event.
+		if event.Name == "context_compaction" {
+			if usage, ok := event.Data.Extra["summary_usage"].(*lc.UsageMetadata); ok && usage != nil {
+				a.recordUsageDirect(firstNonEmptyPlanValue(agentName, "agent")+" summary", model, nil, lc.BaseMessage{UsageMetadata: usage})
+			}
+		}
 	case callbacks.EventChatModelStart:
+		if learned, ok := event.Data.Extra["learned_window"].(int); ok && learned > 0 {
+			a.learnContextWindow(model, learned)
+		}
 		a.setTaskPendingInput(taskID, estimateMessagesTokens(event))
 	case callbacks.EventLLMEnd:
 		usage := usageFromLLMEnd(event)
@@ -251,8 +263,47 @@ func (a *App) ClearUsage() error {
 	return os.WriteFile(path, nil, 0600)
 }
 
+// usageCache avoids re-reading and re-decoding the usage log when it has not
+// changed since the last read.
+var usageCache struct {
+	sync.Mutex
+	path    string
+	size    int64
+	modTime time.Time
+	records []UsageRecord
+}
+
 func loadUsageRecords(config Config) []UsageRecord {
-	file, err := os.Open(usagePath(config))
+	path := usagePath(config)
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil
+	}
+	usageCache.Lock()
+	if usageCache.path == path && usageCache.size == info.Size() && usageCache.modTime.Equal(info.ModTime()) {
+		records := append([]UsageRecord(nil), usageCache.records...)
+		usageCache.Unlock()
+		return records
+	}
+	usageCache.Unlock()
+	records := readUsageRecords(path)
+	usageCache.Lock()
+	usageCache.path, usageCache.size, usageCache.modTime = path, info.Size(), info.ModTime()
+	usageCache.records = records
+	usageCache.Unlock()
+	return append([]UsageRecord(nil), records...)
+}
+
+// UsageSummary is a snapshot without the full record list, for status bars
+// and dashboards that only need totals and recent records.
+func (a *App) UsageSummary() UsageSnapshot {
+	snap := a.UsageSnapshot()
+	snap.Records = nil
+	return snap
+}
+
+func readUsageRecords(path string) []UsageRecord {
+	file, err := os.Open(path)
 	if err != nil {
 		return nil
 	}

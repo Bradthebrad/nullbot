@@ -50,9 +50,11 @@ type MarketPackage struct {
 	InstallDir       string            `json:"install_dir,omitempty"`
 	InstalledAsset   string            `json:"installed_asset,omitempty"`
 	InstalledAt      string            `json:"installed_at,omitempty"`
-	Status           string            `json:"status"`
-	Readme           string            `json:"readme,omitempty"`
-	Error            string            `json:"error,omitempty"`
+	// InstalledSHA256 pins the verified installed bytes independently of latest-release assets.
+	InstalledSHA256 string `json:"installed_sha256,omitempty"`
+	Status          string `json:"status"`
+	Readme          string `json:"readme,omitempty"`
+	Error           string `json:"error,omitempty"`
 }
 
 type MarketAsset struct {
@@ -148,6 +150,9 @@ func defaultMarketSources() []MarketSource {
 			"nullbot-parsers-mcp",
 			"nullbot-imagetools-mcp",
 			"nullbot-web-mcp",
+			"nullbot-emails-mcp",
+			"nullbot-drives-mcp",
+			"nullbot-messages-mcp",
 			"nullbot-skills",
 		},
 	}}
@@ -159,6 +164,9 @@ func defaultMarketManifest(config Config) MarketManifest {
 		UpdatedAt:     time.Now().UTC(),
 		Sources:       defaultMarketSources(),
 		Packages: []MarketPackage{
+			serviceMarketPackage("emails", "Email", "Gmail/Outlook access-token mail and fixed-TLS Gmail IMAP/SMTP app passwords; optional confirmed sends.", []string{"network_fetch", "email_read", "email_send", "service_credentials"}),
+			serviceMarketPackage("drives", "Drives", "Read-only Google Drive, OneDrive, and local synced iCloud Drive access.", []string{"network_fetch", "drive_read", "workspace_read", "service_credentials"}),
+			serviceMarketPackage("messages", "Messages", "Twilio SMS, WhatsApp Business, Discord bots, Telegram bot pending updates/sends, and outbound unofficial local Signal bridge; confirmed sends may incur charges.", []string{"network_fetch", "message_read", "message_send", "service_credentials"}),
 			{
 				ID:               "nullbot-code-mcp",
 				Kind:             "mcp_server",
@@ -239,8 +247,32 @@ func defaultMarketManifest(config Config) MarketManifest {
 					URL:  "https://raw.githubusercontent.com/Bradthebrad/nullbot-skills/main/skills/mcp-skill/SKILL.md",
 				}},
 			},
+			skillMarketPackage("web-search", "Web Search Skill", "Search, triage results, fetch public pages safely, and pull readable text with NullBot Web MCP."),
+			skillMarketPackage("web-tools", "Web Tools Skill", "When to search and when to drive a browser, and the Web MCP safety rules."),
+			skillMarketPackage("browser-automation", "Browser Automation Skill", "Use the Web MCP browser tools safely: launch or attach, navigate, read, click, type, screenshots and tabs."),
+			skillMarketPackage("browser-research", "Browser Research Skill", "Multi-step research that combines search, safe fetches, rendered pages, screenshots and citations."),
 		},
 	}
+}
+
+// skillMarketPackage is a one-file skill from the nullbot-skills repository.
+func skillMarketPackage(id, name, description string) MarketPackage {
+	return MarketPackage{ID: id, Kind: "skill_pack", Name: name, Description: description,
+		Repo: "Bradthebrad/nullbot-skills", Permissions: []string{"skill_install"}, Status: "available",
+		SkillFiles: []MarketSkillFile{{
+			Name: id,
+			Path: "skills/" + id + "/SKILL.md",
+			URL:  "https://raw.githubusercontent.com/Bradthebrad/nullbot-skills/main/skills/" + id + "/SKILL.md",
+		}}}
+}
+
+func serviceMarketPackage(domain, label, description string, permissions []string) MarketPackage {
+	id := "nullbot-" + domain + "-mcp"
+	// No invented release URLs: refresh discovers assets only after a release exists.
+	return MarketPackage{ID: id, Kind: "mcp_server", Name: "NullBot " + label + " MCP",
+		Description: description, Repo: "Bradthebrad/" + id,
+		DefaultTransport: "stdio", DefaultArgs: []string{"--transport", "stdio"},
+		Permissions: permissions, Status: "unreleased"}
 }
 
 func defaultReleaseAssets(repo, tag, base string) []MarketAsset {
@@ -273,6 +305,9 @@ func mergePackages(base, overlay MarketManifest) MarketManifest {
 		}
 		if pkg.InstalledAt == "" {
 			pkg.InstalledAt = existing.InstalledAt
+		}
+		if pkg.InstalledSHA256 == "" {
+			pkg.InstalledSHA256 = existing.InstalledSHA256
 		}
 		byID[pkg.ID] = pkg
 	}
@@ -482,6 +517,12 @@ func installMCPPackage(ctx context.Context, config Config, pkg MarketPackage, sm
 	if err != nil {
 		return pkg, err
 	}
+	if serviceServerID(pkg.ID) {
+		digest, decodeErr := hex.DecodeString(asset.SHA256)
+		if decodeErr != nil || len(digest) != sha256.Size {
+			return pkg, fmt.Errorf("service connectors require a release SHA256 checksum; refresh marketplace metadata first")
+		}
+	}
 	dir := filepath.Join(config.AppDir, "mcp", pkg.ID)
 	tmpDir := filepath.Join(marketDir(config), "tmp")
 	if err := os.MkdirAll(dir, 0700); err != nil {
@@ -513,6 +554,7 @@ func installMCPPackage(ctx context.Context, config Config, pkg MarketPackage, sm
 	pkg.Installed = true
 	pkg.InstallDir = dir
 	pkg.InstalledAsset = asset.Name
+	pkg.InstalledSHA256 = strings.ToLower(asset.SHA256)
 	pkg.InstalledAt = time.Now().UTC().Format(time.RFC3339)
 	pkg.Status = "installed"
 	pkg.Error = ""
@@ -635,6 +677,7 @@ func RemoveMCPServer(config Config, id string) (Config, error) {
 			manifest.Packages[i].Enabled = false
 			manifest.Packages[i].InstallDir = ""
 			manifest.Packages[i].InstalledAsset = ""
+			manifest.Packages[i].InstalledSHA256 = ""
 			manifest.Packages[i].InstalledAt = ""
 			manifest.Packages[i].Status = "available"
 		}

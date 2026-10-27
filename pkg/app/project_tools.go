@@ -2,33 +2,16 @@ package app
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"os"
 
 	"github.com/Bradthebrad/tinychain/agent"
 )
 
-// External MCP semantics cannot be inferred from a name/schema. Deny every
-// external call unless ALL projects explicitly permit unsandboxed execution.
-func guardExternalTools(state *App, tools []agent.Tool) []agent.Tool {
-	out := make([]agent.Tool, 0, len(tools))
-	for _, tool := range tools {
-		out = append(out, &projectExternalTool{Tool: tool, state: state})
-	}
-	return out
-}
-
-type projectExternalTool struct {
-	agent.Tool
-	state *App
-}
-
-func (t *projectExternalTool) Call(ctx context.Context, args map[string]any) (string, error) {
-	if !allProjectsFull(t.state.Config()) {
-		return "", fmt.Errorf("external tool denied: %s", FullAccessWarning)
-	}
-	return t.Tool.Call(ctx, args)
+// guardExternalTools wraps tools from one MCP server so every call is
+// authorized against the project permissions in effect at call time.
+func guardExternalTools(state *App, server string, remote bool, tools []agent.Tool) []agent.Tool {
+	return guardTools(state, server, remote, tools)
 }
 
 func projectFileTools(state *App) []agent.Tool {
@@ -70,34 +53,28 @@ func projectFileTools(state *App) []agent.Tool {
 	}
 }
 
-// Builtins have known implementations; never infer trust from an MCP tool name.
+// guardBuiltinTools authorizes NullBot's own tools. list_dir keeps its
+// project-aware implementation; everything else runs through the same
+// per-call policy as external tools.
 func guardBuiltinTools(state *App, tools []agent.Tool) []agent.Tool {
 	if state == nil {
 		return tools
 	}
 	out := make([]agent.Tool, 0, len(tools))
 	for _, tool := range tools {
-		out = append(out, &projectBuiltinTool{Tool: tool, state: state})
+		if tool.Definition().Name == "list_dir" {
+			tool = listDirTool{Tool: tool, state: state}
+		}
+		out = append(out, &policyTool{inner: tool, state: state})
 	}
 	return out
 }
 
-type projectBuiltinTool struct {
+type listDirTool struct {
 	agent.Tool
 	state *App
 }
 
-func (t *projectBuiltinTool) Call(ctx context.Context, args map[string]any) (string, error) {
-	name := t.Tool.Definition().Name
-	switch name {
-	case "list_dir":
-		return listWorkspaceDir(t.state.Config(), stringArg(args, "path"), 200)
-	case "workspace_info", "config_dir_list", "config_dir_read", "skills_list", "skill_references", "skill_read", "plans_list", "plan_read", "plan_update_step", "history_recent", "history_sessions", "history_session_read", "logs_recent", "market_list_available", "market_read_package", "mcp_list_servers", "market_list", "mcp_list", "spawn_subagent", "subagent_status", "subagent_wait", "project_read_file", "project_write_file":
-		return t.Tool.Call(ctx, args)
-	default:
-		if !allProjectsFull(t.state.Config()) {
-			return "", fmt.Errorf("tool %s requires Full access: %s", name, FullAccessWarning)
-		}
-		return t.Tool.Call(ctx, args)
-	}
+func (t listDirTool) Call(ctx context.Context, args map[string]any) (string, error) {
+	return listWorkspaceDir(t.state.Config(), stringArg(args, "path"), 200)
 }

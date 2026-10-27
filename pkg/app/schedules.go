@@ -231,7 +231,8 @@ func (a *App) dispatchScheduledTask(id, prompt string, manual bool) {
 		task.UpdatedAt = finished
 		task.FinishedAt = finished
 		task.LastError = ""
-		if strings.HasPrefix(reply.Message, "Agent error:") {
+		canceled, _ := reply.Data["canceled"].(bool)
+		if strings.HasPrefix(reply.Message, "Agent error:") || canceled {
 			task.LastError = reply.Message
 			task.Status = ScheduleError
 			status = "schedule error"

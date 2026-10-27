@@ -65,6 +65,13 @@ func (c *runControl) Wait(ctx context.Context) error {
 	}
 }
 
+// watch returns a channel closed at the next pause, resume or stop.
+func (c *runControl) watch() <-chan struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.changed
+}
+
 func (c *runControl) isPaused() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()

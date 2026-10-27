@@ -6,6 +6,7 @@ import (
 	tcagent "github.com/Bradthebrad/tinychain/agent"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -51,6 +52,10 @@ type App struct {
 	changeSinks        map[int]func(string)
 	changeSinkSeq      int
 	activitySeq        uint64
+	// Visuals: whether a host can show them, and those touched this run.
+	visualsOn atomic.Bool
+	visualMu  sync.Mutex
+	visuals   map[string]*visualLive
 }
 
 const (

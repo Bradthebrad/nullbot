@@ -49,6 +49,7 @@ func BuiltinToolsFor(config Config, state *App, includeSpawner bool) []agent.Too
 		tools = append(tools, spawnSubagentTool(state), subagentStatusTool(state), subagentWaitTool(state))
 	}
 	tools = append(tools, projectFileTools(state)...)
+	tools = append(tools, visualTools(state)...)
 	return guardBuiltinTools(state, tools)
 }
 

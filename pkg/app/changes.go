@@ -9,6 +9,8 @@ const (
 	ChangeConfig      = "config"
 	ChangeHistory     = "history"
 	ChangeSchedules   = "schedules"
+	// ChangeVisuals: a visual was shown, answered, or stopped being waited on.
+	ChangeVisuals = "visuals"
 )
 
 // SubscribeChanges registers fn to be told when a snapshot changes. fn must

@@ -151,6 +151,7 @@ var builtinRequirements = map[string]ToolRequirement{
 	"mcp_enable_server":      {Capability: CapExecute, Reason: "enables a tool server"},
 	"mcp_disable_server":     {Capability: CapWrite, Reason: "changes tool server configuration"},
 	"mcp_remove_server":      {Capability: CapDelete, Reason: "removes a tool server"},
+	"visualize":              {Capability: CapRead, Reason: "shows you a visual and records how you respond"},
 }
 
 var internalBuiltins = map[string]string{
@@ -177,6 +178,7 @@ var internalBuiltins = map[string]string{
 	"subagent_status":       "reads subagent status",
 	"subagent_wait":         "waits for a subagent",
 	"read_skill":            "reads installed skills",
+	"visualize_results":     "reads your responses to visuals",
 }
 
 var (

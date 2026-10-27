@@ -19,6 +19,7 @@ NullBot is designed to feel like a real local assistant without quietly becoming
 | Skills | Reads installed `SKILL.md` files and includes a built-in `create_skill` tool that can write one skill or a batch of skills into safe subdirectories. |
 | History | Persists every message and tool call to `~/.nullbot/history`; agents search and read it with `history_search` and `history_session_read`. See [docs/HISTORY.md](docs/HISTORY.md). |
 | Context | Measures every request against the selected model's context window. Shortens tool results the model has read from 60% full, summarizes older messages from 85%, and cuts any tool result that wouldn't fit to a preview with its size. See [docs/CONTEXT.md](docs/CONTEXT.md). |
+| Visuals | In the desktop app, `visualize` shows you a poll, web page or prototype, picture to label, chart or draw.io diagram in a window and records what you do with it; the agent reads your answer, note and interactions. Saved per project in `.nullbot/visualizations`. See [docs/VISUALS.md](docs/VISUALS.md). |
 | Logs | Writes runtime logs to `~/.nullbot/logs/nullbot.log` and exposes recent log lines to the bot through a constrained built-in tool. |
 | MCP | Lists configured MCP servers and cached market packages; external powers are expected to come from separate MCP binaries. |
 | Safety | No built-in arbitrary shell, code editing, email, browser, or broad filesystem access. Add those only through explicit MCP tooling. |

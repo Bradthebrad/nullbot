@@ -357,6 +357,9 @@ func subagentSystemPrompt(config Config, name, task string, tools []tcagent.Tool
 			fmt.Fprintf(&b, "- %s: %s\n", def.Name, def.Description)
 		}
 	}
+	if hasTool(tools, "visualize") {
+		b.WriteString(visualizeGuidance)
+	}
 	if len(skills) > 0 {
 		b.WriteString("Installed skills:\n")
 		for _, skill := range skills {
@@ -807,6 +810,9 @@ func baseSystemPrompt(config Config, skillHints []string, tools []tcagent.Tool, 
 			def := tool.Definition()
 			fmt.Fprintf(&b, "- %s: %s\n", def.Name, def.Description)
 		}
+	}
+	if hasTool(tools, "visualize") {
+		b.WriteString(visualizeGuidance)
 	}
 	if len(skills) > 0 {
 		b.WriteString("Installed user skills:\n")

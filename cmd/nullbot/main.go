@@ -239,8 +239,7 @@ func ask(ctx context.Context, bot *app.App, request string, opts options, stdout
 }
 
 // serve runs scheduled tasks and answers requests from stdin until it is
-// interrupted. A request already running is cancelled by the first
-// interrupt; the second exits.
+// interrupted. An interrupt cancels the request under way, if any, and exits.
 func serve(bot *app.App, opts options, stdin io.Reader, stdout, stderr io.Writer) int {
 	bot.StartScheduler()
 	defer bot.StopScheduler()

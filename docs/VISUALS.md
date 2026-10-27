@@ -7,7 +7,10 @@ the person does in it is recorded. When they press **Send to NullBot**, the
 agent gets their answer, their note and the interactions.
 
 The tools exist only when a host that can show visuals is running (the
-desktop app calls `EnableVisuals`). The terminal UI doesn't offer them.
+desktop app calls `EnableVisuals`). The terminal UI and headless runs don't
+offer them.
+
+![A poll in the NullBot desktop app: three headline options, one chosen, with a note for NullBot](images/visual-poll.png)
 
 ## Tools
 

@@ -48,7 +48,10 @@ func TestHeadlessCommands(t *testing.T) {
 	if code, out, _ := runCLI(t, "", "--app-dir", dir, "--model", "openai/gpt-5.1", "say hi"); code != 1 || out == "" {
 		t.Fatalf("failing request: %d %q", code, out)
 	}
-	if code, _, _ := runCLI(t, "", "--app-dir", dir, "-p", "   "); code != 2 {
-		t.Fatalf("empty request: %d", code)
+	for _, empty := range []string{"   ", ""} {
+		// An empty -p is an empty request, not a request to open the terminal UI.
+		if code, _, _ := runCLI(t, "", "--app-dir", dir, "-p", empty); code != 2 {
+			t.Fatalf("empty request %q: %d", empty, code)
+		}
 	}
 }

@@ -116,6 +116,13 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		opts.prompt = strings.Join(rest, " ")
 	}
 
+	promptSet := false
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "p" || f.Name == "prompt" {
+			promptSet = true
+		}
+	})
+
 	config, err := loadConfig(opts)
 	if err != nil {
 		fmt.Fprintln(stderr, "nullbot:", err)
@@ -127,7 +134,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	switch {
 	case command == "serve":
 		return serve(bot, opts, stdin, stdout, stderr)
-	case opts.prompt != "":
+	case opts.prompt != "" || promptSet:
 		request := opts.prompt
 		if request == "-" {
 			data, err := io.ReadAll(io.LimitReader(stdin, 4<<20))

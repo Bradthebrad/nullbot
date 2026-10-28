@@ -141,8 +141,7 @@ remote, can be added too, and the same permissions apply to it.
 | [nullbot-drives-mcp](https://github.com/Bradthebrad/nullbot-drives-mcp) | Google Drive, OneDrive and synced folders such as iCloud Drive, read only |
 | [nullbot-messages-mcp](https://github.com/Bradthebrad/nullbot-messages-mcp) | Discord and Telegram bots, Twilio SMS, WhatsApp Business and a local Signal bridge |
 
-The email, drives and messages servers have no release yet, so the
-Marketplace shows them as not released. Accounts for them are added in the
+Accounts for the email, drives and messages servers are added in the
 desktop app (Settings > Accounts), kept with Windows DPAPI, and passed only to
 the matching server installed from the Marketplace. See
 [docs/SERVICE_ACCOUNTS.md](docs/SERVICE_ACCOUNTS.md).

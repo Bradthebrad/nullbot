@@ -446,26 +446,47 @@ func fetchChecksums(ctx context.Context, url string) map[string]string {
 	return out
 }
 
+// assetsFromRelease lists a release's binaries for a package: <id>.exe and
+// <id>-small.exe for Windows x64, and <id>-<os>-<arch>[.exe] for the rest.
 func assetsFromRelease(release githubRelease, pkgID string) []MarketAsset {
 	var assets []MarketAsset
 	for _, asset := range release.Assets {
-		if !strings.HasSuffix(strings.ToLower(asset.Name), ".exe") {
+		platform, arch, ok := assetPlatform(asset.Name, pkgID)
+		if !ok {
 			continue
 		}
 		assets = append(assets, MarketAsset{
 			Name:       asset.Name,
-			Platform:   "windows",
-			Arch:       "amd64",
+			Platform:   platform,
+			Arch:       arch,
 			URL:        asset.BrowserDownloadURL,
 			Compressed: strings.Contains(strings.ToLower(asset.Name), "-small"),
 			Warning:    upxWarning(asset.Name),
 		})
 	}
-	if len(assets) == 0 {
-		return defaultReleaseAssets("Bradthebrad/"+pkgID, release.TagName, pkgID)
-	}
 	sort.Slice(assets, func(i, j int) bool { return assets[i].Name < assets[j].Name })
 	return assets
+}
+
+// assetPlatform reads the platform from a release file name. Any other .exe
+// is taken as Windows x64, as older releases named them.
+func assetPlatform(name, pkgID string) (platform, arch string, ok bool) {
+	lower := strings.ToLower(name)
+	base := strings.TrimSuffix(lower, ".exe")
+	rest := strings.TrimPrefix(base, strings.ToLower(pkgID))
+	if rest != base {
+		for _, p := range []string{"windows", "linux", "darwin"} {
+			for _, a := range []string{"amd64", "arm64"} {
+				if rest == "-"+p+"-"+a {
+					return p, a, true
+				}
+			}
+		}
+	}
+	if strings.HasSuffix(lower, ".exe") {
+		return "windows", "amd64", true
+	}
+	return "", "", false
 }
 
 func upxWarning(name string) string {
@@ -494,6 +515,13 @@ func InstallMarketPackage(ctx context.Context, config Config, packageID string, 
 	}
 	switch pkg.Kind {
 	case "mcp_server":
+		// Install the newest release, not what the catalog last saw.
+		if fresh, refreshErr := withLatestRelease(ctx, pkg); refreshErr == nil {
+			pkg = fresh
+		} else if len(pkg.Assets) == 0 {
+			err = refreshErr
+			break
+		}
 		pkg, err = installMCPPackage(ctx, config, pkg, small)
 	case "skill_pack":
 		pkg, err = installSkillPackage(ctx, config, pkg)
@@ -509,6 +537,30 @@ func InstallMarketPackage(ctx context.Context, config Config, packageID string, 
 	if err := SaveMarketManifest(config, mergeInstalledState(config, manifest)); err != nil {
 		return MarketPackage{}, err
 	}
+	return pkg, nil
+}
+
+// latestRelease is a variable so tests can stand in for GitHub.
+var latestRelease = githubLatestRelease
+
+// withLatestRelease updates a package with its newest GitHub release.
+func withLatestRelease(ctx context.Context, pkg MarketPackage) (MarketPackage, error) {
+	if pkg.Repo == "" {
+		return pkg, fmt.Errorf("%s has no repository to install from", pkg.ID)
+	}
+	release, err := latestRelease(ctx, pkg.Repo)
+	if err != nil {
+		if strings.Contains(err.Error(), "404") {
+			return pkg, fmt.Errorf("%s has no release on GitHub yet, so there is nothing to install", pkg.ID)
+		}
+		return pkg, err
+	}
+	assets := assetsFromRelease(release, pkg.ID)
+	if len(assets) == 0 {
+		return pkg, fmt.Errorf("%s %s has no binaries to install", pkg.ID, release.TagName)
+	}
+	applyChecksums(assets, release.Checksums)
+	pkg.ReleaseTag, pkg.Assets, pkg.Status, pkg.Error = release.TagName, assets, "available", ""
 	return pkg, nil
 }
 
@@ -545,8 +597,26 @@ func installMCPPackage(ctx context.Context, config Config, pkg MarketPackage, sm
 		}
 	}
 	target := filepath.Join(dir, asset.Name)
+	// Windows can't replace a running program but can rename it: move a
+	// running server aside so the new build can take its place.
+	var replaced string
+	if _, err := os.Stat(target); err == nil {
+		replaced = target + ".old"
+		_ = os.Remove(replaced)
+		if os.Rename(target, replaced) != nil {
+			replaced = ""
+		}
+	}
+	defer func() {
+		if replaced != "" {
+			_ = os.Remove(replaced) // fails while the old server still runs; the next install retries
+		}
+	}()
 	if err := os.Rename(tmp, target); err != nil {
 		if copyErr := copyFile(tmp, target); copyErr != nil {
+			if replaced != "" && os.Rename(replaced, target) == nil {
+				replaced = "" // the previous build is back in place
+			}
 			return pkg, err
 		}
 		_ = os.Remove(tmp)
@@ -598,6 +668,9 @@ func selectAsset(pkg MarketPackage, small bool) (MarketAsset, error) {
 		if asset.Platform != "" && asset.Platform != runtime.GOOS {
 			continue
 		}
+		if asset.Arch != "" && asset.Arch != runtime.GOARCH {
+			continue
+		}
 		if fallback == nil {
 			fallback = asset
 		}
@@ -608,7 +681,10 @@ func selectAsset(pkg MarketPackage, small bool) (MarketAsset, error) {
 	if fallback != nil {
 		return *fallback, nil
 	}
-	return MarketAsset{}, fmt.Errorf("no installable asset for %s", pkg.ID)
+	if pkg.ReleaseTag == "" {
+		return MarketAsset{}, fmt.Errorf("%s has no release on GitHub yet, so there is nothing to install", pkg.ID)
+	}
+	return MarketAsset{}, fmt.Errorf("%s %s has no build for %s/%s", pkg.ID, pkg.ReleaseTag, runtime.GOOS, runtime.GOARCH)
 }
 
 func findMarketPackage(manifest MarketManifest, id string) (MarketPackage, int, error) {

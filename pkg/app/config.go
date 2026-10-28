@@ -378,10 +378,15 @@ func syncMCPWorkspaceArgs(servers map[string]MCPEntry, workspace string) map[str
 func shouldPassWorkspaceToMCP(id string, entry MCPEntry) bool {
 	id = strings.ToLower(id)
 	command := strings.ToLower(filepath.Base(entry.Command))
-	return strings.Contains(id, "nullbot-code-mcp") ||
-		strings.Contains(id, "nullbot-parsers-mcp") ||
-		strings.Contains(command, "nullbot-code-mcp") ||
-		strings.Contains(command, "nullbot-parsers-mcp")
+	// NullBot's servers that work inside one folder. The image and web servers
+	// were left out, so without the argument they worked in whatever folder
+	// they were started in.
+	for _, name := range []string{"nullbot-code-mcp", "nullbot-parsers-mcp", "nullbot-imagetools-mcp", "nullbot-web-mcp"} {
+		if strings.Contains(id, name) || strings.Contains(command, name) {
+			return true
+		}
+	}
+	return false
 }
 
 func hasWorkspaceArg(args []string) bool {

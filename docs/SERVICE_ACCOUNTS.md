@@ -72,7 +72,7 @@ These checks do not protect against an administrator, same-user malware, simulta
 
 ## Marketplace lifecycle
 
-The three source repositories are included in default discovery and have unreleased package stubs. No release URLs are fabricated and no install or enable is triggered by account setup.
+The three servers are listed in the Marketplace. Install fetches the newest GitHub release and refuses one without a SHA-256 checksum for the binary; no release URLs are guessed, and account setup never installs or enables anything.
 
 A published connector release must provide its executable and `SHA256SUMS.txt`. Installation rejects service connector assets without a valid SHA256 checksum, verifies downloaded bytes, and persists an independent `installed_sha256`. Enable remains a separate explicit action. Existing installations without this pin require a verified reinstall before receiving credentials. This implementation does not publish releases, modify the user's live manifest, or install connectors itself.
 

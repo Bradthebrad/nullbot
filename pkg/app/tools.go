@@ -665,6 +665,9 @@ func marketInstallPackageTool(state *App) agent.Tool {
 			if err != nil {
 				return "", err
 			}
+			if pkg.Kind == "mcp_server" {
+				state.StopMCPServer(pkg.ID) // the old build stops; the new one starts on next use
+			}
 			if boolArg(args, "enable") && pkg.Kind == "mcp_server" {
 				config, err = EnableMCPServer(config, pkg.ID)
 				if err != nil {

@@ -144,6 +144,9 @@ func (a *App) marketCommand(sub string) Reply {
 				if err != nil {
 					return a.reply("Market install failed: "+err.Error(), "/market", "market")
 				}
+				if pkg.Kind == "mcp_server" {
+					a.StopMCPServer(pkg.ID) // the old build stops; the new one starts on next use
+				}
 				if enable && pkg.Kind == "mcp_server" {
 					config, err := EnableMCPServer(a.config, pkg.ID)
 					if err != nil {

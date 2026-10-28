@@ -154,6 +154,90 @@ var builtinRequirements = map[string]ToolRequirement{
 	"visualize":              {Capability: CapRead, Reason: "shows you a visual and records how you respond"},
 }
 
+// officialServerRequirements classifies the tools of NullBot's own tool
+// servers, whose implementations are known, where the name alone would
+// mislead: drives_download returns content and writes nothing, while
+// command_status only reads a command's state.
+var officialServerRequirements = map[string]map[string]ToolRequirement{
+	"nullbot-code-mcp": {
+		"workspace_info": {Capability: CapRead, Reason: "describes the workspace"},
+		"list_dir":       {Capability: CapRead, Reason: "lists a folder"},
+		"file_info":      {Capability: CapRead, Reason: "reads file metadata"},
+		"read_file":      {Capability: CapRead, Reason: "reads a file"},
+		"search_text":    {Capability: CapRead, Reason: "searches file contents"},
+		"search_files":   {Capability: CapRead, Reason: "searches file names"},
+		"write_file":     {Capability: CapWrite, Reason: "writes a file"},
+		"edit_file":      {Capability: CapWrite, Reason: "edits a file"},
+		"make_dir":       {Capability: CapWrite, Reason: "creates a folder"},
+		"delete_path":    {Capability: CapDelete, Reason: "deletes a file or folder"},
+		"run_command":    {Capability: CapExecute, Reason: "runs a program"},
+		"command_status": {Capability: CapRead, Reason: "reads a running command's state"},
+		"command_output": {Capability: CapRead, Reason: "reads a command's output"},
+		"command_kill":   {Capability: CapExecute, Reason: "stops a running program"},
+	},
+	"nullbot-parsers-mcp": {
+		"parser_workspace_info": {Capability: CapRead, Reason: "describes the workspace"},
+		"detect_file_type":      {Capability: CapRead, Reason: "reads a file's type"},
+		"parse_file":            {Capability: CapRead, Reason: "reads a document"},
+		"extract_text":          {Capability: CapRead, Reason: "reads a document's text"},
+		"extract_tables":        {Capability: CapRead, Reason: "reads a document's tables"},
+		"extract_metadata":      {Capability: CapRead, Reason: "reads a document's metadata"},
+		"list_document_parts":   {Capability: CapRead, Reason: "lists a document's parts"},
+		"extract_part":          {Capability: CapRead, Reason: "reads one part of a document"},
+		"parse_archive":         {Capability: CapRead, Reason: "lists an archive without unpacking it"},
+		"vision_extract":        {Capability: CapRead, Reason: "reads a document, sending it to a vision model"},
+	},
+	"nullbot-imagetools-mcp": {
+		"image_workspace_info":      {Capability: CapRead, Reason: "describes the workspace"},
+		"list_image_models":         {Capability: CapRead, Reason: "lists image models"},
+		"inspect_image":             {Capability: CapRead, Reason: "reads a picture"},
+		"generate_image_openai":     {Capability: CapWrite, Reason: "saves a generated picture"},
+		"generate_image_openrouter": {Capability: CapWrite, Reason: "saves a generated picture"},
+		"edit_image_openai":         {Capability: CapWrite, Reason: "saves an edited picture"},
+		"resize_image":              {Capability: CapWrite, Reason: "saves a resized picture"},
+		"crop_image":                {Capability: CapWrite, Reason: "saves a cropped picture"},
+		"add_title_text":            {Capability: CapWrite, Reason: "saves a picture with a title"},
+		"compose_thumbnail":         {Capability: CapWrite, Reason: "saves a thumbnail"},
+		"make_contact_sheet":        {Capability: CapWrite, Reason: "saves a contact sheet"},
+		"make_image_pdf":            {Capability: CapWrite, Reason: "saves a PDF"},
+	},
+	"nullbot-web-mcp": {
+		"web_workspace_info":    {Capability: CapRead, Reason: "describes the workspace and settings"},
+		"list_search_providers": {Capability: CapRead, Reason: "lists search providers"},
+		"web_search":            {Capability: CapRead, Reason: "searches the web"},
+		"fetch_url":             {Capability: CapRead, Reason: "reads a public web page"},
+		"browser_status":        {Capability: CapRead, Reason: "checks the browser connection"},
+		"browser_attach":        {Capability: CapRead, Reason: "connects to a browser that is already running"},
+		"browser_launch":        {Capability: CapExecute, Reason: "starts a browser"},
+		"browser_navigate":      {Capability: CapRead, Reason: "opens a page in the browser"},
+		"browser_read":          {Capability: CapRead, Reason: "reads the page"},
+		"browser_query":         {Capability: CapRead, Reason: "finds elements on the page"},
+		"browser_tabs":          {Capability: CapRead, Reason: "lists or switches browser tabs"},
+		"browser_click":         {Capability: CapWrite, Reason: "clicks on a page"},
+		"browser_type":          {Capability: CapWrite, Reason: "types into a page"},
+		"browser_screenshot":    {Capability: CapWrite, Reason: "saves a screenshot into the project"},
+		"browser_eval":          {Capability: CapExecute, Reason: "runs JavaScript in the page"},
+	},
+	"nullbot-emails-mcp": {
+		"email_accounts": {Capability: CapRead, Reason: "lists configured accounts"},
+		"email_list":     {Capability: CapRead, Reason: "lists messages"},
+		"email_get":      {Capability: CapRead, Reason: "reads a message"},
+		"email_send":     {Capability: CapWrite, Reason: "sends an email after you confirm"},
+	},
+	"nullbot-drives-mcp": {
+		"drives_accounts": {Capability: CapRead, Reason: "lists configured drives"},
+		"drives_list":     {Capability: CapRead, Reason: "lists a drive folder"},
+		"drives_search":   {Capability: CapRead, Reason: "searches a drive"},
+		"drives_read":     {Capability: CapRead, Reason: "reads a drive file"},
+		"drives_download": {Capability: CapRead, Reason: "returns a drive file's content; writes nothing"},
+	},
+	"nullbot-messages-mcp": {
+		"message_accounts": {Capability: CapRead, Reason: "lists configured accounts"},
+		"message_list":     {Capability: CapRead, Reason: "reads messages"},
+		"message_send":     {Capability: CapWrite, Reason: "sends a message after you confirm"},
+	},
+}
+
 var internalBuiltins = map[string]string{
 	"config_dir_list":       "reads NullBot app data",
 	"config_dir_read":       "reads NullBot app data",
@@ -266,6 +350,10 @@ func ClassifyTool(name, server string, info agent.ToolInfo, override string) Too
 			req.Capability, req.Source, req.Reason = known.Capability, "builtin", known.Reason
 			return req
 		}
+	}
+	if known, ok := officialServerRequirements[server][name]; ok {
+		req.Capability, req.Source, req.Reason = known.Capability, "builtin", known.Reason
+		return req
 	}
 	nameCap, nameReason := classifyByName(name)
 	var annCap Capability

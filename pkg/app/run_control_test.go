@@ -102,7 +102,9 @@ func TestPauseHoldsTheRunAtItsNextStepAndResumeCarriesOn(t *testing.T) {
 
 func TestStopWrapsUpAndTheQueueContinues(t *testing.T) {
 	a := submissionTestApp(t)
-	model := &loopModel{calls: make(chan int, 16), steps: 100}
+	// The first model call is held until Stop is in, so a busy machine can't
+	// let the loop run out of steps first.
+	model := &loopModel{calls: make(chan int, 16), steps: 100, hold: make(chan struct{})}
 	a.modelFactory = func(Config, bool) (tcagent.Model, error) { return model, nil }
 	first := a.SubmitRouted(context.Background(), "keep reading", "send")
 	<-model.calls
@@ -116,6 +118,7 @@ func TestStopWrapsUpAndTheQueueContinues(t *testing.T) {
 	if r := a.SubmitRoutedRequest(context.Background(), "more", "steer", "", first.ID); r.Status != "rejected" {
 		t.Fatal("steering accepted while stopping")
 	}
+	close(model.hold)
 	if done := waitSubmission(t, a, first.ID); done.Status != "done" {
 		t.Fatalf("stopped request ended %q", done.Status)
 	}

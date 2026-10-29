@@ -184,3 +184,27 @@ func TestUnreachable(t *testing.T) {
 		t.Fatalf("%+v", s)
 	}
 }
+
+func TestKeyDoesNotFollowRedirectsElsewhere(t *testing.T) {
+	var seen []string
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, "other:"+r.Header.Get("Authorization"))
+		fmt.Fprint(w, `{"version":"0.12.3"}`)
+	}))
+	defer other.Close()
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, "first:"+r.Header.Get("Authorization"))
+		if r.URL.Path == "/api/version" {
+			http.Redirect(w, r, "/moved/version", http.StatusFound)
+			return
+		}
+		http.Redirect(w, r, other.URL+"/api/version", http.StatusFound)
+	}))
+	defer first.Close()
+	e := Endpoint{Kind: Ollama, BaseURL: first.URL, APIKey: "sk-secret-0001"}
+	_ = e.Check(context.Background())
+	want := []string{"first:Bearer sk-secret-0001", "first:Bearer sk-secret-0001", "other:"}
+	if strings.Join(seen, "|") != strings.Join(want, "|") {
+		t.Fatalf("headers seen %q, want %q", seen, want)
+	}
+}

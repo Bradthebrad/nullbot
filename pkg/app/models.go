@@ -448,9 +448,10 @@ const modelCatalogTTL = 10 * time.Minute
 
 var modelCatalogCache struct {
 	sync.Mutex
-	key     string
-	fetched time.Time
-	groups  []ModelGroup
+	key        string
+	fetched    time.Time
+	groups     []ModelGroup
+	generation int
 }
 
 // CachedModelGroups returns the provider model catalog, fetching it at most
@@ -465,6 +466,7 @@ func modelCatalogKey(config Config, keys APIKeys) string {
 func invalidateModelCatalog() {
 	modelCatalogCache.Lock()
 	modelCatalogCache.groups = nil
+	modelCatalogCache.generation++
 	modelCatalogCache.Unlock()
 }
 
@@ -477,10 +479,15 @@ func CachedModelGroups(ctx context.Context, config Config, refresh bool) []Model
 		modelCatalogCache.Unlock()
 		return withContextWindows(config, groups)
 	}
+	generation := modelCatalogCache.generation
 	modelCatalogCache.Unlock()
 	groups := DiscoverModelGroups(ctx, config)
 	modelCatalogCache.Lock()
-	modelCatalogCache.key, modelCatalogCache.fetched, modelCatalogCache.groups = key, time.Now(), cloneModelGroups(groups)
+	// A list fetched before an invalidation may miss what changed; it is
+	// returned, but not kept.
+	if modelCatalogCache.generation == generation {
+		modelCatalogCache.key, modelCatalogCache.fetched, modelCatalogCache.groups = key, time.Now(), cloneModelGroups(groups)
+	}
 	modelCatalogCache.Unlock()
 	return groups
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/Bradthebrad/nullbot/pkg/hfhub"
@@ -201,6 +202,16 @@ func (a *App) InstallModel(ctx context.Context, req InstallRequest, progress fun
 		}
 	} else if build, found = hfhub.Recommend(models, hfhub.Preference{Quant: req.Quant}); !found {
 		return InstallResult{}, fmt.Errorf("%s has no complete GGUF build to install", req.Repo)
+	} else if q := strings.TrimSpace(req.Quant); q != "" && !strings.EqualFold(build.Quant, q) {
+		// Recommend falls back to the nearest quantization; an explicit
+		// choice is not changed behind the user's back.
+		var have []string
+		for _, m := range models {
+			if m.Complete && !m.Projector && m.Quant != "" && !slices.Contains(have, m.Quant) {
+				have = append(have, m.Quant)
+			}
+		}
+		return InstallResult{}, fmt.Errorf("%s has no %s build; it has %s", req.Repo, q, strings.Join(have, ", "))
 	}
 	if !build.Complete || build.Projector {
 		return InstallResult{}, fmt.Errorf("%s is not a complete model build", build.Name)
@@ -211,6 +222,9 @@ func (a *App) InstallModel(ctx context.Context, req InstallRequest, progress fun
 	case InstallOllama:
 		if build.Quant == "" {
 			return InstallResult{}, fmt.Errorf("Ollama pulls a Hugging Face build by its quantization, and %s names none; save it to a folder instead", build.Name)
+		}
+		if len(build.Files) > 1 {
+			return InstallResult{}, fmt.Errorf("%s is split into %d files, which Ollama cannot pull from Hugging Face; choose a build in one file, or save it to a folder and serve it with llama.cpp", build.Name, len(build.Files))
 		}
 		server := req.Server
 		if server == "" {
@@ -249,6 +263,8 @@ func (a *App) InstallModel(ctx context.Context, req InstallRequest, progress fun
 		for _, f := range build.Files {
 			res, err := client.Download(ctx, hfhub.DownloadRequest{
 				Repo: req.Repo, Path: f.Path, Dir: dir, Name: filepath.Base(f.Path), SHA256: f.SHA256, Size: f.Size,
+				// A cancelled download continues where it stopped next time.
+				KeepPartial: true,
 				Progress: func(p hfhub.Progress) {
 					progress(InstallProgress{Status: "downloading", File: p.Name, Done: p.Done, Total: p.Total})
 				},

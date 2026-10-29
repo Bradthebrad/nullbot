@@ -24,7 +24,7 @@ From the command line:
 ```sh
 nullbot models local find                       # what is running here
 nullbot models local add ollama                 # at its usual address
-nullbot models local add vllm --id gpu --url http://gpu-box.lan:8000 --key-secret gpu-key
+nullbot models local add vllm --id gpu --url https://gpu-box.lan:8000 --key-secret gpu-key
 nullbot models local                            # each server, whether it answers, its models
 nullbot models local remove gpu
 ```
@@ -33,11 +33,20 @@ Each server becomes a provider named `local:<id>`, and its models join the
 model lists. Use one for a single headless run with
 `--model local:ollama/qwen2.5:7b`.
 
-A server started with an API key reads it from a vault secret (`--key-secret`
-names an API key or generic secret; see [SECRETS.md](SECRETS.md)). The key is
-never written to the configuration. When a key would go to another machine
-over plain `http`, NullBot warns you, since others on the network could read
-it.
+A server started with an API key reads it from a vault secret
+(`--key-secret`; see [SECRETS.md](SECRETS.md)). The key is never written to
+the configuration, and it stays tied to its server:
+
+- The secret must be an API key whose provider is `local` or the server's
+  name (`gpu` above), so the configuration cannot send another key, such as
+  your OpenAI key, to a server. Keys for providers NullBot uses itself are
+  never sent to a local server.
+- The key goes only to the server's own address. If the server redirects
+  elsewhere (another port, plain `http`, another host), the key is left off.
+- NullBot will not send a key to another machine over plain `http`, where
+  others on the network could read it, unless you allow it for that server
+  (`--plain-http`, or the checkbox in the app). Prefer `https` or an SSH
+  tunnel.
 
 ## Context windows
 

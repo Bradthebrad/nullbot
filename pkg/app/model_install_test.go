@@ -159,3 +159,24 @@ func TestInstallIntoOllamaPullsTheHuggingFaceTag(t *testing.T) {
 		t.Fatalf("%+v %v %v", res, err, pulled)
 	}
 }
+
+func TestInstallRefusesWhatItCannotDoAsAsked(t *testing.T) {
+	fakeHF(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"version":"0.12.0","models":[]}`)
+	}))
+	defer srv.Close()
+	a := New(projectTestConfig(t, "read-only"))
+	if _, err := a.SaveLocalEndpoint(LocalEndpoint{Kind: "ollama", BaseURL: srv.URL}, ""); err != nil {
+		t.Fatal(err)
+	}
+	repo := "Qwen/Qwen2.5-0.5B-Instruct-GGUF"
+	// An explicit quantization that is not there is not swapped for another.
+	if _, err := a.InstallModel(context.Background(), InstallRequest{Repo: repo, Quant: "Q6_K", Target: InstallFiles}, nil); err == nil || !strings.Contains(err.Error(), "no Q6_K build") || !strings.Contains(err.Error(), "Q4_K_M") {
+		t.Fatalf("missing quant: %v", err)
+	}
+	// Ollama cannot pull a build split into parts.
+	if _, err := a.InstallModel(context.Background(), InstallRequest{Repo: repo, Quant: "Q8_0", Target: InstallOllama}, nil); err == nil || !strings.Contains(err.Error(), "split into 2 files") {
+		t.Fatalf("split build into Ollama: %v", err)
+	}
+}

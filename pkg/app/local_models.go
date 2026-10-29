@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -32,7 +33,10 @@ type LocalEndpoint struct {
 	// KeySecret names the vault secret holding the server's API key, for
 	// servers started with one. The key itself is never in the config.
 	KeySecret string `json:"key_secret,omitempty"`
-	Disabled  bool   `json:"disabled,omitempty"`
+	// PlainHTTP accepts sending the key over plain http to another
+	// computer. Without it NullBot refuses to.
+	PlainHTTP bool `json:"plain_http,omitempty"`
+	Disabled  bool `json:"disabled,omitempty"`
 }
 
 // LocalProvider is the provider name for an endpoint.
@@ -108,6 +112,9 @@ func localClient(config Config, e LocalEndpoint) (localmodels.Endpoint, error) {
 	if e.KeySecret == "" {
 		return client, nil
 	}
+	if warning := LocalEndpointWarning(e); warning != "" && !e.PlainHTTP {
+		return client, errors.New(warning)
+	}
 	payload, err := loadSecretsPayload(config)
 	if err != nil {
 		return client, fmt.Errorf("the key for %s is in the vault, which could not be opened: %w", e.Title(), err)
@@ -116,13 +123,39 @@ func localClient(config Config, e LocalEndpoint) (localmodels.Endpoint, error) {
 		if s.Name != e.KeySecret {
 			continue
 		}
-		if s.Kind != SecretAPIKey && s.Kind != SecretGeneric {
-			return client, fmt.Errorf("secret %s is a %s; a server key must be an API key or generic secret", s.Name, s.Kind)
+		if err := localKeyAllowed(s, e); err != nil {
+			return client, err
 		}
 		client.APIKey = s.Values["value"]
 		return client, nil
 	}
 	return client, fmt.Errorf("the key secret %s for %s is missing; add it in Settings > Secrets", e.KeySecret, e.Title())
+}
+
+// cloudKeyProviders are providers whose keys NullBot uses itself. Their keys
+// never go to a local server, whatever the configuration says.
+var cloudKeyProviders = map[string]bool{
+	"openai": true, "anthropic": true, "openrouter": true, "google": true, "gemini": true,
+	"x-ai": true, "xai": true, "brave": true, "github": true, "gh": true, "huggingface": true, "hf": true,
+	"claude": true, "codex": true, "aws": true, "gcp": true,
+}
+
+// localKeyAllowed checks that a secret is meant for this server: an API key
+// whose provider is "local", the server's name, or "local-" and its name.
+// A configuration file that names another key (the OpenAI key, say) cannot
+// send it to a server.
+func localKeyAllowed(s Secret, e LocalEndpoint) error {
+	if s.Kind != SecretAPIKey {
+		return fmt.Errorf("secret %s is a %s; a server key must be an API key secret with provider %q or %q", s.Name, s.Kind, "local", e.ID)
+	}
+	p := NormalizeProvider(s.Public["provider"])
+	if cloudKeyProviders[p] {
+		return fmt.Errorf("secret %s is a %s key, which NullBot does not send to a local server; add a key with provider %q or %q", s.Name, p, "local", e.ID)
+	}
+	if p != "local" && p != e.ID && p != "local-"+e.ID {
+		return fmt.Errorf("secret %s is for %q; a key for the server %s needs provider %q or %q", s.Name, p, e.ID, "local", e.ID)
+	}
+	return nil
 }
 
 // localStatusCache keeps a recent successful check, so a run does not wait
@@ -168,7 +201,7 @@ func localModel(config Config, modelConfig ModelConfig, temperature *float64, ma
 		}
 	}
 	return tcagent.OpenAIModel{
-		Client:      openai.Client{APIKey: client.APIKey, BaseURL: client.OpenAIBaseURL()},
+		Client:      openai.Client{APIKey: client.APIKey, BaseURL: client.OpenAIBaseURL(), HTTPClient: localChatClient},
 		Model:       modelConfig.Model,
 		Temperature: temperature,
 		MaxTokens:   maxTokens,
@@ -176,11 +209,19 @@ func localModel(config Config, modelConfig ModelConfig, temperature *float64, ma
 	}, nil
 }
 
+// localChatClient keeps a server's key from following a redirect elsewhere.
+var localChatClient = localmodels.HTTPClient(0)
+
 func recordLocalWindows(config Config, e LocalEndpoint, models []localmodels.Model) {
 	sizes := map[string]int{}
 	for _, m := range models {
 		if m.ContextWindow > 0 {
 			sizes[m.ID] = m.ContextWindow
+			// Ollama lists "llama3.2:latest" for a model chosen as
+			// "llama3.2"; both names find its size.
+			if bare, ok := strings.CutSuffix(m.ID, ":latest"); ok && !hasModelTag(bare) {
+				sizes[bare] = m.ContextWindow
+			}
 		}
 	}
 	recordContextWindows(config, LocalProvider(e.ID), sizes, "provider", "Reported by "+e.Title())
@@ -278,7 +319,7 @@ func (a *App) LocalEndpoints(ctx context.Context, check bool) []LocalEndpointInf
 	var wg sync.WaitGroup
 	for i, e := range config.LocalEndpoints {
 		out[i] = LocalEndpointInfo{LocalEndpoint: e, Provider: LocalProvider(e.ID), Title: e.Title(), Label: localmodels.Kind(e.Kind).Label(),
-			Insecure: e.KeySecret != "" && strings.HasPrefix(e.BaseURL, "http://") && !localmodels.IsLocalHost(e.BaseURL)}
+			Insecure: LocalEndpointWarning(e) != ""}
 		if !check || e.Disabled {
 			continue
 		}
@@ -314,7 +355,24 @@ func (a *App) SaveLocalEndpoint(e LocalEndpoint, previousID string) (LocalEndpoi
 		return e, err
 	}
 	previousID = strings.ToLower(strings.TrimSpace(previousID))
+	if e.KeySecret != "" {
+		if err := a.checkLocalKeySecret(e); err != nil {
+			return e, err
+		}
+	} else {
+		e.PlainHTTP = false
+	}
+	if warning := LocalEndpointWarning(e); warning != "" && !e.PlainHTTP {
+		return e, errors.New(warning + "; to send it anyway, allow plain http for this server")
+	}
+	if err := localSaveClash(a.Config(), e.ID, previousID); err != nil {
+		return e, err
+	}
+	var clash error
 	err = a.UpdateConfig(func(config *Config) {
+		if clash = localSaveClash(*config, e.ID, previousID); clash != nil {
+			return
+		}
 		var kept []LocalEndpoint
 		for _, existing := range config.LocalEndpoints {
 			if existing.ID == e.ID || (previousID != "" && existing.ID == previousID) {
@@ -323,15 +381,30 @@ func (a *App) SaveLocalEndpoint(e LocalEndpoint, previousID string) (LocalEndpoi
 			kept = append(kept, existing)
 		}
 		config.LocalEndpoints = append(kept, e)
-		// A renamed server keeps the models chosen on it.
+		// A renamed server keeps the models chosen on it, and the context
+		// sizes set for them.
 		if previousID != "" && previousID != e.ID {
 			for _, m := range []*ModelConfig{&config.Model, &config.SubagentModel} {
 				if strings.EqualFold(m.Provider, LocalProvider(previousID)) {
 					m.Provider = LocalProvider(e.ID)
 				}
 			}
+			oldPrefix, newPrefix := LocalProvider(previousID)+"/", LocalProvider(e.ID)+"/"
+			if len(config.Compaction.ContextWindows) > 0 {
+				windows := make(map[string]int, len(config.Compaction.ContextWindows))
+				for key, tokens := range config.Compaction.ContextWindows {
+					if strings.HasPrefix(key, oldPrefix) {
+						key = newPrefix + strings.TrimPrefix(key, oldPrefix)
+					}
+					windows[key] = tokens
+				}
+				config.Compaction.ContextWindows = windows
+			}
 		}
 	})
+	if err == nil {
+		err = clash
+	}
 	if err != nil {
 		return e, err
 	}
@@ -339,6 +412,46 @@ func (a *App) SaveLocalEndpoint(e LocalEndpoint, previousID string) (LocalEndpoi
 	a.MarkRuntimeDirty("local model server " + e.ID + " saved")
 	invalidateModelCatalog()
 	return e, nil
+}
+
+// localSaveClash refuses to replace a server that is not the one being
+// edited, so adding a second Ollama or renaming onto another name never
+// drops a server silently.
+func localSaveClash(config Config, id, previousID string) error {
+	if previousID != "" {
+		if _, ok := localEndpointByID(config, previousID); !ok {
+			return fmt.Errorf("there is no local model server %q", previousID)
+		}
+	}
+	if id != previousID {
+		if _, ok := localEndpointByID(config, id); ok {
+			return fmt.Errorf("there is already a local model server named %q; choose another name or edit that one", id)
+		}
+	}
+	return nil
+}
+
+func (a *App) checkLocalKeySecret(e LocalEndpoint) error {
+	payload, err := loadSecretsPayload(a.Config())
+	if err != nil {
+		return fmt.Errorf("the vault could not be opened: %w", err)
+	}
+	for _, s := range payload.Secrets {
+		if s.Name == e.KeySecret {
+			return localKeyAllowed(s, e)
+		}
+	}
+	// It can be added later; the server is not used until it is.
+	return nil
+}
+
+// LocalEndpointWarning is what to know before a key goes to a server: plain
+// http to another computer sends it in the clear.
+func LocalEndpointWarning(e LocalEndpoint) string {
+	if e.KeySecret != "" && strings.HasPrefix(strings.ToLower(e.BaseURL), "http://") && !localmodels.IsLocalHost(e.BaseURL) {
+		return fmt.Sprintf("%s uses plain http to another computer, so its key travels unencrypted; use https, or an SSH tunnel to the server", e.Title())
+	}
+	return ""
 }
 
 // RemoveLocalEndpoint removes a server. A model in use on it stops the
@@ -433,11 +546,7 @@ func (a *App) CopyLocalModelWithContext(ctx context.Context, id, from string, nu
 	if err != nil {
 		return "", err
 	}
-	base, tag, _ := strings.Cut(from, ":")
-	name := fmt.Sprintf("%s-%dk", base, numCtx/1024)
-	if tag != "" && tag != "latest" {
-		name = fmt.Sprintf("%s-%s-%dk", base, tag, numCtx/1024)
-	}
+	name := localCopyName(from, numCtx)
 	if err := client.CreateWithContext(ctx, from, name, numCtx, nil); err != nil {
 		return "", err
 	}
@@ -445,11 +554,48 @@ func (a *App) CopyLocalModelWithContext(ctx context.Context, id, from string, nu
 	return name + ":latest", nil
 }
 
+// hasModelTag reports an Ollama model name with a tag. A colon before the
+// last slash is a registry's port, not a tag.
+func hasModelTag(name string) bool {
+	return strings.Contains(name[strings.LastIndex(name, "/")+1:], ":")
+}
+
+// ollamaFullName is a model name as Ollama lists it, with ":latest" when no
+// tag was given.
+func ollamaFullName(name string) string {
+	name = strings.TrimSpace(name)
+	if name != "" && !hasModelTag(name) {
+		return name + ":latest"
+	}
+	return name
+}
+
+// localCopyName names a copy of a model with a larger context:
+// qwen2.5:7b with 32768 tokens is qwen2.5-7b-32k. Sizes that are not a whole
+// number of thousands keep their exact count, so two sizes never share a
+// name.
+func localCopyName(from string, numCtx int) string {
+	from = ollamaFullName(from)
+	slash := strings.LastIndex(from, "/") + 1
+	base, tag := from, ""
+	if i := strings.LastIndex(from[slash:], ":"); i >= 0 {
+		base, tag = from[:slash+i], from[slash+i+1:]
+	}
+	size := strconv.Itoa(numCtx)
+	if numCtx%1024 == 0 {
+		size = strconv.Itoa(numCtx/1024) + "k"
+	}
+	if tag != "" && tag != "latest" {
+		return base + "-" + tag + "-" + size
+	}
+	return base + "-" + size
+}
+
 // DeleteLocalModel removes a model from an Ollama server.
 func (a *App) DeleteLocalModel(ctx context.Context, id, name string) error {
 	config := a.Config()
 	for _, m := range []ModelConfig{config.Model, config.SubagentModel} {
-		if strings.EqualFold(m.Provider, LocalProvider(id)) && m.Model == name {
+		if strings.EqualFold(m.Provider, LocalProvider(id)) && ollamaFullName(m.Model) == ollamaFullName(name) {
 			return errors.New("that model is in use; choose another model first")
 		}
 	}

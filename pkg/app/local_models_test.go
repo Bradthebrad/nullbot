@@ -140,10 +140,24 @@ func TestLocalServerKeyFromTheVaultAndErrors(t *testing.T) {
 	if !info[0].Status.Reachable || info[0].Insecure {
 		t.Fatalf("info %+v", info[0])
 	}
-	// Renaming keeps the models chosen on it.
-	_ = a.UpdateConfig(func(c *Config) { c.SubagentModel = ModelConfig{Provider: "local:lab", Model: "qwen2.5:7b"} })
+	// The key is bound to the server's name: renaming needs a key for the
+	// new name, or one for any local server.
+	_ = a.UpdateConfig(func(c *Config) {
+		c.SubagentModel = ModelConfig{Provider: "local:lab", Model: "qwen2.5:7b"}
+		c.Compaction.ContextWindows = map[string]int{"local:lab/qwen2.5:7b": 24576, "openai/gpt-5": 100000}
+	})
+	if _, err := a.SaveLocalEndpoint(LocalEndpoint{ID: "gpu", Kind: "openai", BaseURL: srv.URL, KeySecret: "lab-key"}, "lab"); err == nil || !strings.Contains(err.Error(), `provider "local" or "gpu"`) {
+		t.Fatalf("a key for lab went to gpu: %v", err)
+	}
+	if _, err := SaveSecret(a.Config(), SecretInput{Name: "lab-key", Kind: SecretAPIKey, Public: map[string]string{"provider": "local"}, Values: map[string]string{"value": "local-server-key-0001"}}); err != nil {
+		t.Fatal(err)
+	}
+	// Renaming keeps the models chosen on it, and their context sizes.
 	if _, err := a.SaveLocalEndpoint(LocalEndpoint{ID: "gpu", Kind: "openai", BaseURL: srv.URL, KeySecret: "lab-key"}, "lab"); err != nil {
 		t.Fatal(err)
+	}
+	if w := a.Config().Compaction.ContextWindows; w["local:gpu/qwen2.5:7b"] != 24576 || w["openai/gpt-5"] != 100000 || len(w) != 2 {
+		t.Fatalf("windows after rename %v", w)
 	}
 	if c := a.Config(); c.SubagentModel.Provider != "local:gpu" || len(c.LocalEndpoints) != 1 {
 		t.Fatalf("after rename %+v %+v", c.SubagentModel, c.LocalEndpoints)
@@ -158,5 +172,86 @@ func TestLocalServerKeyFromTheVaultAndErrors(t *testing.T) {
 	}
 	if window := ResolveContextWindow(a.Config(), ModelConfig{Provider: "local:gpu", Model: "unlisted"}); window.Tokens != 8192 {
 		t.Fatalf("unknown local window %+v", window)
+	}
+}
+
+func TestLocalKeysStayWithTheirServer(t *testing.T) {
+	config := projectTestConfig(t, "read-only")
+	a := New(config)
+	for _, in := range []SecretInput{
+		{Name: "openai", Kind: SecretAPIKey, Public: map[string]string{"provider": "openai"}, Values: map[string]string{"value": "sk-openai-real-00001"}},
+		{Name: "lan-key", Kind: SecretAPIKey, Public: map[string]string{"provider": "lan"}, Values: map[string]string{"value": "lan-server-key-00001"}},
+		{Name: "pw", Kind: SecretGeneric, Public: map[string]string{"env": "PW"}, Values: map[string]string{"value": "generic-value-000001"}},
+	} {
+		if _, err := SaveSecret(a.Config(), in); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Another provider's key never goes to a server, even by hand-editing.
+	if _, err := a.SaveLocalEndpoint(LocalEndpoint{ID: "openai", Kind: "openai", BaseURL: "https://llm.example.test", KeySecret: "openai"}, ""); err == nil || !strings.Contains(err.Error(), "does not send") {
+		t.Fatalf("the OpenAI key was bound to a server: %v", err)
+	}
+	if _, err := a.SaveLocalEndpoint(LocalEndpoint{ID: "lan", Kind: "openai", BaseURL: "https://llm.example.test", KeySecret: "pw"}, ""); err == nil {
+		t.Fatal("a generic secret was bound to a server")
+	}
+	_ = a.UpdateConfig(func(c *Config) {
+		c.LocalEndpoints = []LocalEndpoint{{ID: "evil", Kind: "openai", BaseURL: "https://evil.example.test", KeySecret: "openai"}}
+	})
+	if _, err := localClient(a.Config(), a.Config().LocalEndpoints[0]); err == nil {
+		t.Fatal("a hand-edited config sent the OpenAI key to a server")
+	}
+	// Plain http to another computer needs an explicit choice.
+	_ = a.UpdateConfig(func(c *Config) { c.LocalEndpoints = nil })
+	e := LocalEndpoint{ID: "lan", Kind: "vllm", BaseURL: "http://192.168.1.20:8000", KeySecret: "lan-key"}
+	if _, err := a.SaveLocalEndpoint(e, ""); err == nil || !strings.Contains(err.Error(), "plain http") {
+		t.Fatalf("plain http with a key: %v", err)
+	}
+	e.PlainHTTP = true
+	if _, err := a.SaveLocalEndpoint(e, ""); err != nil {
+		t.Fatal(err)
+	}
+	if client, err := localClient(a.Config(), a.Config().LocalEndpoints[0]); err != nil || client.APIKey != "lan-server-key-00001" {
+		t.Fatalf("allowed plain http: %v", err)
+	}
+	// Adding a second server under the same name is refused, not a
+	// replacement.
+	if _, err := a.SaveLocalEndpoint(LocalEndpoint{ID: "lan", Kind: "ollama"}, ""); err == nil || !strings.Contains(err.Error(), "already") {
+		t.Fatalf("a server was replaced: %v", err)
+	}
+	if _, err := a.SaveLocalEndpoint(LocalEndpoint{ID: "box", Kind: "ollama"}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.SaveLocalEndpoint(LocalEndpoint{ID: "lan", Kind: "ollama"}, "box"); err == nil {
+		t.Fatal("renaming onto another server replaced it")
+	}
+	if n := len(a.Config().LocalEndpoints); n != 2 {
+		t.Fatalf("%d servers", n)
+	}
+}
+
+func TestOllamaNamesAndCopies(t *testing.T) {
+	for in, want := range map[string]string{
+		"llama3.2":                       "llama3.2:latest",
+		"llama3.2:3b":                    "llama3.2:3b",
+		"registry.local:5000/team/model": "registry.local:5000/team/model:latest",
+		"hf.co/Qwen/Qwen2.5-GGUF:Q4_K_M": "hf.co/Qwen/Qwen2.5-GGUF:Q4_K_M",
+	} {
+		if got := ollamaFullName(in); got != want {
+			t.Errorf("%q: %q, want %q", in, got, want)
+		}
+	}
+	for _, c := range []struct {
+		from string
+		ctx  int
+		want string
+	}{
+		{"qwen2.5:7b", 32768, "qwen2.5-7b-32k"},
+		{"llama3.2", 32768, "llama3.2-32k"},
+		{"llama3.2:latest", 33000, "llama3.2-33000"},
+		{"registry.local:5000/team/model:q4", 65536, "registry.local:5000/team/model-q4-64k"},
+	} {
+		if got := localCopyName(c.from, c.ctx); got != c.want {
+			t.Errorf("%q %d: %q, want %q", c.from, c.ctx, got, c.want)
+		}
 	}
 }

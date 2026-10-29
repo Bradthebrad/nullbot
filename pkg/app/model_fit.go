@@ -21,27 +21,55 @@ const NullBotContext = 16384
 
 var hardwareCache struct {
 	sync.Mutex
-	hw  llmfit.Hardware
-	at  time.Time
-	err error
+	hw llmfit.Hardware
+	at time.Time // of the last detection that succeeded
+	// running is closed when the detection in progress ends; last and
+	// lastErr are what it found.
+	running chan struct{}
+	last    llmfit.Hardware
+	lastErr error
 }
 
 // detectHardware finds this computer's hardware; tests replace it.
 var detectHardware = llmfit.Detect
 
 // MachineHardware reports this computer's CPU, memory and GPUs, checked at
-// most every ten minutes unless refresh is set.
+// most every ten minutes unless refresh is set. One detection runs at a
+// time, on its own 30-second limit, so a caller that gives up neither stops
+// it nor leaves a failure cached; only a detection that succeeded is kept.
 func MachineHardware(ctx context.Context, refresh bool) (llmfit.Hardware, error) {
 	hardwareCache.Lock()
-	defer hardwareCache.Unlock()
 	if !refresh && !hardwareCache.at.IsZero() && time.Since(hardwareCache.at) < 10*time.Minute {
-		return hardwareCache.hw, hardwareCache.err
+		defer hardwareCache.Unlock()
+		return hardwareCache.hw, nil
 	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	hw, err := detectHardware(ctx)
-	hardwareCache.hw, hardwareCache.err, hardwareCache.at = hw, err, time.Now()
-	return hw, err
+	done := hardwareCache.running
+	if done == nil {
+		done = make(chan struct{})
+		hardwareCache.running = done
+		go func() {
+			dctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			hw, err := detectHardware(dctx)
+			hardwareCache.Lock()
+			hardwareCache.running = nil
+			hardwareCache.last, hardwareCache.lastErr = hw, err
+			if err == nil {
+				hardwareCache.hw, hardwareCache.at = hw, time.Now()
+			}
+			hardwareCache.Unlock()
+			close(done)
+		}()
+	}
+	hardwareCache.Unlock()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return llmfit.Hardware{}, ctx.Err()
+	}
+	hardwareCache.Lock()
+	defer hardwareCache.Unlock()
+	return hardwareCache.last, hardwareCache.lastErr
 }
 
 // ModelFitOptions narrow a ranking.

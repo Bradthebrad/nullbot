@@ -146,7 +146,28 @@ func (e Endpoint) client() *http.Client {
 	return defaultClient
 }
 
-var defaultClient = &http.Client{Timeout: 30 * time.Second}
+var defaultClient = HTTPClient(30 * time.Second)
+
+// HTTPClient is a client for talking to a model server with a key. Go only
+// drops the Authorization header when a redirect leaves the domain, so a
+// redirect to another port, to plain http or to a subdomain would carry the
+// key along; this client drops it unless scheme, host and port all stay the
+// same. A zero timeout is for streamed chats, which the caller's context
+// ends.
+func HTTPClient(timeout time.Duration) *http.Client {
+	return &http.Client{Timeout: timeout, CheckRedirect: sameOriginAuth}
+}
+
+func sameOriginAuth(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	first := via[0].URL
+	if !strings.EqualFold(req.URL.Scheme, first.Scheme) || !strings.EqualFold(req.URL.Host, first.Host) {
+		req.Header.Del("Authorization")
+	}
+	return nil
+}
 
 func (e Endpoint) request(ctx context.Context, method, path string, body any) (*http.Request, error) {
 	var reader io.Reader

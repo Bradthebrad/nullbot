@@ -206,6 +206,7 @@ func newDetector(opts DetectOptions) *detector {
 // execRunner runs a program for real.
 func execRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
+	hideWindow(cmd)
 	// Don't wait forever on pipes held open by a grandchild once the
 	// program itself has been killed.
 	cmd.WaitDelay = time.Second

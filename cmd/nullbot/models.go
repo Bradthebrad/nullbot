@@ -21,9 +21,11 @@ const modelsUsage = `Usage:
   nullbot models [--refresh]               every provider's models
   nullbot models local                     your model servers and whether they answer
   nullbot models local find                look for model servers on this computer
-  nullbot models local add KIND [--id ID] [--url URL] [--name NAME] [--key-secret SECRET]
+  nullbot models local add KIND [--id ID] [--url URL] [--name NAME] [--key-secret SECRET] [--plain-http]
                                            add a server: ollama, llamacpp, lmstudio,
-                                           vllm or openai (any OpenAI-compatible server)
+                                           vllm or openai (any OpenAI-compatible server);
+                                           --plain-http allows sending its key over
+                                           plain http to another computer
   nullbot models local remove ID           remove a server
   nullbot models pull NAME [--server ID]   download a model into Ollama
   nullbot models context MODEL --size N [--server ID]
@@ -76,6 +78,7 @@ func runModelsCLI(args []string, appDir string, stdout, stderr io.Writer) int {
 	url := flags.String("url", "", "")
 	name := flags.String("name", "", "")
 	keySecret := flags.String("key-secret", "", "")
+	plainHTTP := flags.Bool("plain-http", false, "")
 	server := flags.String("server", "", "")
 	size := flags.Int("size", 0, "")
 	sortBy := flags.String("sort", "", "")
@@ -224,7 +227,7 @@ func runModelsCLI(args []string, appDir string, stdout, stderr io.Writer) int {
 			if len(positional) != 1 {
 				return fail(errors.New("say which kind of server: ollama, llamacpp, lmstudio, vllm or openai"))
 			}
-			saved, err := a.SaveLocalEndpoint(app.LocalEndpoint{ID: *id, Kind: positional[0], BaseURL: *url, Name: *name, KeySecret: *keySecret}, "")
+			saved, err := a.SaveLocalEndpoint(app.LocalEndpoint{ID: *id, Kind: positional[0], BaseURL: *url, Name: *name, KeySecret: *keySecret, PlainHTTP: *plainHTTP}, "")
 			if err != nil {
 				return fail(err)
 			}

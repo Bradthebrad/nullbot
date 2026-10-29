@@ -31,6 +31,13 @@ const infraUsage = `Usage:
   nullbot infra ledger [PLAN] [--limit N]
                                      every proposal, decision and command run
   nullbot infra agents on|off        let agents propose and run approved plans
+  nullbot infra inspect MACHINE      what a machine runs: ports, services, nginx sites,
+                                     containers, its first-boot setup (over SSH)
+  nullbot infra here                 what listens on this computer
+  nullbot infra tunnel MACHINE [--port 11434] [--local PORT]
+                                     forward a machine's private port here, until Ctrl+C
+  nullbot infra connect MACHINE      tunnel to the machine's Ollama and use it as a
+                                     local model server, until Ctrl+C
 
 Nothing runs until you approve it. Credentials are aws or gcp secrets in the
 vault; the commands run through the aws and gcloud tools.
@@ -48,7 +55,7 @@ func runInfraCLI(args []string, appDir string, stdout, stderr io.Writer) int {
 		}
 		rest = append(rest, arg)
 		switch strings.TrimLeft(arg, "-") {
-		case "file", "reason", "limit":
+		case "file", "reason", "limit", "port", "local":
 			if i+1 < len(args) {
 				i++
 				rest = append(rest, args[i])
@@ -64,6 +71,8 @@ func runInfraCLI(args []string, appDir string, stdout, stderr io.Writer) int {
 	limit := flags.Int("limit", 50, "")
 	contents := flags.Bool("contents", false, "")
 	applyNow := flags.Bool("apply", false, "")
+	remotePort := flags.Int("port", 11434, "")
+	localPort := flags.Int("local", 0, "")
 	if err := flags.Parse(rest); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -274,6 +283,47 @@ func runInfraCLI(args []string, appDir string, stdout, stderr io.Writer) int {
 		}
 		return 0
 
+	case "inspect", "here":
+		var report app.NodeReport
+		if sub == "here" {
+			report = app.ThisComputer(ctx)
+		} else {
+			id, err := one("machine")
+			if err != nil {
+				return fail(err)
+			}
+			if report, err = a.InspectNode(ctx, id); err != nil {
+				return fail(err)
+			}
+		}
+		if *asJSON {
+			return emit(report)
+		}
+		printNode(stdout, report)
+		return 0
+
+	case "tunnel", "connect":
+		id, err := one("machine")
+		if err != nil {
+			return fail(err)
+		}
+		var t app.Tunnel
+		if sub == "connect" {
+			e, err := a.ConnectNodeOllama(id)
+			if err != nil {
+				return fail(err)
+			}
+			fmt.Fprintf(stdout, "Connected: %s's Ollama is local model server %s at %s. Use it with --model local:%s/MODEL while this runs.\n", id, e.ID, e.BaseURL, e.ID)
+		} else {
+			if t, err = a.OpenTunnel(id, *remotePort, *localPort); err != nil {
+				return fail(err)
+			}
+			fmt.Fprintf(stdout, "Forwarding 127.0.0.1:%d here to port %d on %s. Ctrl+C closes it.\n", t.LocalPort, t.RemotePort, t.Name)
+		}
+		<-ctx.Done()
+		app.CloseTunnels()
+		return 0
+
 	case "agents":
 		on, err := one("setting (on or off)")
 		if err != nil || (on != "on" && on != "off") {
@@ -339,4 +389,49 @@ func abs(f float64) float64 {
 		return -f
 	}
 	return f
+}
+
+func printNode(w io.Writer, r app.NodeReport) {
+	fmt.Fprintf(w, "%s", r.Name)
+	if r.Address != "" {
+		fmt.Fprintf(w, " (%s)", r.Address)
+	}
+	fmt.Fprintln(w)
+	if r.Error != "" {
+		fmt.Fprintln(w, "error:", r.Error)
+	}
+	if r.Setup != "" && r.Setup != "none" {
+		fmt.Fprintf(w, "First-boot setup: %s\n", r.Setup)
+		for _, l := range r.SetupLines {
+			fmt.Fprintln(w, "  "+l)
+		}
+	}
+	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "PORT\tADDRESS\tWHAT\tPROCESS\tREACHABLE FROM")
+	for _, l := range r.Listeners {
+		from := "this machine only"
+		if l.Public {
+			from = "other machines"
+		}
+		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\n", l.Port, l.Address, l.Known, l.Process, from)
+	}
+	_ = tw.Flush()
+	for _, site := range r.Nginx {
+		fmt.Fprintf(w, "nginx: %s listening on %s", strings.Join(site.ServerNames, " "), strings.Join(site.Listen, ", "))
+		if len(site.ProxyPass) > 0 {
+			fmt.Fprintf(w, " → %s", strings.Join(site.ProxyPass, ", "))
+		} else if site.Root != "" {
+			fmt.Fprintf(w, " → %s", site.Root)
+		}
+		fmt.Fprintln(w)
+	}
+	for _, c := range r.Containers {
+		fmt.Fprintln(w, "container:", c)
+	}
+	if len(r.Services) > 0 {
+		fmt.Fprintf(w, "services: %s\n", strings.Join(r.Services, ", "))
+	}
+	for _, l := range r.System {
+		fmt.Fprintln(w, l)
+	}
 }

@@ -17,10 +17,29 @@ import (
 // them. An agent proposes; a person approves; then the agent (or the
 // person) runs the plan.
 
-const infraGuidance = "Cloud infrastructure: infra_status lists what NullBot created on AWS and Google Cloud, with plans and their state. infra_plan proposes machines or buckets as a plan of aws/gcloud commands; nothing runs until the user approves it in NullBot. infra_apply waits for that approval and then runs the plan. infra_destroy proposes removing resources NullBot made. Prefer the smallest machine that does the job, open only the ports needed, from the narrowest addresses (\"my-ip\" is the user's address), and remove what is no longer needed. Credentials are vault secrets of kind aws or gcp, named in the plan; secrets_list shows them.\n"
+const infraGuidance = "Cloud infrastructure: infra_status lists what NullBot created on AWS and Google Cloud, with plans and their state. infra_plan proposes machines or buckets as a plan of aws/gcloud commands; nothing runs until the user approves it in NullBot. infra_apply waits for that approval and then runs the plan. infra_destroy proposes removing resources NullBot made. infra_inspect shows what a machine (or this computer) runs and which ports are open. Prefer the smallest machine that does the job, open only the ports needed, from the narrowest addresses (\"my-ip\" is the user's address), and remove what is no longer needed. Credentials are vault secrets of kind aws or gcp, named in the plan; secrets_list shows them.\n"
 
 func infraTools(state *App) []agent.Tool {
-	return []agent.Tool{infraStatusTool(state), infraPlanTool(state), infraApplyTool(state), infraDestroyTool(state)}
+	return []agent.Tool{infraStatusTool(state), infraPlanTool(state), infraApplyTool(state), infraDestroyTool(state), infraInspectTool(state)}
+}
+
+func infraInspectTool(state *App) agent.Tool {
+	return agent.ToolFunc{
+		Name:        "infra_inspect",
+		Description: "See what runs where: for a machine NullBot made (by name or id), what listens on which port and whether other machines can reach it, running services, nginx sites, containers, and its first-boot setup; read over SSH. With machine \"here\", the ports on this computer.",
+		Schema:      agent.ToolSchema(map[string]any{"machine": agent.StringProperty("A machine's name or id, or \"here\".")}, "machine"),
+		Func: func(ctx context.Context, args map[string]any) (string, error) {
+			machine := strings.TrimSpace(stringArg(args, "machine"))
+			if machine == "here" || machine == "" {
+				return prettyJSON(ThisComputer(ctx)), nil
+			}
+			report, err := state.InspectNode(ctx, machine)
+			if err != nil {
+				return "", err
+			}
+			return prettyJSON(report), nil
+		},
+	}
 }
 
 func infraStatusTool(state *App) agent.Tool {

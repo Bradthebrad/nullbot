@@ -275,6 +275,7 @@ var internalBuiltins = map[string]string{
 	"infra_plan":            "proposes a cloud plan, which runs only after you approve it",
 	"infra_apply":           "runs a cloud plan you approved",
 	"infra_destroy":         "proposes removing cloud resources, which happens only after you approve it",
+	"infra_inspect":         "reads what a machine NullBot made, or this computer, is running",
 }
 
 var (

@@ -176,6 +176,14 @@ func (a *App) PlanInfra(ctx context.Context, req InfraRequest, requester string)
 	if err != nil {
 		return plan, err
 	}
+	if req.SSHKeySecret != "" {
+		// So NullBot can log in later to see what runs there.
+		for i := range plan.Resources {
+			if plan.Resources[i].Kind == infra.KindInstance {
+				plan.Resources[i].Details["ssh_key_secret"] = req.SSHKeySecret
+			}
+		}
+	}
 	if _, err := infraCLI(cliFor(plan.Cloud)); err != nil {
 		plan.Notes = append(plan.Notes, err.Error())
 	}

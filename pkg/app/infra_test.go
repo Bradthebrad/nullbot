@@ -142,3 +142,83 @@ func TestInfraRefusesWrongCredentials(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 }
+
+func TestParsePortListings(t *testing.T) {
+	l, _ := parseSSLine(`LISTEN 0      4096       127.0.0.1:11434      0.0.0.0:*    users:(("ollama",pid=812,fd=3))`)
+	if l.Port != 11434 || l.Address != "127.0.0.1" || l.Process != "ollama" || l.PID != 812 || l.Public || l.Known != "Ollama" {
+		t.Fatalf("ss: %+v", l)
+	}
+	lsof := parseLsof("COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\nnginx 99 root 6u IPv4 0x1 0t0 TCP *:443 (LISTEN)\n")
+	if len(lsof) != 1 || lsof[0].Port != 443 || !lsof[0].Public || lsof[0].Known != "nginx" {
+		t.Fatalf("lsof: %+v", lsof)
+	}
+	netstat := parseNetstat("  TCP    0.0.0.0:22     0.0.0.0:0   LISTENING   1100\r\n  TCP    127.0.0.1:1234  0.0.0.0:0   LISTENING   2200\r\n  TCP    10.0.0.2:50000  1.2.3.4:443  ESTABLISHED 3\r\n", map[int]string{2200: "LM Studio"})
+	if len(netstat) != 2 || netstat[1].Process != "LM Studio" || netstat[0].Known != "SSH" || !netstat[0].Public {
+		t.Fatalf("netstat: %+v", netstat)
+	}
+}
+
+func TestInspectNode(t *testing.T) {
+	fakeAWS(t)
+	bin := t.TempDir()
+	probe := `##ports
+LISTEN 0 4096 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=1,fd=3))
+LISTEN 0 4096 [::]:22 [::]:* users:(("sshd",pid=1,fd=4))
+LISTEN 0 4096 127.0.0.1:11434 0.0.0.0:* users:(("ollama",pid=812,fd=3))
+LISTEN 0 511 0.0.0.0:443 0.0.0.0:* users:(("nginx",pid=900,fd=6))
+##services
+nginx.service
+ollama.service
+nullbot.service
+##nginx
+    server {
+        listen 443 ssl;
+        server_name chat.example.com;
+            proxy_pass http://127.0.0.1:3000;
+##docker
+web (acme/web:1.2) 0.0.0.0:3000->3000/tcp
+##setup
+done
+##system
+ 10:00:00 up 2 days
+`
+	_ = os.WriteFile(filepath.Join(bin, "probe.txt"), []byte(probe), 0o644)
+	_ = os.WriteFile(filepath.Join(bin, "ssh"), []byte("#!/bin/sh\necho \"$*\" > \""+bin+"/args\"\ncat >/dev/null\ncat \""+bin+"/probe.txt\"\n"), 0o755)
+	t.Setenv("NULLBOT_SSH_BIN", filepath.Join(bin, "ssh"))
+	config := projectTestConfig(t, "read-only")
+	a := New(config)
+	_, _ = SaveSecret(config, SecretInput{Name: "aws-lab", Kind: SecretAWS, Values: map[string]string{"access_key_id": "AKIAINSPECT000000000", "secret_access_key": "inspect/secret/000000000000000000000"}})
+	if _, err := a.GenerateSSHKey("deploy", "", "", false); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := a.PlanInfra(context.Background(), InfraRequest{Spec: infra.Spec{Cloud: infra.AWS, Credential: "aws-lab", Machines: []infra.MachineSpec{{Name: "web", Type: "t3.small", AllowFrom: []string{"203.0.113.1/32"}}}}, SSHKeySecret: "deploy"}, "you")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = a.DecideInfraPlan(plan.ID, true, "you")
+	if _, err := a.ApplyInfraPlan(context.Background(), plan.ID, "you"); err != nil {
+		t.Fatal(err)
+	}
+	report, err := a.InspectNode(context.Background(), "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Listeners) != 3 || report.Listeners[0].Port != 22 || !report.Listeners[0].Public || report.Listeners[1].Port != 443 || report.Listeners[2].Known != "Ollama" || report.Listeners[2].Public {
+		t.Fatalf("listeners %+v", report.Listeners)
+	}
+	if len(report.Nginx) != 1 || report.Nginx[0].ServerNames[0] != "chat.example.com" || report.Nginx[0].ProxyPass[0] != "http://127.0.0.1:3000" {
+		t.Fatalf("nginx %+v", report.Nginx)
+	}
+	if report.Setup != "done" || len(report.Containers) != 1 || len(report.Services) != 3 {
+		t.Fatalf("report %+v", report)
+	}
+	args, _ := os.ReadFile(filepath.Join(bin, "args"))
+	if !strings.Contains(string(args), "-l ubuntu") || !strings.Contains(string(args), "34.1.2.3") || !strings.Contains(string(args), "StrictHostKeyChecking=accept-new") {
+		t.Fatalf("ssh args %s", args)
+	}
+	// A tunnel through an ssh that fails says why.
+	_ = os.WriteFile(filepath.Join(bin, "ssh"), []byte("#!/bin/sh\necho 'Permission denied (publickey).' >&2\nexit 255\n"), 0o755)
+	if _, err := a.OpenTunnel("web", 11434, 0); err == nil || !strings.Contains(err.Error(), "Permission denied") {
+		t.Fatalf("tunnel: %v", err)
+	}
+}

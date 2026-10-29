@@ -43,7 +43,9 @@ data, along with your note.
 read & write, full, or custom), and every call, built-in or from a tool server
 on this machine or another, is checked against it. While a request runs you can
 steer it, ask something on the side, pause it, have it wrap up, or stop it
-outright, and the trace shows each step as it happens.
+outright, and the trace shows each step as it happens. Several chats can run
+at once, and the main chat can see and steer the others
+([docs/CHATS.md](docs/CHATS.md)).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/how-it-works-dark.svg">
@@ -126,6 +128,7 @@ with its size; the full history stays searchable. See
 | Skills | `skills_list`, `skill_read`, `skill_references`, `create_skill` |
 | Marketplace and servers | `market_list_available`, `market_read_package`, `market_install_package`, `market_refresh`, `mcp_list_servers`, `mcp_enable_server`, `mcp_disable_server`, `mcp_remove_server` |
 | Secrets | `secrets_list` (names only), `secret_run` (a command with secrets in its environment, values removed from its output) |
+| Chats (main chat only) | `chats_list`, `chat_read`, `chat_send`, `chat_control`, `chat_open` |
 | NullBot itself | `config_dir_list`, `config_dir_read`, `logs_recent` |
 
 ### Tool servers
@@ -288,6 +291,7 @@ See [docs/ROADMAP.md](docs/ROADMAP.md).
 | Context and compaction | [docs/CONTEXT.md](docs/CONTEXT.md) |
 | History and search | [docs/HISTORY.md](docs/HISTORY.md) |
 | Secrets and the vault | [docs/SECRETS.md](docs/SECRETS.md) |
+| Several chats at once | [docs/CHATS.md](docs/CHATS.md) |
 | Service accounts | [docs/SERVICE_ACCOUNTS.md](docs/SERVICE_ACCOUNTS.md) |
 | Activity events API | [docs/ACTIVITY_API.md](docs/ACTIVITY_API.md) |
 | Marketplace server lifecycle | [docs/MARKETPLACE_MCP_LIFECYCLE_SPEC.md](docs/MARKETPLACE_MCP_LIFECYCLE_SPEC.md) |

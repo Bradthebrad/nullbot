@@ -130,7 +130,7 @@ func CheckCloudAccount(ctx context.Context, config Config, name string) (CloudId
 			return id, errors.New("AWS did not answer in time; check this computer's connection")
 		}
 		if err != nil {
-			return id, awsCheckError(config, stderr, err)
+			return id, forgetRejected(config, s, awsCheckError(config, stderr, err))
 		}
 		var who struct{ Account, Arn string }
 		if json.Unmarshal([]byte(out), &who) != nil || who.Account == "" {
@@ -145,7 +145,7 @@ func CheckCloudAccount(ctx context.Context, config Config, name string) (CloudId
 		if err != nil {
 			note, err := gcpCheckError(config, id.Project, stderr, err)
 			if err != nil {
-				return id, err
+				return id, forgetRejected(config, s, err)
 			}
 			id.Note = note
 		}
@@ -171,6 +171,32 @@ func CheckCloudAccount(ctx context.Context, config Config, name string) (CloudId
 		return nil
 	})
 	return id, err
+}
+
+// errKeyRejected marks a key the cloud refused, as opposed to a check that
+// could not finish (no connection, an answer NullBot did not expect).
+var errKeyRejected = errors.New("the cloud refused the key")
+
+type rejectedError string
+
+func (e rejectedError) Error() string        { return string(e) }
+func (e rejectedError) Is(target error) bool { return target == errKeyRejected }
+
+// forgetRejected clears an earlier check of a key the cloud now refuses, so
+// the account no longer shows as signing in. It returns err.
+func forgetRejected(config Config, s Secret, err error) error {
+	if !errors.Is(err, errKeyRejected) {
+		return err
+	}
+	_ = updateSecrets(config, func(p *vaultPayload) error {
+		if i := secretIndex(*p, s.Name); i >= 0 && credentialStamp(p.Secrets[i]) == credentialStamp(s) {
+			for _, k := range checkedFields {
+				delete(p.Secrets[i].Public, k)
+			}
+		}
+		return nil
+	})
+	return err
 }
 
 // gcpAccountProject is the project a Google Cloud account works in: the
@@ -203,11 +229,11 @@ func awsCheckError(config Config, stderr string, err error) error {
 	text := cliError(config, stderr, err)
 	switch {
 	case strings.Contains(text, "InvalidClientTokenId"):
-		return errors.New("AWS does not recognize this access key ID: check it, and that the key is active in IAM")
+		return rejectedError("AWS does not recognize this access key ID: check it, and that the key is active in IAM")
 	case strings.Contains(text, "SignatureDoesNotMatch"):
-		return errors.New("the secret access key does not belong to this access key ID: paste it again")
+		return rejectedError("the secret access key does not belong to this access key ID: paste it again")
 	case strings.Contains(text, "ExpiredToken"):
-		return errors.New("these temporary credentials have expired: paste fresh ones, session token included")
+		return rejectedError("these temporary credentials have expired: paste fresh ones, session token included")
 	}
 	return fmt.Errorf("aws could not sign in: %s", text)
 }
@@ -221,7 +247,7 @@ func gcpCheckError(config Config, project, stderr string, err error) (string, er
 	case strings.Contains(lower, "failed to establish") || strings.Contains(lower, "name resolution") || strings.Contains(lower, "timed out") || strings.Contains(lower, "connection refused"):
 		return "", fmt.Errorf("gcloud could not reach Google Cloud: %s", text)
 	case strings.Contains(lower, "auth token") || strings.Contains(lower, "invalid_grant") || strings.Contains(lower, "invalid jwt") || strings.Contains(lower, "unauthenticated"):
-		return "", fmt.Errorf("Google Cloud did not accept this key; it may have been deleted or disabled: %s", text)
+		return "", rejectedError("Google Cloud did not accept this key; it may have been deleted or disabled: " + text)
 	case strings.Contains(lower, "has not been used in project") || strings.Contains(lower, "service_disabled") || strings.Contains(lower, "it is disabled"):
 		return fmt.Sprintf("The key signs in, but the Compute Engine API is off in project %s. Turn it on in the Google Cloud console before planning machines.", project), nil
 	case strings.Contains(lower, "was not found") || strings.Contains(lower, "notfound"):

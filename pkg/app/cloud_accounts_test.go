@@ -125,6 +125,22 @@ echo '{"UserId":"AIDATEST","Account":"123456789012","Arn":"arn:aws:iam::12345678
 	if st, _ = a.InfraState(); st.Accounts[0].Checked != "" {
 		t.Fatal("a failed check was recorded as signed in")
 	}
+	// A key AWS refuses no longer shows as checked; a check that could not
+	// finish leaves the last answer alone.
+	setMode(t, dir, "")
+	if _, err := a.CheckCloudAccount(context.Background(), "aws-test"); err != nil {
+		t.Fatal(err)
+	}
+	setMode(t, dir, "leak")
+	_, _ = a.CheckCloudAccount(context.Background(), "aws-test")
+	if st, _ = a.InfraState(); st.Accounts[0].Checked == "" {
+		t.Fatal("a check that could not finish forgot the last answer")
+	}
+	setMode(t, dir, "badkey")
+	_, _ = a.CheckCloudAccount(context.Background(), "aws-test")
+	if st, _ = a.InfraState(); st.Accounts[0].Checked != "" || st.Accounts[0].Account != "" {
+		t.Fatalf("a refused key still shows as signing in: %+v", st.Accounts[0])
+	}
 
 	// Only cloud accounts can be checked.
 	if _, err := SaveSecret(config, SecretInput{Name: "gh", Kind: SecretGitHubToken, Values: map[string]string{"token": "ghp_check000000000000"}}); err != nil {
@@ -198,10 +214,13 @@ echo '{"name":"other-project"}'
 	if id, err = a.CheckCloudAccount(context.Background(), "gcp-lab"); err != nil || !strings.Contains(id.Note, "Compute Engine API is off") {
 		t.Fatalf("%v %+v", err, id)
 	}
-	// A key Google no longer accepts is an error.
+	// A key Google no longer accepts is an error, and no longer checked.
 	setMode(t, dir, "revoked")
 	if _, err = a.CheckCloudAccount(context.Background(), "gcp-lab"); err == nil || !strings.Contains(err.Error(), "did not accept this key") {
 		t.Fatalf("%v", err)
+	}
+	if st, _ = a.InfraState(); st.Accounts[0].Checked != "" || st.Accounts[0].Identity == "" {
+		t.Fatalf("%+v", st.Accounts[0])
 	}
 
 	// A new project means checking again.

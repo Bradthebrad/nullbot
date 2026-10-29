@@ -12,8 +12,12 @@
 - **A run checks its server answers** before it starts.
 - **Ollama**: pull models (including `hf.co/...` GGUF builds), delete them,
   and make a copy with a larger context.
+- **Install from Hugging Face**: search GGUF models, see each build and its
+  size, and install one into Ollama, LM Studio's folder or NullBot's own,
+  with resumable, checksum-verified downloads. A token for gated models
+  comes from the vault and is sent only to huggingface.co.
 - `nullbot models`, `nullbot models local find|add|remove`, `nullbot models
-  pull|context|remove`.
+  pull|context|remove|search|builds|install`.
 - See [docs/LOCAL_MODELS.md](../LOCAL_MODELS.md).
 
 ## Claude CLI provider

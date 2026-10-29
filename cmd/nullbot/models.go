@@ -30,6 +30,17 @@ const modelsUsage = `Usage:
                                            make an Ollama copy of MODEL that runs
                                            with an N-token context
   nullbot models remove NAME [--server ID] delete a model from Ollama
+  nullbot models search TEXT [--sort downloads|likes|trending|lastModified]
+                                           find GGUF models on Hugging Face
+  nullbot models builds OWNER/REPO         a repo's GGUF builds and their sizes
+  nullbot models install OWNER/REPO [--quant Q4_K_M | --build NAME]
+                         [--to ollama|lmstudio|files] [--server ID]
+                                           install a build: pull it into Ollama
+                                           (the default), save it into LM Studio's
+                                           folder, or into ~/.nullbot/models
+
+A Hugging Face token, for gated models, comes from an API key secret for
+provider huggingface: nullbot secrets set huggingface --kind api_key --set provider=huggingface
 
 Use a local model with --model local:ID/MODEL, for example
   nullbot -p "hello" --model local:ollama/qwen2.5:7b
@@ -63,6 +74,11 @@ func runModelsCLI(args []string, appDir string, stdout, stderr io.Writer) int {
 	keySecret := flags.String("key-secret", "", "")
 	server := flags.String("server", "", "")
 	size := flags.Int("size", 0, "")
+	sortBy := flags.String("sort", "", "")
+	limit := flags.Int("limit", 20, "")
+	quant := flags.String("quant", "", "")
+	build := flags.String("build", "", "")
+	to := flags.String("to", "ollama", "")
 	if err := flags.Parse(rest); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -282,6 +298,93 @@ func runModelsCLI(args []string, appDir string, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintf(stdout, "Removed %s from %s.\n", positional[0], target)
 		return 0
+
+	case "search":
+		found, err := a.SearchHFModels(ctx, strings.Join(positional, " "), *sortBy, *limit)
+		if err != nil {
+			return fail(err)
+		}
+		if *asJSON {
+			return emit(found)
+		}
+		if len(found) == 0 {
+			fmt.Fprintln(stdout, "No GGUF models match.")
+			return 0
+		}
+		w := tabwriter.NewWriter(stdout, 0, 2, 2, ' ', 0)
+		for _, m := range found {
+			note := ""
+			if m.NeedsToken {
+				note = "needs a token"
+			}
+			fmt.Fprintf(w, "%s\t%d downloads\t%d likes\t%s\t%s\n", m.ID, m.Downloads, m.Likes, m.LastModified, note)
+		}
+		_ = w.Flush()
+		return 0
+
+	case "builds":
+		if len(positional) != 1 {
+			return fail(errors.New("say which repo, such as Qwen/Qwen2.5-7B-Instruct-GGUF"))
+		}
+		builds, err := a.HFBuilds(ctx, positional[0])
+		if err != nil {
+			return fail(err)
+		}
+		if *asJSON {
+			return emit(builds)
+		}
+		w := tabwriter.NewWriter(stdout, 0, 2, 2, ' ', 0)
+		for _, b := range builds {
+			note := ""
+			switch {
+			case b.Projector:
+				note = "image projector, not a model"
+			case !b.Complete:
+				note = "parts missing"
+			case b.Recommended:
+				note = "suggested"
+			}
+			if b.Parts > 1 {
+				note = strings.TrimSpace(fmt.Sprintf("%d parts %s", b.Parts, note))
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", b.Name, b.Quant, formatGB(b.Size), note)
+		}
+		_ = w.Flush()
+		return 0
+
+	case "install":
+		if len(positional) != 1 {
+			return fail(errors.New("say which repo to install from, such as Qwen/Qwen2.5-7B-Instruct-GGUF"))
+		}
+		last := time.Time{}
+		res, err := a.InstallModel(ctx, app.InstallRequest{Repo: positional[0], Quant: *quant, Build: *build, Target: app.InstallTarget(*to), Server: *server}, func(p app.InstallProgress) {
+			if time.Since(last) < 500*time.Millisecond {
+				return
+			}
+			last = time.Now()
+			if p.Total > 0 {
+				fmt.Fprintf(stderr, "\r%s %s: %d%% of %s   ", p.Status, p.File, p.Done*100/p.Total, formatGB(p.Total))
+			} else {
+				fmt.Fprintf(stderr, "\r%s   ", p.Status)
+			}
+		})
+		fmt.Fprintln(stderr)
+		if err != nil {
+			return fail(err)
+		}
+		if *asJSON {
+			return emit(res)
+		}
+		if res.Target == app.InstallOllama {
+			fmt.Fprintf(stdout, "Installed %s. Choose it in the model lists, or use --model local:<server>/%s.\n", res.Model, res.Model)
+		}
+		for _, p := range res.Paths {
+			fmt.Fprintln(stdout, "Saved", p)
+		}
+		if res.Next != "" {
+			fmt.Fprintln(stdout, res.Next)
+		}
+		return 0
 	}
 	return fail(fmt.Errorf("unknown command: models %s (see nullbot models help)", sub))
 }
@@ -290,7 +393,7 @@ func runModelsCLI(args []string, appDir string, stdout, stderr io.Writer) int {
 // so "--server ollama pull" keeps "ollama" with its flag.
 func flagTakesValue(arg string) bool {
 	switch strings.TrimLeft(arg, "-") {
-	case "id", "url", "name", "key-secret", "server", "size":
+	case "id", "url", "name", "key-secret", "server", "size", "sort", "limit", "quant", "build", "to":
 		return true
 	}
 	return false

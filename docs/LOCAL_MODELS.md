@@ -77,6 +77,41 @@ In the app, each Ollama server has a **Pull** field with live progress and a
 Cancel button. Ollama pulls GGUF builds from Hugging Face directly with the
 `hf.co/owner/repo:QUANT` form.
 
+## Installing a model from Hugging Face
+
+Search Hugging Face for GGUF builds, pick one, and NullBot puts it where a
+runtime finds it:
+
+```sh
+nullbot models search "qwen2.5 7b instruct"
+nullbot models builds Qwen/Qwen2.5-7B-Instruct-GGUF     # each build, its size, the suggested one
+nullbot models install Qwen/Qwen2.5-7B-Instruct-GGUF                    # into Ollama, Q4_K_M
+nullbot models install Qwen/Qwen2.5-7B-Instruct-GGUF --quant Q5_K_M --to lmstudio
+nullbot models install Qwen/Qwen2.5-7B-Instruct-GGUF --to files         # ~/.nullbot/models
+```
+
+- **Ollama** (the default) pulls the build itself, as `hf.co/owner/repo:QUANT`.
+- **LM Studio**: NullBot saves the file into LM Studio's models folder
+  (`~/.lmstudio/models/owner/repo/`), where LM Studio lists it.
+- **Files**: NullBot saves it into `~/.nullbot/models/owner/repo/` and prints
+  the `llama-server` command to serve it.
+
+Downloads resume where they stopped, are checked against the SHA-256
+Hugging Face publishes for each file (a file that does not match is
+deleted), never write outside the chosen folder, and check for free disk
+space first. A build split into parts downloads every part. Without a
+choice, NullBot suggests Q4_K_M, the usual balance of size and quality.
+
+Gated models (Llama, Gemma and others) need a Hugging Face access token.
+Save it as an API key secret for provider `huggingface`:
+
+```sh
+nullbot secrets set huggingface --kind api_key --set provider=huggingface
+```
+
+The token is sent only to huggingface.co itself, never to the download
+servers it redirects to.
+
 ## Tool calls
 
 NullBot's agents work through tool calls, so pick a model that supports

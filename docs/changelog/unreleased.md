@@ -1,5 +1,21 @@
 # Unreleased
 
+## Local models
+
+- **Model servers you host** are providers of their own (`local:<id>`):
+  Ollama, llama.cpp, LM Studio, vLLM or any OpenAI-compatible server, on
+  this computer, another machine or an internal domain. A server's key comes
+  from a vault secret.
+- **Real context sizes**: NullBot asks each server what context a model runs
+  with (Ollama's `num_ctx` or default, llama.cpp's `-c`, LM Studio's loaded
+  context, vLLM's `max_model_len`), and plans for 8k until it knows.
+- **A run checks its server answers** before it starts.
+- **Ollama**: pull models (including `hf.co/...` GGUF builds), delete them,
+  and make a copy with a larger context.
+- `nullbot models`, `nullbot models local find|add|remove`, `nullbot models
+  pull|context|remove`.
+- See [docs/LOCAL_MODELS.md](../LOCAL_MODELS.md).
+
 ## Claude CLI provider
 
 - **Use a Claude subscription** by picking a model from the Claude CLI group

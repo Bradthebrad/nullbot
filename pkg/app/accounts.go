@@ -62,10 +62,18 @@ func AccountStatus(config Config) AccountState {
 		label := strings.ToUpper(provider[:1]) + provider[1:] + " API"
 		accounts = append(accounts, apiAccountInfo(provider, label, strings.ToUpper(provider)+"_API_KEY", key, "Stored as a named provider key. Direct model runtime support depends on provider integration."))
 	}
+	// Both are kept in the vault now, unless this system cannot encrypt.
+	keysAt, codexAt := VaultPath(config), VaultPath(config)
+	if _, err := os.Stat(KeysPath(config)); err == nil {
+		keysAt = KeysPath(config)
+	}
+	if _, err := os.Stat(CodexAuthPath(config)); err == nil {
+		codexAt = CodexAuthPath(config)
+	}
 	return AccountState{
 		Accounts:      accounts,
-		KeysPath:      KeysPath(config),
-		CodexAuthPath: CodexAuthPath(config),
+		KeysPath:      keysAt,
+		CodexAuthPath: codexAt,
 	}
 }
 

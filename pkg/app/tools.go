@@ -44,6 +44,8 @@ func BuiltinToolsFor(config Config, state *App, includeSpawner bool) []agent.Too
 		mcpRemoveServerTool(state),
 		marketListTool(config),
 		mcpListTool(config),
+		secretsListTool(config, state),
+		secretRunTool(state),
 	}
 	if includeSpawner {
 		tools = append(tools, spawnSubagentTool(state), subagentStatusTool(state), subagentWaitTool(state))

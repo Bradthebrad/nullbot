@@ -30,6 +30,7 @@ var commands = []Command{
 	{Name: "/mcp", Usage: "/mcp [enable|disable|remove <id>]", Description: "Manage MCP servers."},
 	{Name: "/models", Usage: "/models", Description: "Select provider and model."},
 	{Name: "/accounts", Usage: "/accounts [codex login]", Description: "View API key and subscription account status, or sign in to Codex."},
+	{Name: "/secrets", Usage: "/secrets", Description: "List saved secrets (never their values) and how the vault is protected. Manage them with `nullbot secrets`."},
 	{Name: "/themes", Usage: "/themes", Description: "Choose a TUI color theme."},
 	{Name: "/market", Usage: "/market [refresh|install <id>[,<id>...] [small] [enable]]", Description: "Browse and install MCP tool packages or skills."},
 	{Name: "/skills", Usage: "/skills [list|add|remove|open|reload]", Description: "Manage skills."},
@@ -105,6 +106,8 @@ func (a *App) executeSlash(ctx context.Context, input string) Reply {
 		return a.modelsCommand()
 	case "/accounts":
 		return a.accountsCommand(strings.TrimSpace(rest))
+	case "/secrets":
+		return a.reply(a.secretsSummary(), name, "")
 	case "/themes":
 		return a.reply("Themes panel opened.", name, "themes")
 	case "/market":

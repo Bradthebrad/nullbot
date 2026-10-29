@@ -120,7 +120,7 @@ func reservedServiceEnv(key string) bool {
 }
 func inheritedCredentialEnv(key string) bool {
 	key = strings.ToUpper(key)
-	return reservedServiceEnv(key) || strings.Contains(key, "TOKEN") || strings.Contains(key, "SECRET") || strings.Contains(key, "PASSWORD") || strings.HasSuffix(key, "_API_KEY") || strings.HasSuffix(key, "_AUTH") || strings.HasSuffix(key, "_CREDENTIALS")
+	return reservedServiceEnv(key) || strings.HasPrefix(key, "NULLBOT_VAULT") || strings.Contains(key, "TOKEN") || strings.Contains(key, "SECRET") || strings.Contains(key, "PASSWORD") || strings.HasSuffix(key, "_API_KEY") || strings.HasSuffix(key, "_AUTH") || strings.HasSuffix(key, "_CREDENTIALS")
 }
 
 // tinychain merges the map over os.Environ. Explicit empty overrides are needed

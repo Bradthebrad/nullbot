@@ -491,7 +491,7 @@ func (s *mcpSession) start(p *mcpPool, done chan struct{}, gen int) {
 		cancel()
 		if err != nil {
 			if tail := strings.TrimSpace(client.Stderr()); tail != "" {
-				err = fmt.Errorf("%w\n%s", err, lastLinesOf(tail, 6))
+				err = fmt.Errorf("%w\n%s", err, RedactSecrets(config, lastLinesOf(tail, 6)))
 			}
 			_ = client.Close()
 			client = nil
@@ -721,7 +721,7 @@ func (p *mcpPool) Status(config Config, detail bool) []MCPServerStatus {
 			if detail {
 				status.Tools = toolStatuses(id, entry, session.tools)
 				if session.client != nil {
-					status.Stderr = session.client.Stderr()
+					status.Stderr = RedactSecrets(config, session.client.Stderr())
 				}
 			}
 			session.mu.Unlock()

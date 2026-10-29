@@ -77,7 +77,7 @@ func awsMachineSteps(spec Spec, m MachineSpec, add func(Resource) Resource, cost
 		Resource: sg.ID, Action: "change",
 	})
 	inst := add(Resource{Kind: KindInstance, Name: m.Name, Region: spec.Region, CostHourly: cost, DependsOn: deps,
-		Details: map[string]string{"type": m.Type, "disk_gb": fmt.Sprint(m.DiskGB), "ssh_user": m.SSHUser, "ports": joinInts(m.Ports)}})
+		Details: machineDetails(m)})
 	argv := []string{"aws", "ec2", "run-instances", "--image-id", awsUbuntuImage(m.Type), "--instance-type", m.Type, "--count", "1",
 		"--security-group-ids", placeholder(sg.ID),
 		"--block-device-mappings", fmt.Sprintf("DeviceName=/dev/sda1,Ebs={VolumeSize=%d,VolumeType=gp3,DeleteOnTermination=true,Encrypted=true}", m.DiskGB),
@@ -151,6 +151,36 @@ func awsDeleteSteps(r Resource, deleteContents bool) []Step {
 		return []Step{{Summary: summary, Argv: argv, Resource: r.ID, Action: "delete", IgnoreMissing: true}}
 	}
 	return nil
+}
+
+// machineDetails are what the inventory shows about a machine: its size,
+// login, open ports and what its first boot sets up.
+func machineDetails(m MachineSpec) map[string]string {
+	d := map[string]string{"type": m.Type, "disk_gb": fmt.Sprint(m.DiskGB), "ssh_user": m.SSHUser, "ports": joinInts(m.Ports), "allow_from": strings.Join(m.AllowFrom, ",")}
+	if m.Spot {
+		d["spot"] = "yes"
+	}
+	if b := m.Bootstrap; b != nil {
+		var setup []string
+		if b.GPUDrivers {
+			setup = append(setup, "gpu_drivers")
+		}
+		if b.Ollama {
+			setup = append(setup, "ollama")
+		}
+		if b.NullBot {
+			setup = append(setup, "nullbot")
+		}
+		if len(setup) > 0 {
+			d["setup"] = strings.Join(setup, ",")
+		}
+		if len(b.OllamaModels) > 0 {
+			d["models"] = strings.Join(b.OllamaModels, ",")
+		}
+	} else if m.UserData != "" {
+		d["setup"] = "user_data"
+	}
+	return d
 }
 
 func joinInts(ints []int) string {

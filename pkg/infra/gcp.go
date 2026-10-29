@@ -51,7 +51,7 @@ func gcpMachineSteps(spec Spec, m MachineSpec, add func(Resource) Resource, cost
 	}}
 	inst := add(Resource{Kind: KindInstance, Name: m.Name, CloudID: m.Name, Project: spec.Project, Region: spec.Region, Zone: spec.Zone,
 		CostHourly: cost, DependsOn: []string{rule.ID},
-		Details: map[string]string{"type": m.Type, "disk_gb": fmt.Sprint(m.DiskGB), "ssh_user": m.SSHUser, "ports": joinInts(m.Ports)}})
+		Details: machineDetails(m)})
 	family := "ubuntu-2404-lts-amd64"
 	if gcpArmType(m.Type) {
 		family = "ubuntu-2404-lts-arm64"

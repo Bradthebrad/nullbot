@@ -77,6 +77,30 @@ In the app, each Ollama server has a **Pull** field with live progress and a
 Cancel button. Ollama pulls GGUF builds from Hugging Face directly with the
 `hf.co/owner/repo:QUANT` form.
 
+## Which models run well here
+
+NullBot looks at this computer's CPU, memory and GPUs and ranks which models
+will run well on it, using a Go port of
+[llmfit](https://github.com/AlexsJones/llmfit) by Alex Jones (MIT) and its
+model catalog (about 1,400 well-known models):
+
+```sh
+nullbot models machine                         # CPU, memory, GPUs, how models would run
+nullbot models fit                             # the models that run well here, best first
+nullbot models fit --use-case coding --context 32768 --limit 10
+```
+
+For each model it gives the best quantization that fits, whether it runs on
+the GPU, partly offloaded or on the CPU, roughly how fast it generates, and
+how to install it (an Ollama tag or a Hugging Face GGUF repo). Rankings plan
+for a 16,384-token context, about what NullBot's instructions and tools
+need, and leave out models under 1.5B parameters, which rarely follow tool
+instructions well (`--small` includes them). Speeds are estimates from the
+hardware's memory bandwidth, not measurements.
+
+In the app: **Settings > Models > Install a model > Suggested for this
+computer**.
+
 ## Installing a model from Hugging Face
 
 Search Hugging Face for GGUF builds, pick one, and NullBot puts it where a

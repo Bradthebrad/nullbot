@@ -149,21 +149,28 @@ func (m *Model) saveConfigFields() error {
 	for _, field := range m.configFields {
 		values[field.Key] = field.Value
 	}
-	keys := m.app.APIKeys()
-	openAIKey := sanitizeConfigValue(values["key_openai"])
-	anthropicKey := sanitizeConfigValue(values["key_anthropic"])
-	openRouterKey := sanitizeConfigValue(values["key_openrouter"])
-	if !isMasked(openAIKey) {
-		keys.OpenAI = openAIKey
+	// Saving writes every key, so the current ones must have been read.
+	keys, err := m.app.LoadAPIKeys()
+	if err != nil {
+		return fmt.Errorf("saved keys could not be read, so none were changed: %w", err)
 	}
-	if !isMasked(anthropicKey) {
-		keys.Anthropic = anthropicKey
+	changed := false
+	for _, k := range []struct {
+		field string
+		value *string
+	}{{"key_openai", &keys.OpenAI}, {"key_anthropic", &keys.Anthropic}, {"key_openrouter", &keys.OpenRouter}} {
+		typed := sanitizeConfigValue(values[k.field])
+		// The field shows the key masked; an untouched field is unchanged.
+		if typed == app.MaskSecret(*k.value) || isMasked(typed) {
+			continue
+		}
+		*k.value = typed
+		changed = true
 	}
-	if !isMasked(openRouterKey) {
-		keys.OpenRouter = openRouterKey
-	}
-	if err := m.app.SaveAPIKeys(keys); err != nil {
-		return err
+	if changed {
+		if err := m.app.SaveAPIKeys(keys); err != nil {
+			return err
+		}
 	}
 	return m.app.UpdateConfig(func(config *app.Config) {
 		config.BrandPrefix = values["brand_prefix"]

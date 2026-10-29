@@ -79,7 +79,9 @@ func runCodexExec(ctx context.Context, config Config, model, prompt string) (str
 	if strings.TrimSpace(text) == "" {
 		return "", usage, fmt.Errorf("codex model: no final response returned%s", stderrSuffix(stderr.String()))
 	}
-	return text, usage, nil
+	// Codex runs commands of its own; what it says goes through the same
+	// filter as every tool result.
+	return RedactSecrets(config, text), usage, nil
 }
 
 func codexPromptFromMessages(messages []lc.BaseMessage, tools []tcagent.Tool) string {
@@ -169,7 +171,17 @@ func codexCommand() (string, error) {
 }
 
 func codexCommandEnv(config Config) []string {
-	env := os.Environ()
+	var env []string
+	for _, item := range os.Environ() {
+		key, _, _ := strings.Cut(item, "=")
+		upper := strings.ToUpper(key)
+		// Codex is an agent with a shell: it gets nothing that opens the
+		// vault or a service account.
+		if strings.HasPrefix(upper, "NULLBOT_VAULT") || strings.HasPrefix(upper, "NULLBOT_SERVICE_") {
+			continue
+		}
+		env = append(env, item)
+	}
 	if strings.TrimSpace(config.AppDir) != "" {
 		env = append(env, "NULLBOT_APP_DIR="+config.AppDir)
 	}

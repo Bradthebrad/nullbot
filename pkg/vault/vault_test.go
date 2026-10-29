@@ -8,7 +8,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -304,5 +306,62 @@ func TestCommandKeychainsKeepTheKeyOffTheCommandLine(t *testing.T) {
 	noBus := &secretService{run: run, lookup: found, getenv: func(string) string { return "" }, stat: os.Stat}
 	if noBus.Available() {
 		t.Fatal("secret service available without a session bus")
+	}
+}
+
+// brokenKeyring says it is available but cannot store anything, like a bus
+// with no Secret Service behind it.
+type brokenKeyring struct{ fakeKeyring }
+
+func (k *brokenKeyring) Store(string, []byte) ([]byte, error) { return nil, errors.New("no provider") }
+
+func TestABrokenKeychainCountsAsNone(t *testing.T) {
+	v := newTestVault(t, &brokenKeyring{}, nil)
+	if err := v.Create(Auto, ""); !errors.Is(err, ErrNoKeychain) {
+		t.Fatalf("create with a broken keychain: %v", err)
+	}
+	if st := v.Status(); st.Keychain != "" || st.Exists {
+		t.Fatalf("status %+v", st)
+	}
+	if err := v.Create(Passphrase, "a passphrase that works"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Two handles stand in for two NullBot processes sharing one vault.
+func TestConcurrentWritersDoNotLoseUpdates(t *testing.T) {
+	kr := &fakeKeyring{wrap: true}
+	path := filepath.Join(t.TempDir(), "vault", "vault.json")
+	a := New(path, Options{Keyring: kr, Passphrase: noPassphrase})
+	b := New(path, Options{Keyring: kr, Passphrase: noPassphrase})
+	if err := a.CreateWith(Auto, "", []byte("0")); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Create(Auto, ""); !errors.Is(err, ErrExists) {
+		t.Fatalf("second create: %v", err)
+	}
+	var wg sync.WaitGroup
+	for _, v := range []*Vault{a, b} {
+		wg.Add(1)
+		go func(v *Vault) {
+			defer wg.Done()
+			for i := 0; i < 40; i++ {
+				if err := v.Update(func(p []byte) ([]byte, error) {
+					n, _ := strconv.Atoi(string(p))
+					return []byte(strconv.Itoa(n + 1)), nil
+				}); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}(v)
+	}
+	wg.Wait()
+	got, _ := a.Read()
+	if string(got) != "80" {
+		t.Fatalf("after 80 updates the count is %s", got)
+	}
+	if vals := a.RedactionValues(); len(vals) != 3 || len(vals[0]) != 64 {
+		t.Fatalf("redaction values %v", vals)
 	}
 }

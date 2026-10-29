@@ -84,7 +84,8 @@ func (a *App) UnlockVault(passphrase string) error {
 func (a *App) LockVault() {
 	LockVault(a.Config())
 	a.logInfo("vault locked")
-	a.secretsChanged(true, nil)
+	// Servers that were given secrets keep them while they run; stop them.
+	a.secretsChanged(true, serversWithSecrets())
 }
 
 func (a *App) ReprotectVault(protection, passphrase string) error {
@@ -120,4 +121,19 @@ func (a *App) secretsChanged(keys bool, servers []string) {
 		a.MarkRuntimeDirty("secrets changed")
 	}
 	a.notifyChange(ChangeSecrets)
+}
+
+// apiKeyServers lists tool servers given an API key secret.
+func apiKeyServers(config Config) []string {
+	secrets, err := ListSecrets(config)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, s := range secrets {
+		if s.Kind == SecretAPIKey {
+			out = append(out, s.Servers...)
+		}
+	}
+	return out
 }

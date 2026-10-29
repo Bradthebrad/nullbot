@@ -244,10 +244,10 @@ func TestSecretRunGivesValuesToTheCommandButNotTheModel(t *testing.T) {
 	if !strings.Contains(result.Stdout, "token=[secret:github]") || !strings.Contains(result.Stdout, "len=28") || !strings.Contains(result.Stderr, "err=[secret:github]") {
 		t.Fatalf("output %+v", result)
 	}
-	// ${VAR} in plain arguments expands only the secrets' variables.
+	// Arguments are passed as written: values never go on a command line.
 	result, err = runSecretTool(t, a, map[string]any{"command": "printf", "args": []any{"%s|%s", "${GH_TOKEN}", "${HOME}"}, "secrets": []any{"github"}})
-	if err != nil || result.Stdout != "[secret:github]|${HOME}" {
-		t.Fatalf("expansion %+v %v", result, err)
+	if err != nil || result.Stdout != "${GH_TOKEN}|${HOME}" {
+		t.Fatalf("arguments %+v %v", result, err)
 	}
 	// The inherited environment loses anything that looks like a credential.
 	t.Setenv("SOME_SERVICE_TOKEN", "inherited-token-should-not-pass")

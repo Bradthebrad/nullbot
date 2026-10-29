@@ -890,6 +890,14 @@ func safeConfigPath(root, rel string) (string, error) {
 	if full != rootClean && !strings.HasPrefix(full, rootClean+string(os.PathSeparator)) {
 		return "", fmt.Errorf("path escapes config directory")
 	}
+	// Credentials stay out of the agent's reach, even encrypted: the vault,
+	// legacy key files and the vault's lock.
+	if inner, err := filepath.Rel(rootClean, full); err == nil {
+		first := strings.ToLower(strings.Split(filepath.ToSlash(inner), "/")[0])
+		if first == "vault" || first == "api" {
+			return "", fmt.Errorf("%s holds credentials; agents use secrets through secrets_list and secret_run", first)
+		}
+	}
 	return full, nil
 }
 

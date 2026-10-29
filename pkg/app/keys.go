@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/Bradthebrad/nullbot/pkg/vault"
 )
@@ -71,9 +72,11 @@ func mergeMissing(keys, extra APIKeys) APIKeys {
 // passphrase configured) does it keep writing the legacy plain-text file;
 // VaultStatus reports that file so the UI can say so.
 func SaveAPIKeys(config Config, keys APIKeys) error {
+	if _, err := wantedAPIKeys(keys); err != nil {
+		return err
+	}
 	err := updateSecrets(config, func(payload *vaultPayload) error {
-		setAPIKeysInPayload(payload, keys, "user")
-		return nil
+		return setAPIKeysInPayload(payload, keys, "user")
 	})
 	if err == nil {
 		if _, statErr := os.Lstat(KeysPath(config)); statErr == nil {
@@ -84,6 +87,24 @@ func SaveAPIKeys(config Config, keys APIKeys) error {
 	if !errors.Is(err, vault.ErrNoKeychain) {
 		return err
 	}
+	// No way to encrypt on this system: the legacy file, as before. A masked
+	// value from a form keeps the key it stands for.
+	if legacy, lerr := readLegacyAPIKeys(config); lerr == nil {
+		keep := func(next *string, old string) {
+			if looksMasked(*next) {
+				*next = old
+			}
+		}
+		keep(&keys.OpenAI, legacy.OpenAI)
+		keep(&keys.Anthropic, legacy.Anthropic)
+		keep(&keys.OpenRouter, legacy.OpenRouter)
+		keep(&keys.Google, legacy.Google)
+		for p, v := range keys.Other {
+			if looksMasked(v) {
+				keys.Other[p] = legacy.Other[p]
+			}
+		}
+	}
 	if err := os.MkdirAll(filepath.Dir(KeysPath(config)), 0700); err != nil {
 		return err
 	}
@@ -92,7 +113,9 @@ func SaveAPIKeys(config Config, keys APIKeys) error {
 		return merr
 	}
 	defer clear(data)
-	return os.WriteFile(KeysPath(config), append(data, '\n'), 0600)
+	err = os.WriteFile(KeysPath(config), append(data, '\n'), 0600)
+	invalidateRedactor(config)
+	return err
 }
 
 func (k APIKeys) ForProvider(provider string) string {
@@ -117,8 +140,16 @@ func MaskSecret(secret string) string {
 	if secret == "" {
 		return "(not set)"
 	}
-	if len(secret) <= 12 {
+	if len(secret) <= 8 {
 		return "********"
 	}
-	return "…" + secret[len(secret)-4:]
+	return secret[:4] + "..." + secret[len(secret)-4:]
+}
+
+// looksMasked reports a value that is MaskSecret's output, not a key: a
+// form sent back unchanged must never replace the real key.
+func looksMasked(value string) bool {
+	value = strings.TrimSpace(value)
+	return value == "(not set)" || strings.Contains(value, "...") || strings.HasPrefix(value, "…") ||
+		(value != "" && strings.Trim(value, "*") == "")
 }

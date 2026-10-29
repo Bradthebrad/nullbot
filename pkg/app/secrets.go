@@ -258,6 +258,7 @@ func CreateVault(config Config, protection, passphrase string) error {
 	if err := v.Create(vault.Protection(protection), passphrase); err != nil {
 		return err
 	}
+	invalidateRedactor(config)
 	_, err := loadSecretsPayload(config) // moves legacy files in
 	return err
 }
@@ -267,6 +268,8 @@ func UnlockVault(config Config, passphrase string) error {
 	if err := openVault(config).Unlock(passphrase); err != nil {
 		return err
 	}
+	// The values just became known: redact them from now on.
+	invalidateRedactor(config)
 	_, err := loadSecretsPayload(config)
 	return err
 }
@@ -309,6 +312,7 @@ func loadSecretsPayload(config Config) (vaultPayload, error) {
 	if err := json.Unmarshal(plain, &payload); err != nil {
 		return vaultPayload{}, vault.ErrCorrupt
 	}
+	rememberSecrets(config, payload)
 	return payload, nil
 }
 
@@ -331,6 +335,7 @@ func updateSecrets(config Config, fn func(*vaultPayload) error) error {
 			return nil, err
 		}
 		payload.Version = 1
+		rememberSecrets(config, payload)
 		return json.Marshal(payload)
 	})
 	if err == nil {
@@ -361,6 +366,7 @@ func migrateLegacySecrets(config Config, v *vault.Vault) error {
 			return err
 		}
 	}
+	keysMoved, codexMoved := false, false
 	err := v.Update(func(plain []byte) ([]byte, error) {
 		var payload vaultPayload
 		if len(plain) > 0 {
@@ -369,11 +375,16 @@ func migrateLegacySecrets(config Config, v *vault.Vault) error {
 			}
 		}
 		if keysErr == nil {
-			addMissingAPIKeys(&payload, keys, "migration")
+			if err := addMissingAPIKeys(&payload, keys, "migration"); err != nil {
+				// Keep what can be kept; the file stays for the rest.
+				migrationNote(config, err)
+			}
+			keysMoved = apiKeysStored(payload, keys)
 		}
 		if codexErr == nil && payload.System.CodexAuth == nil {
 			payload.System.CodexAuth = &codex
 		}
+		codexMoved = codexErr == nil && payload.System.CodexAuth != nil
 		payload.Version = 1
 		return json.Marshal(payload)
 	})
@@ -381,13 +392,23 @@ func migrateLegacySecrets(config Config, v *vault.Vault) error {
 		return err
 	}
 	invalidateRedactor(config)
-	if keysErr == nil {
+	// A file is deleted only once everything in it is in the vault.
+	if keysMoved {
 		removeLegacyFile(KeysPath(config))
 	}
-	if codexErr == nil {
+	if codexMoved {
 		removeLegacyFile(CodexAuthPath(config))
 	}
 	return nil
+}
+
+var migrationNotes sync.Map
+
+// migrationNote logs, once per folder, why a legacy key stayed behind.
+func migrationNote(config Config, err error) {
+	if _, seen := migrationNotes.LoadOrStore(config.AppDir+"|"+err.Error(), true); !seen {
+		NewLogger(config).Info("legacy key left in api/keys.json", "reason", err.Error())
+	}
 }
 
 // removeLegacyFile overwrites a plain-text secrets file before deleting it.
@@ -447,34 +468,113 @@ func apiKeysFromPayload(payload vaultPayload) APIKeys {
 	return keys
 }
 
-// setAPIKeysInPayload makes the provider-named API key secrets ("openai",
-// "brave") match keys: a provider left empty loses its secret. API key
-// secrets with other names ("openai-work") are left alone, and a key that
-// one of them already holds is not copied.
-func setAPIKeysInPayload(payload *vaultPayload, keys APIKeys, by string) {
+// NormalizeProvider turns a provider name into the form secrets use:
+// lowercase, with anything but letters, digits, dashes and underscores made
+// a dash ("Perplexity AI" -> "perplexity-ai", "x.ai" -> "x-ai"). Empty when
+// nothing usable is left.
+func NormalizeProvider(name string) string {
+	var b strings.Builder
+	dash := false
+	for _, r := range strings.ToLower(strings.TrimSpace(name)) {
+		ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-'
+		if !ok {
+			r = '-'
+		}
+		if r == '-' {
+			if dash || b.Len() == 0 {
+				continue
+			}
+			dash = true
+		} else {
+			dash = false
+		}
+		b.WriteRune(r)
+	}
+	out := strings.TrimRight(b.String(), "-")
+	if len(out) > 32 {
+		out = strings.TrimRight(out[:32], "-")
+	}
+	if !providerPattern.MatchString(out) {
+		return ""
+	}
+	return out
+}
+
+// canonicalProvider is the provider a provider-named API key secret serves;
+// "gemini" is the Google key.
+func canonicalProvider(s Secret) (string, bool) {
+	if s.Kind != SecretAPIKey || s.Name != s.Public["provider"] {
+		return "", false
+	}
+	if s.Name == "gemini" {
+		return "google", true
+	}
+	return s.Name, true
+}
+
+// wantedAPIKeys is keys by normalized provider. It fails on a name that
+// cannot be normalized, or two different keys for one provider.
+func wantedAPIKeys(keys APIKeys) (map[string]string, error) {
 	want := map[string]string{
 		"openai":     keys.OpenAI,
 		"anthropic":  keys.Anthropic,
 		"openrouter": keys.OpenRouter,
 		"google":     keys.Google,
 	}
-	for provider, value := range keys.Other {
-		provider = strings.ToLower(strings.TrimSpace(provider))
-		if providerPattern.MatchString(provider) {
-			want[provider] = value
-		}
+	names := make([]string, 0, len(keys.Other))
+	for name := range keys.Other {
+		names = append(names, name)
 	}
-	now := time.Now().UTC().Truncate(time.Second)
-	canonical := func(s Secret) bool { return s.Kind == SecretAPIKey && s.Name == s.Public["provider"] }
-	kept := payload.Secrets[:0]
-	for _, s := range payload.Secrets {
-		if canonical(s) {
-			value := strings.TrimSpace(want[s.Name])
+	sort.Strings(names)
+	for _, name := range names {
+		value := strings.TrimSpace(keys.Other[name])
+		provider := NormalizeProvider(name)
+		if provider == "gemini" {
+			provider = "google"
+		}
+		if provider == "" {
 			if value == "" {
-				clear(s.Values)
 				continue
 			}
-			if s.Values["value"] != value {
+			return nil, fmt.Errorf("%q is not a usable provider name; use letters and digits", name)
+		}
+		if value == "" {
+			if _, ok := want[provider]; !ok {
+				want[provider] = ""
+			}
+			continue
+		}
+		if prev := strings.TrimSpace(want[provider]); prev != "" && prev != value {
+			return nil, fmt.Errorf("two different keys were given for %s", provider)
+		}
+		want[provider] = value
+	}
+	return want, nil
+}
+
+// setAPIKeysInPayload makes the provider-named API key secrets ("openai",
+// "brave") match keys: a provider left empty loses its secret. API key
+// secrets with other names ("openai-work") are left alone, and a key that
+// one of them already holds is not copied. A value that is a mask (what a
+// form shows instead of the key) never replaces a key.
+func setAPIKeysInPayload(payload *vaultPayload, keys APIKeys, by string) error {
+	want, err := wantedAPIKeys(keys)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	kept := payload.Secrets[:0]
+	for _, s := range payload.Secrets {
+		if provider, ok := canonicalProvider(s); ok {
+			value := strings.TrimSpace(want[provider])
+			delete(want, provider)
+			switch {
+			case looksMasked(value):
+				// Unchanged.
+			case value == "":
+				clear(s.Values)
+				continue
+			case s.Values["value"] != value:
 				s.Values = map[string]string{"value": value}
 				s.Updated = now
 			}
@@ -490,13 +590,16 @@ func setAPIKeysInPayload(payload *vaultPayload, keys APIKeys, by string) {
 next:
 	for _, provider := range providers {
 		value := strings.TrimSpace(want[provider])
-		if value == "" || secretIndex(*payload, provider) >= 0 {
+		if value == "" || looksMasked(value) {
 			continue
 		}
 		for _, s := range payload.Secrets {
-			if s.Kind == SecretAPIKey && s.Public["provider"] == provider && s.Values["value"] == value {
+			if s.Kind == SecretAPIKey && apiProvider(s) == provider && s.Values["value"] == value {
 				continue next
 			}
+		}
+		if i := secretIndex(*payload, provider); i >= 0 {
+			return fmt.Errorf("a %s secret is already named %s; rename it in Secrets to save the %s API key", payload.Secrets[i].Kind, provider, provider)
 		}
 		payload.Secrets = append(payload.Secrets, Secret{
 			Name: provider, Kind: SecretAPIKey,
@@ -504,50 +607,58 @@ next:
 			CreatedBy: by, Created: now, Updated: now,
 		})
 	}
+	return nil
 }
 
-// addMissingAPIKeys adds keys for providers that have no API key secret.
-func addMissingAPIKeys(payload *vaultPayload, keys APIKeys, by string) {
-	current := apiKeysFromPayload(*payload)
-	add := APIKeys{Other: map[string]string{}}
-	if current.OpenAI == "" {
-		add.OpenAI = keys.OpenAI
+func apiProvider(s Secret) string {
+	if p := s.Public["provider"]; p != "gemini" {
+		return p
 	}
-	if current.Anthropic == "" {
-		add.Anthropic = keys.Anthropic
-	}
-	if current.OpenRouter == "" {
-		add.OpenRouter = keys.OpenRouter
-	}
-	if current.Google == "" {
-		add.Google = keys.Google
-	}
-	for provider, value := range keys.Other {
-		if current.ForProvider(provider) == "" {
-			add.Other[provider] = value
-		}
-	}
-	// Merge onto what is there so nothing current is removed.
-	merged := current
+	return "google"
+}
+
+// addMissingAPIKeys adds keys for providers that have no API key secret
+// yet. It reports the providers it could not store.
+func addMissingAPIKeys(payload *vaultPayload, keys APIKeys, by string) error {
+	merged := apiKeysFromPayload(*payload)
 	if merged.Other == nil {
 		merged.Other = map[string]string{}
 	}
-	if add.OpenAI != "" {
-		merged.OpenAI = add.OpenAI
+	fill := func(dst *string, v string) {
+		if *dst == "" {
+			*dst = v
+		}
 	}
-	if add.Anthropic != "" {
-		merged.Anthropic = add.Anthropic
+	fill(&merged.OpenAI, keys.OpenAI)
+	fill(&merged.Anthropic, keys.Anthropic)
+	fill(&merged.OpenRouter, keys.OpenRouter)
+	fill(&merged.Google, keys.Google)
+	for name, v := range keys.Other {
+		provider := NormalizeProvider(name)
+		if provider == "" {
+			return fmt.Errorf("%q is not a usable provider name", name)
+		}
+		if merged.ForProvider(provider) == "" {
+			merged.Other[provider] = v
+		}
 	}
-	if add.OpenRouter != "" {
-		merged.OpenRouter = add.OpenRouter
+	return setAPIKeysInPayload(payload, merged, by)
+}
+
+// apiKeysStored reports whether every key in keys is now in payload.
+func apiKeysStored(payload vaultPayload, keys APIKeys) bool {
+	values := map[string]bool{}
+	for _, s := range payload.Secrets {
+		if s.Kind == SecretAPIKey {
+			values[s.Values["value"]] = true
+		}
 	}
-	if add.Google != "" {
-		merged.Google = add.Google
+	stored := func(v string) bool { return strings.TrimSpace(v) == "" || values[strings.TrimSpace(v)] }
+	ok := stored(keys.OpenAI) && stored(keys.Anthropic) && stored(keys.OpenRouter) && stored(keys.Google)
+	for _, v := range keys.Other {
+		ok = ok && stored(v)
 	}
-	for p, v := range add.Other {
-		merged.Other[p] = v
-	}
-	setAPIKeysInPayload(payload, merged, by)
+	return ok
 }
 
 func secretIndex(payload vaultPayload, name string) int {
@@ -728,7 +839,7 @@ func RemoveSecret(config Config, name string) error {
 func deriveSecretPublic(s *Secret) error {
 	switch s.Kind {
 	case SecretAPIKey:
-		s.Public["provider"] = strings.ToLower(s.Public["provider"])
+		s.Public["provider"] = NormalizeProvider(s.Public["provider"])
 	case SecretSSHKey:
 		if key := s.Values["private_key"]; key != "" {
 			pub, err := sshPublicKeyFromPrivate(key)
@@ -752,7 +863,8 @@ func deriveSecretPublic(s *Secret) error {
 				PrivateKey  string `json:"private_key"`
 			}
 			if err := json.Unmarshal([]byte(raw), &key); err != nil {
-				return fmt.Errorf("the Google Cloud key is not valid JSON: %v", err)
+				// The parser's message can quote the key's text; leave it out.
+				return errors.New("the Google Cloud key is not valid JSON; paste the whole key file")
 			}
 			if key.Type == "" || (key.Type == "service_account" && key.PrivateKey == "") {
 				return errors.New("the Google Cloud key file is missing its type or private key; download a JSON key for the service account")

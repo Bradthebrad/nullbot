@@ -358,7 +358,9 @@ func saveCodexAuth(config Config, auth codexAuthStore) error {
 		return err
 	}
 	defer clear(data)
-	return os.WriteFile(CodexAuthPath(config), append(data, '\n'), 0600)
+	err = os.WriteFile(CodexAuthPath(config), append(data, '\n'), 0600)
+	invalidateRedactor(config)
+	return err
 }
 
 func importCodexCLIAuth() (codexAuthStore, error) {

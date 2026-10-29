@@ -241,22 +241,33 @@ func (a *App) MarkRuntimeDirty(reason string) {
 }
 
 func (a *App) APIKeys() APIKeys {
+	keys, _ := a.LoadAPIKeys()
+	return keys
+}
+
+// LoadAPIKeys returns the provider keys, and why they could not all be read
+// (a locked vault, say). Callers that save keys back must check it.
+func (a *App) LoadAPIKeys() (APIKeys, error) {
 	a.mu.Lock()
 	config := a.config
 	a.mu.Unlock()
-	keys, _ := LoadAPIKeys(config)
-	return keys
+	return LoadAPIKeys(config)
 }
 
 func (a *App) SaveAPIKeys(keys APIKeys) error {
 	a.mu.Lock()
 	config := a.config
 	a.mu.Unlock()
+	bound := apiKeyServers(config)
 	if err := SaveAPIKeys(config, keys); err != nil {
 		a.logError("api keys save failed", "error", err)
 		return err
 	}
 	a.logInfo("api keys saved", "openai_set", keys.OpenAI != "", "anthropic_set", keys.Anthropic != "", "openrouter_set", keys.OpenRouter != "", "google_set", keys.Google != "")
+	// Servers given an API key restart with the new one.
+	for _, id := range append(bound, apiKeyServers(config)...) {
+		a.StopMCPServer(id)
+	}
 	return nil
 }
 

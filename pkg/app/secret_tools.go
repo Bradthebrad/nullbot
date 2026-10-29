@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"regexp"
-	"runtime"
+	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Bradthebrad/tinychain/agent"
@@ -58,16 +58,16 @@ func secretRunTool(state *App) agent.Tool {
 	return agent.ToolFunc{
 		Name: "secret_run",
 		Description: "Run a command with saved secrets in its environment, without seeing them. Each secret provides variables (see secrets_list): a GitHub token gives GH_TOKEN/GITHUB_TOKEN and signs git in over HTTPS; an SSH key gives GIT_SSH_COMMAND and NULLBOT_SSH_KEY_FILE; AWS keys give AWS_ACCESS_KEY_ID and friends; a Google Cloud key gives GOOGLE_APPLICATION_CREDENTIALS. " +
-			"Arguments may use ${VAR} for those variables, so values stay out of the request. Secret values are removed from the output. Waits for the command to finish (default 300 s). " +
+			"Programs read the secrets from their environment; values are never put into arguments, where other programs could see them (prefer tools that read the environment: gh, git, aws, gcloud; with shell, \"$VAR\" works but puts the value in that program's arguments). Secret values are removed from the output. Waits for the command to finish (default 300 s); anything it leaves running is stopped. " +
 			"save_output_as stores the command's standard output as a new secret instead of returning it, for credentials a command creates.",
 		Schema: agent.ToolSchema(map[string]any{
 			"command":         agent.StringProperty("Program to run, or a shell command when shell is true."),
-			"args":            map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Arguments, when shell is false. ${VAR} expands variables the secrets provide."},
+			"args":            map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Arguments, when shell is false."},
 			"secrets":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Names of the secrets to provide."},
 			"cwd":             agent.StringProperty("Working folder inside a project with run permission. Defaults to the primary project."),
 			"shell":           map[string]any{"type": "boolean", "description": "Run through sh -c (cmd.exe /C on Windows). Defaults to false."},
 			"timeout_seconds": agent.NumberProperty("Stop the command after this many seconds (default 300, at most 3600)."),
-			"reason":          agent.StringProperty("Why this command needs these secrets; shown to the user."),
+			"reason":          agent.StringProperty("Why this command needs these secrets; shown to the user in the activity log."),
 			"save_output_as": map[string]any{"type": "object", "description": "Store standard output as a new secret named name, provided to later commands as env.", "properties": map[string]any{
 				"name":        map[string]any{"type": "string"},
 				"env":         map[string]any{"type": "string"},
@@ -157,8 +157,6 @@ const (
 	maxSecretRunShown   = 48 << 10
 )
 
-var expandPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
-
 // RunWithSecrets runs a command with the named secrets in its environment.
 // The caller (the tool wrapper) has already checked the project permission;
 // it is checked again here against the resolved folder.
@@ -184,6 +182,9 @@ func (a *App) RunWithSecrets(ctx context.Context, req SecretRunRequest) (SecretR
 			return result, errors.New("no primary project is configured")
 		}
 		cwd = primary.Path
+	} else if normalized, ok := normalizePathValue(cwd, true); ok {
+		// The same reading of ~ and file:// the permission check used.
+		cwd = normalized
 	}
 	resolved, project, err := checkProjectCapability(config, cwd, CapExecute)
 	if err != nil {
@@ -216,6 +217,7 @@ func (a *App) RunWithSecrets(ctx context.Context, req SecretRunRequest) (SecretR
 			return result, err
 		}
 	}
+	sweepSecretTemp()
 	injected, err := buildSecretEnv(chosen, true)
 	if err != nil {
 		return result, err
@@ -226,29 +228,6 @@ func (a *App) RunWithSecrets(ctx context.Context, req SecretRunRequest) (SecretR
 	for k, v := range injected.vars {
 		env[k] = v
 	}
-	expand := func(s string) string {
-		return expandPattern.ReplaceAllStringFunc(s, func(m string) string {
-			name := expandPattern.FindStringSubmatch(m)[1]
-			if v, ok := injected.vars[mcpEnvKey(name)]; ok {
-				return v
-			}
-			return m
-		})
-	}
-	var name string
-	var argv []string
-	if req.Shell {
-		if runtime.GOOS == "windows" {
-			name, argv = "cmd.exe", []string{"/C", req.Command}
-		} else {
-			name, argv = "/bin/sh", []string{"-c", req.Command}
-		}
-	} else {
-		name = expand(req.Command)
-		for _, arg := range req.Args {
-			argv = append(argv, expand(arg))
-		}
-	}
 	names := make([]string, 0, len(chosen))
 	for _, s := range chosen {
 		names = append(names, s.Name)
@@ -257,44 +236,61 @@ func (a *App) RunWithSecrets(ctx context.Context, req SecretRunRequest) (SecretR
 
 	runCtx, cancel := context.WithTimeout(ctx, req.Timeout)
 	defer cancel()
-	cmd := exec.CommandContext(runCtx, name, argv...)
+	// Values are never expanded into arguments: other programs on the
+	// computer can read a process's arguments. Programs read the secrets
+	// from their environment.
+	var cmd *exec.Cmd
+	if req.Shell {
+		cmd = shellCommand(runCtx, req.Command)
+	} else {
+		cmd = exec.CommandContext(runCtx, req.Command, req.Args...)
+	}
 	cmd.Dir = resolved
 	cmd.Env = envList(env)
 	stdout := &cappedBuffer{limit: maxSecretRunCapture}
 	stderr := &cappedBuffer{limit: maxSecretRunCapture}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
-	cmd.WaitDelay = 10 * time.Second
-	configureSecretProcess(cmd)
+	// Output still held open by something the command left behind is given
+	// up after a moment; whatever that was is stopped below.
+	cmd.WaitDelay = 3 * time.Second
+	proc := newSecretProcess(cmd)
 
 	summary := req.Command
 	if !req.Shell {
 		summary = strings.TrimSpace(req.Command + " " + strings.Join(req.Args, " "))
 	}
-	summary = RedactSecrets(config, summary)
-	if len(summary) > 160 {
-		summary = summary[:160] + "…"
-	}
+	summary = shortText(redactInjected(RedactSecrets(config, summary), injected.vars), 160)
 	detail := fmt.Sprintf("%s in %s: %s", strings.Join(names, ", "), projectDisplayName(project), summary)
+	if why := strings.TrimSpace(req.Reason); why != "" {
+		detail += " (" + shortText(redactInjected(RedactSecrets(config, why), injected.vars), 160) + ")"
+	}
 	a.appendActivity(ActivityRecord{Time: time.Now().UTC(), Kind: "secret", Name: "secret_run", Status: "started", Detail: detail})
-	a.logInfo("secret used", "secrets", strings.Join(names, ","), "project", project.ID, "program", firstWord(req.Command), "reason", req.Reason)
+	a.logInfo("secret used", "secrets", strings.Join(names, ","), "project", project.ID, "program", firstWord(req.Command), "reason", shortText(req.Reason, 200))
 
 	started := time.Now()
-	runErr := cmd.Run()
+	runErr := proc.start()
+	if runErr == nil {
+		runErr = cmd.Wait()
+	}
+	proc.finish()
 	result.DurationMs = time.Since(started).Milliseconds()
 	if runCtx.Err() == context.DeadlineExceeded {
 		result.TimedOut = true
 	}
-	result.ExitCode = 0
-	if runErr != nil {
-		var exit *exec.ExitError
-		if errors.As(runErr, &exit) {
-			result.ExitCode = exit.ExitCode()
-		} else if !result.TimedOut {
-			a.appendActivity(ActivityRecord{Time: time.Now().UTC(), Kind: "secret", Name: "secret_run", Status: "error", Detail: detail, Error: RedactSecrets(config, runErr.Error())})
-			return result, fmt.Errorf("could not run %s: %s", firstWord(req.Command), RedactSecrets(config, runErr.Error()))
-		} else {
-			result.ExitCode = -1
+	var exit *exec.ExitError
+	switch {
+	case runErr == nil, errors.Is(runErr, exec.ErrWaitDelay):
+		if cmd.ProcessState != nil {
+			result.ExitCode = cmd.ProcessState.ExitCode()
 		}
+	case errors.As(runErr, &exit):
+		result.ExitCode = exit.ExitCode()
+	case result.TimedOut:
+		result.ExitCode = -1
+	default:
+		msg := redactInjected(RedactSecrets(config, runErr.Error()), injected.vars)
+		a.appendActivity(ActivityRecord{Time: time.Now().UTC(), Kind: "secret", Name: "secret_run", Status: "error", Detail: detail, Error: msg})
+		return result, fmt.Errorf("could not run %s: %s", firstWord(req.Command), msg)
 	}
 
 	redactor := currentRedactor(config)
@@ -303,7 +299,7 @@ func (a *App) RunWithSecrets(ctx context.Context, req SecretRunRequest) (SecretR
 		if b.dropped > 0 {
 			text = redactor.trimPartialSecret(text)
 		}
-		text = redactor.replacer.Replace(text)
+		text = redactor.redact(text)
 		text = redactInjected(text, injected.vars)
 		if b.dropped > 0 {
 			text += fmt.Sprintf("\n[%d more bytes not kept]", b.dropped)
@@ -314,11 +310,10 @@ func (a *App) RunWithSecrets(ctx context.Context, req SecretRunRequest) (SecretR
 		value := strings.TrimSpace(stdout.String())
 		if value == "" || stdout.dropped > 0 || len(value) > 64*1024 {
 			result.Note = "standard output was empty or too large to save as a secret"
-		} else if _, err := SaveSecret(config, SecretInput{Name: req.SaveAs.Name, Kind: SecretGeneric, Description: req.SaveAs.Description,
-			Values: map[string]string{"value": value}, Public: map[string]string{"env": req.SaveAs.Env}, AgentUse: true}); err != nil {
+		} else if err := saveAgentSecret(config, *req.SaveAs, value); err != nil {
 			result.Note = "could not save the output as a secret: " + err.Error()
 		} else {
-			_ = markAgentCreated(config, req.SaveAs.Name)
+			a.secretsChanged(false, nil)
 			result.Saved = req.SaveAs.Name
 			result.Stdout = fmt.Sprintf("[saved as secret %s: %d bytes, provided as %s]", req.SaveAs.Name, len(value), req.SaveAs.Env)
 		}
@@ -333,6 +328,57 @@ func (a *App) RunWithSecrets(ctx context.Context, req SecretRunRequest) (SecretR
 	}
 	a.appendActivity(ActivityRecord{Time: time.Now().UTC(), Kind: "secret", Name: "secret_run", Status: status, Detail: fmt.Sprintf("%s (exit %d)", detail, result.ExitCode), DurationMs: result.DurationMs})
 	return result, nil
+}
+
+// saveAgentSecret stores what a command printed as a secret, in one step
+// with the check that it replaces nothing the user made.
+func saveAgentSecret(config Config, target SecretOutputTarget, value string) error {
+	if err := validateEnvName(target.Env); err != nil {
+		return err
+	}
+	return updateSecrets(config, func(payload *vaultPayload) error {
+		now := time.Now().UTC().Truncate(time.Second)
+		i := secretIndex(*payload, target.Name)
+		s := Secret{Name: target.Name, Kind: SecretGeneric, CreatedBy: "agent", Created: now}
+		if i >= 0 {
+			s = payload.Secrets[i]
+			if s.CreatedBy != "agent" || s.Kind != SecretGeneric {
+				return fmt.Errorf("a secret named %s already exists and was not made by an agent", target.Name)
+			}
+		}
+		s.Values = map[string]string{"value": value}
+		if s.Public == nil {
+			s.Public = map[string]string{}
+		}
+		s.Public["env"] = target.Env
+		delete(s.Public, "as_file")
+		if d := strings.TrimSpace(target.Description); d != "" {
+			s.Description = d
+		}
+		s.AgentUse = true
+		s.Updated = now
+		if i >= 0 {
+			payload.Secrets[i] = s
+		} else {
+			payload.Secrets = append(payload.Secrets, s)
+		}
+		return nil
+	})
+}
+
+var sweepOnce sync.Once
+
+// sweepSecretTemp removes temporary key folders a crashed NullBot left
+// behind (older than an hour).
+func sweepSecretTemp() {
+	sweepOnce.Do(func() {
+		dirs, _ := filepath.Glob(filepath.Join(os.TempDir(), "nullbot-secrets-*"))
+		for _, dir := range dirs {
+			if info, err := os.Lstat(dir); err == nil && info.IsDir() && time.Since(info.ModTime()) > time.Hour {
+				(&secretEnv{dir: dir}).cleanup()
+			}
+		}
+	})
 }
 
 // redactInjected removes the exact values given to this command, including
@@ -368,15 +414,6 @@ func checkSaveTarget(payload vaultPayload, target SecretOutputTarget) error {
 		return fmt.Errorf("a secret named %s already exists and was not made by an agent; choose another name", target.Name)
 	}
 	return nil
-}
-
-func markAgentCreated(config Config, name string) error {
-	return updateSecrets(config, func(payload *vaultPayload) error {
-		if i := secretIndex(*payload, name); i >= 0 {
-			payload.Secrets[i].CreatedBy = "agent"
-		}
-		return nil
-	})
 }
 
 func firstWord(s string) string {
@@ -419,3 +456,12 @@ func (b *cappedBuffer) Write(p []byte) (int, error) {
 }
 
 func (b *cappedBuffer) String() string { return b.buf.String() }
+
+// shortText is s on one line, cut to max runes.
+func shortText(s string, max int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if r := []rune(s); len(r) > max {
+		return string(r[:max-1]) + "…"
+	}
+	return s
+}

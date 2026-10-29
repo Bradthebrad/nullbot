@@ -2,9 +2,11 @@ package app
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -115,7 +117,7 @@ func buildSecretEnv(secrets []Secret, files bool) (*secretEnv, error) {
 			if !files {
 				return fail(fmt.Errorf("%s is an SSH key, which is passed as a file; tool servers cannot get it", s.Name))
 			}
-			path, err := env.file(s.Name+".key", s.Values["private_key"])
+			path, err := env.file(fmt.Sprintf("%d-%s.key", i, s.Name), s.Values["private_key"])
 			if err != nil {
 				return fail(err)
 			}
@@ -144,7 +146,7 @@ func buildSecretEnv(secrets []Secret, files bool) (*secretEnv, error) {
 			if !files {
 				return fail(fmt.Errorf("%s is a Google Cloud key file; tool servers cannot get it", s.Name))
 			}
-			path, err := env.file(s.Name+".json", s.Values["credentials_json"])
+			path, err := env.file(fmt.Sprintf("%d-%s.json", i, s.Name), s.Values["credentials_json"])
 			if err != nil {
 				return fail(err)
 			}
@@ -166,7 +168,7 @@ func buildSecretEnv(secrets []Secret, files bool) (*secretEnv, error) {
 				if !files {
 					return fail(fmt.Errorf("%s is passed as a file; tool servers cannot get it", s.Name))
 				}
-				path, err := env.file(s.Name, value)
+				path, err := env.file(fmt.Sprintf("%d-%s", i, s.Name), value)
 				if err != nil {
 					return fail(err)
 				}
@@ -207,13 +209,32 @@ func commandBaseEnv() map[string]string {
 		if !ok || key == "" {
 			continue
 		}
-		upper := strings.ToUpper(key)
-		if inheritedCredentialEnv(key) || strings.HasPrefix(upper, "NULLBOT_VAULT") || strings.HasPrefix(upper, "AWS_") || upper == "GOOGLE_APPLICATION_CREDENTIALS" {
+		if commandCredentialEnv(key) {
 			continue
 		}
 		env[mcpEnvKey(key)] = value
 	}
 	return env
+}
+
+// commandCredentialEnv reports variables a command never inherits from
+// NullBot: anything that looks like a credential, cloud configuration that
+// would compete with a chosen secret, and the user's SSH agent.
+func commandCredentialEnv(key string) bool {
+	upper := strings.ToUpper(key)
+	if inheritedCredentialEnv(key) || strings.HasPrefix(upper, "NULLBOT_") || strings.HasPrefix(upper, "AWS_") {
+		return true
+	}
+	for _, suffix := range []string{"_KEY", "_PASS", "_PASSWD", "_APIKEY", "_CREDENTIAL", "_PAT", "_PRIVATE_KEY"} {
+		if strings.HasSuffix(upper, suffix) {
+			return true
+		}
+	}
+	switch upper {
+	case "GOOGLE_APPLICATION_CREDENTIALS", "CLOUDSDK_AUTH_ACCESS_TOKEN_FILE", "DATABASE_URL", "SSH_AUTH_SOCK", "GIT_ASKPASS", "SSH_ASKPASS":
+		return true
+	}
+	return false
 }
 
 func envList(env map[string]string) []string {
@@ -251,13 +272,29 @@ func serverSecretEnv(config Config, id string) map[string]string {
 	if err != nil {
 		return nil
 	}
+	launchedWithSecrets.Store(id, true)
 	return env.vars
+}
+
+// launchedWithSecrets remembers servers started with secrets, so locking
+// the vault can stop them.
+var launchedWithSecrets sync.Map
+
+func serversWithSecrets() []string {
+	var out []string
+	launchedWithSecrets.Range(func(k, _ any) bool {
+		out = append(out, k.(string))
+		return true
+	})
+	return out
 }
 
 // --- redaction --------------------------------------------------------------
 
 // secretRedactor replaces every known secret value in text with
-// [secret:name]. It is rebuilt when the vault file changes.
+// [secret:name]. It is rebuilt when the vault changes. Values it has seen
+// stay known for the life of the process, so a rotated, removed or
+// locked-away value is still caught.
 type secretRedactor struct {
 	modTime  time.Time
 	size     int64
@@ -273,7 +310,11 @@ type redactValue struct {
 var (
 	redactorsMu sync.Mutex
 	redactors   = map[string]*secretRedactor{}
+	// seenValues: per vault, every secret value redacted so far, by value.
+	seenValues = map[string]map[string]string{}
 )
+
+const maxSeenValues = 5000
 
 func invalidateRedactor(config Config) {
 	redactorsMu.Lock()
@@ -284,6 +325,55 @@ func invalidateRedactor(config Config) {
 // providerEnvKeys are variables whose values NullBot uses as keys when the
 // vault has none; they are redacted too.
 var providerEnvKeys = []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "BRAVE_API_KEY", "GH_TOKEN", "GITHUB_TOKEN"}
+
+// secretValues lists the values a secret holds that must be redacted. A
+// Google Cloud key file also contributes its private key and key id, which
+// appear on their own when a command reads one field.
+func secretValues(s Secret) []string {
+	var out []string
+	for _, v := range s.Values {
+		out = append(out, v)
+	}
+	if raw := s.Values["credentials_json"]; raw != "" {
+		var key map[string]any
+		if json.Unmarshal([]byte(raw), &key) == nil {
+			for _, field := range []string{"private_key", "private_key_id", "refresh_token", "client_secret"} {
+				if v, ok := key[field].(string); ok {
+					out = append(out, v)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// rememberSecrets records a payload's values as seen, so they stay redacted
+// even if the vault is locked before the next tool result.
+func rememberSecrets(config Config, payload vaultPayload) {
+	path := VaultPath(config)
+	redactorsMu.Lock()
+	defer redactorsMu.Unlock()
+	seen := seenValues[path]
+	if seen == nil {
+		seen = map[string]string{}
+		seenValues[path] = seen
+	}
+	added := false
+	for _, s := range payload.Secrets {
+		for _, v := range secretValues(s) {
+			if v = strings.TrimSpace(v); len(v) < 8 {
+				continue
+			}
+			if _, ok := seen[v]; !ok && len(seen) < maxSeenValues {
+				seen[v] = "[secret:" + s.Name + "]"
+				added = true
+			}
+		}
+	}
+	if added {
+		delete(redactors, path)
+	}
+}
 
 func currentRedactor(config Config) *secretRedactor {
 	path := VaultPath(config)
@@ -301,38 +391,15 @@ func currentRedactor(config Config) *secretRedactor {
 	if r != nil && time.Since(r.built) < 5*time.Minute && r.modTime.Equal(modTime) && r.size == size {
 		return r
 	}
-	var values []redactValue
+	current := map[string]string{}
 	add := func(value, label string) {
-		value = strings.TrimSpace(value)
-		if len(value) < 8 {
-			return
-		}
-		values = append(values, redactValue{value, label})
-		if len(value) >= 12 {
-			// Base64 of the value wherever it starts in an encoded stream:
-			// the encoding of value[k:], cut to whole 3-byte groups, appears
-			// in the output for one of k = 0, 1, 2. At most two bytes at
-			// either edge stay visible.
-			for k := 0; k < 3; k++ {
-				chunk := value[k:]
-				chunk = chunk[:len(chunk)/3*3]
-				values = append(values, redactValue{base64.StdEncoding.EncodeToString([]byte(chunk)), label})
-			}
-		}
-		// Long multi-line values (private keys) are also caught line by line.
-		if strings.Contains(value, "\n") {
-			for _, line := range strings.Split(value, "\n") {
-				line = strings.TrimSpace(line)
-				if len(line) >= 24 && !strings.HasPrefix(line, "-----") {
-					values = append(values, redactValue{line, label})
-				}
-			}
+		if value = strings.TrimSpace(value); len(value) >= 8 {
+			current[value] = label
 		}
 	}
-	payload, err := loadSecretsPayload(config)
-	if err == nil {
+	if payload, err := loadSecretsPayload(config); err == nil {
 		for _, s := range payload.Secrets {
-			for _, v := range s.Values {
+			for _, v := range secretValues(s) {
 				add(v, "[secret:"+s.Name+"]")
 			}
 		}
@@ -341,6 +408,9 @@ func currentRedactor(config Config) *secretRedactor {
 			add(c.RefreshToken, "[secret:chatgpt-sign-in]")
 			add(c.IDToken, "[secret:chatgpt-sign-in]")
 		}
+	}
+	for _, v := range openVault(config).RedactionValues() {
+		add(v, "[secret:vault key]")
 	}
 	if legacy, err := readLegacyAPIKeys(config); err == nil {
 		for _, p := range namedProviders {
@@ -353,6 +423,7 @@ func currentRedactor(config Config) *secretRedactor {
 	if legacy, err := readLegacyCodexAuth(config); err == nil {
 		add(legacy.AccessToken, "[secret:chatgpt-sign-in]")
 		add(legacy.RefreshToken, "[secret:chatgpt-sign-in]")
+		add(legacy.IDToken, "[secret:chatgpt-sign-in]")
 	}
 	for _, name := range providerEnvKeys {
 		add(os.Getenv(name), "[secret:env "+name+"]")
@@ -360,8 +431,35 @@ func currentRedactor(config Config) *secretRedactor {
 	if p, ok := vault.EnvPassphrase(); ok {
 		add(p, "[secret:vault passphrase]")
 	}
-	// Longest first, so a whole key is replaced before any of its lines.
-	sort.SliceStable(values, func(i, j int) bool { return len(values[i].value) > len(values[j].value) })
+
+	redactorsMu.Lock()
+	seen := seenValues[path]
+	if seen == nil {
+		seen = map[string]string{}
+		seenValues[path] = seen
+	}
+	for v, label := range current {
+		if _, ok := seen[v]; ok || len(seen) < maxSeenValues {
+			seen[v] = label
+		}
+	}
+	all := make(map[string]string, len(seen))
+	for v, label := range seen {
+		all[v] = label
+	}
+	redactorsMu.Unlock()
+
+	var values []redactValue
+	for value, label := range all {
+		values = append(values, redactForms(value, label)...)
+	}
+	// Longest first, so a whole key is replaced before any of its parts.
+	sort.SliceStable(values, func(i, j int) bool {
+		if len(values[i].value) != len(values[j].value) {
+			return len(values[i].value) > len(values[j].value)
+		}
+		return values[i].value < values[j].value
+	})
 	pairs := make([]string, 0, len(values)*2)
 	for _, v := range values {
 		pairs = append(pairs, v.value, v.label)
@@ -373,6 +471,54 @@ func currentRedactor(config Config) *secretRedactor {
 	return r
 }
 
+// redactForms are the shapes a value takes in output: as is, escaped inside
+// JSON (as tools and tool servers return it), Base64 encoded, and for a
+// private key, each line of its body.
+func redactForms(value, label string) []redactValue {
+	forms := map[string]bool{value: true}
+	for _, html := range []bool{true, false} {
+		var buf strings.Builder
+		enc := json.NewEncoder(&buf)
+		enc.SetEscapeHTML(html)
+		if enc.Encode(value) == nil {
+			escaped := strings.TrimSuffix(buf.String(), "\n")
+			escaped = strings.TrimSuffix(strings.TrimPrefix(escaped, `"`), `"`)
+			if len(escaped) >= 8 {
+				forms[escaped] = true
+			}
+		}
+	}
+	if len(value) >= 12 {
+		// Base64 of the value wherever it starts in an encoded stream: the
+		// encoding of value[k:], cut to whole 3-byte groups, appears for one
+		// of k = 0, 1, 2. At most two bytes at either edge stay visible.
+		for k := 0; k < 3; k++ {
+			chunk := value[k:]
+			chunk = chunk[:len(chunk)/3*3]
+			if len(chunk) >= 9 {
+				forms[base64.StdEncoding.EncodeToString([]byte(chunk))] = true
+			}
+		}
+	}
+	if strings.Contains(value, "PRIVATE KEY-----") {
+		for _, line := range strings.Split(strings.ReplaceAll(value, "\\n", "\n"), "\n") {
+			line = strings.TrimSpace(line)
+			if len(line) >= 24 && !strings.HasPrefix(line, "-----") {
+				forms[line] = true
+			}
+		}
+	}
+	out := make([]redactValue, 0, len(forms))
+	for f := range forms {
+		out = append(out, redactValue{f, label})
+	}
+	return out
+}
+
+// base64Block matches Base64 wrapped over several lines, as the base64
+// tool prints it.
+var base64Block = regexp.MustCompile(`(?:[A-Za-z0-9+/]{16,}\r?\n)+[A-Za-z0-9+/]+={0,2}`)
+
 // RedactSecrets removes every known secret value from text.
 func RedactSecrets(config Config, text string) string {
 	if text == "" {
@@ -381,6 +527,19 @@ func RedactSecrets(config Config, text string) string {
 	r := currentRedactor(config)
 	if len(r.values) == 0 {
 		return text
+	}
+	return r.redact(text)
+}
+
+func (r *secretRedactor) redact(text string) string {
+	if strings.Contains(text, "\n") {
+		text = base64Block.ReplaceAllStringFunc(text, func(block string) string {
+			joined := strings.NewReplacer("\r", "", "\n", "").Replace(block)
+			if cleaned := r.replacer.Replace(joined); cleaned != joined {
+				return cleaned
+			}
+			return block
+		})
 	}
 	return r.replacer.Replace(text)
 }

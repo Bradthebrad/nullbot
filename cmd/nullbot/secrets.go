@@ -127,6 +127,8 @@ func splitPairs(pairs []string, what string) (map[string]string, error) {
 
 // runVaultCLI handles "nullbot vault ..." and "nullbot secrets ...".
 func runVaultCLI(command string, args []string, appDir string, stdin io.Reader, stdout, stderr io.Writer) int {
+	// --app-dir may come anywhere, including before the subcommand.
+	args, appDir = takeAppDir(args, appDir)
 	sub := ""
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		sub, args = args[0], args[1:]
@@ -138,7 +140,6 @@ func runVaultCLI(command string, args []string, appDir string, stdin io.Reader, 
 	flags := flag.NewFlagSet("nullbot "+command, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.Usage = func() { fmt.Fprint(stderr, secretsUsage) }
-	flags.StringVar(&appDir, "app-dir", appDir, "")
 	kind := flags.String("kind", "", "")
 	description := flags.String("description", "", "")
 	host := flags.String("host", "", "")
@@ -284,6 +285,13 @@ func runVaultCLI(command string, args []string, appDir string, stdin io.Reader, 
 		if err != nil {
 			return fail(err)
 		}
+		for field := range public {
+			for _, f := range kindInfo.Fields {
+				if f.Name == field && f.Secret {
+					return fail(fmt.Errorf("%s is a secret value; it is asked for without echo, or give it with --file %s=PATH or --from-env %s=VAR", field, field, field))
+				}
+			}
+		}
 		if *host != "" {
 			public["host"] = *host
 		}
@@ -311,13 +319,30 @@ func runVaultCLI(command string, args []string, appDir string, stdin io.Reader, 
 			values[field] = v
 		}
 		existing := map[string]bool{}
-		if current, err := app.ListSecrets(config); err == nil {
-			for _, s := range current {
+		var current *app.SecretInfo
+		if list, err := app.ListSecrets(config); err == nil {
+			for i, s := range list {
 				if s.Name == positional[0] {
+					current = &list[i]
 					for _, f := range s.Set {
 						existing[f] = true
 					}
 				}
+			}
+		}
+		// Changing a secret keeps what the command line does not mention.
+		given := map[string]bool{}
+		flags.Visit(func(f *flag.Flag) { given[f.Name] = true })
+		agent, desc, bound := *agentUse, *description, []string(servers)
+		if current != nil {
+			if !given["agent"] {
+				agent = current.AgentUse
+			}
+			if !given["description"] {
+				desc = current.Description
+			}
+			if !given["server"] {
+				bound = current.Servers
 			}
 		}
 		var missing []app.SecretField
@@ -335,11 +360,13 @@ func runVaultCLI(command string, args []string, appDir string, stdin io.Reader, 
 					if !f.Required {
 						label = f.Label + " (Enter to skip): "
 					}
-					if f.Multiline && f.Name != "value" {
+					if f.Multiline {
+						// A pasted multi-line value would leave its other
+						// lines for the shell to run after this command.
 						if !f.Required {
 							continue
 						}
-						return fail(fmt.Errorf("give the %s as a file: --file %s=PATH", strings.ToLower(f.Label), f.Name))
+						return fail(fmt.Errorf("give the %s as a file (--file %s=PATH), from a variable (--from-env %s=VAR) or on standard input", strings.ToLower(f.Label), f.Name, f.Name))
 					}
 					v, err := input.hidden(label)
 					if err != nil {
@@ -369,8 +396,8 @@ func runVaultCLI(command string, args []string, appDir string, stdin io.Reader, 
 			}
 		}
 		info, err := app.SaveSecret(config, app.SecretInput{
-			Name: positional[0], Kind: *kind, Description: *description,
-			Values: values, Public: public, AgentUse: *agentUse, Servers: servers,
+			Name: positional[0], Kind: *kind, Description: desc,
+			Values: values, Public: public, AgentUse: agent, Servers: bound,
 		})
 		for k := range values {
 			values[k] = ""
@@ -528,4 +555,22 @@ func unlockFromTerminal(config app.Config, input *cliInput, stderr io.Writer, op
 		return nil
 	}
 	return vault.ErrWrongPassphrase
+}
+
+// takeAppDir removes --app-dir DIR (or --app-dir=DIR) from args.
+func takeAppDir(args []string, appDir string) ([]string, string) {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case (a == "--app-dir" || a == "-app-dir") && i+1 < len(args):
+			appDir = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--app-dir=") || strings.HasPrefix(a, "-app-dir="):
+			appDir = a[strings.Index(a, "=")+1:]
+		default:
+			out = append(out, a)
+		}
+	}
+	return out, appDir
 }

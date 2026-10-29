@@ -85,6 +85,16 @@ func TestSecretsCommands(t *testing.T) {
 	if code, _, errOut := runCLI(t, "", "secrets", "set", "x", "--app-dir", dir); code != 1 || !strings.Contains(errOut, "--kind") {
 		t.Fatalf("no kind: %d %q", code, errOut)
 	}
+	// Rotating a token keeps who may use it.
+	if code, _, errOut := runCLI(t, "ghp_rotated0000000000000\n", "--app-dir", dir, "secrets", "set", "github", "--kind", "github_token"); code != 0 {
+		t.Fatalf("rotate: %d %q", code, errOut)
+	}
+	if _, out, _ := runCLI(t, "", "secrets", "--app-dir", dir, "list"); !strings.Contains(out, "agents may use") {
+		t.Fatalf("rotating dropped agent use: %q", out)
+	}
+	if code, _, errOut := runCLI(t, "", "secrets", "set", "x", "--kind", "github_token", "--set", "token=ghp_inargv", "--app-dir", dir); code != 1 || !strings.Contains(errOut, "secret value") {
+		t.Fatalf("--set of a secret field: %d %q", code, errOut)
+	}
 	if code, out, _ := runCLI(t, "", "secrets", "remove", "github", "--app-dir", dir); code != 0 || !strings.Contains(out, "Removed github") {
 		t.Fatalf("remove: %d %q", code, out)
 	}

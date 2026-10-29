@@ -72,6 +72,7 @@ var (
 	ErrCorrupt = errors.New("vault: the vault file is damaged or was changed")
 	// ErrExists: Create was called for a vault that already exists.
 	ErrExists = errors.New("vault: a vault already exists")
+	errBusy   = errors.New("vault: another NullBot is changing the vault; try again in a moment")
 )
 
 // header is the file format. Everything but Data is metadata; Data is the
@@ -137,6 +138,9 @@ type Vault struct {
 	id  string
 	// given is a passphrase handed to Unlock; it lives only in memory.
 	given string
+	// keyringFailed is set when the keychain said it was available but
+	// could not store a key; Auto then asks for a passphrase.
+	keyringFailed bool
 }
 
 // New returns the vault stored at path. Nothing is read until it is used.
@@ -161,11 +165,11 @@ func (v *Vault) Path() string { return v.path }
 // it opens. It may consult the keychain.
 func (v *Vault) Status() Status {
 	st := Status{Path: v.path}
-	if v.keyring != nil && v.keyring.Available() {
-		st.Keychain = v.keyring.Kind()
-	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if v.keyringUsable() {
+		st.Keychain = v.keyring.Kind()
+	}
 	h, err := v.readHeader()
 	if errors.Is(err, ErrNotFound) {
 		return st
@@ -195,12 +199,7 @@ func (v *Vault) Exists() bool {
 // fails with ErrNoKeychain. passphrase is used only for Passphrase and may
 // be empty to take it from the environment.
 func (v *Vault) Create(protection Protection, passphrase string) error {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	if v.Exists() {
-		return ErrExists
-	}
-	return v.create(protection, passphrase, nil)
+	return v.CreateWith(protection, passphrase, nil)
 }
 
 // CreateWith makes a vault holding payload; see Create.
@@ -210,14 +209,40 @@ func (v *Vault) CreateWith(protection Protection, passphrase string, payload []b
 	if v.Exists() {
 		return ErrExists
 	}
+	unlock, err := v.fileLock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	// Another process may have made it while this one waited.
+	if v.Exists() {
+		return ErrExists
+	}
 	return v.create(protection, passphrase, payload)
 }
 
+// fileLock serializes changes between NullBot processes sharing the vault.
+func (v *Vault) fileLock() (func(), error) {
+	dir := filepath.Dir(v.path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	if err := rejectLinks(v.path); err != nil {
+		return nil, err
+	}
+	return lockPath(v.path + ".lock")
+}
+
+func (v *Vault) keyringUsable() bool {
+	return v.keyring != nil && !v.keyringFailed && v.keyring.Available()
+}
+
 func (v *Vault) create(protection Protection, passphrase string, payload []byte) error {
-	if protection == Auto {
+	auto := protection == Auto
+	if auto {
 		if p, ok := v.passphrase(); ok && p != "" {
 			protection, passphrase = Passphrase, p
-		} else if v.keyring != nil && v.keyring.Available() {
+		} else if v.keyringUsable() {
 			protection = v.keyring.Kind()
 		} else {
 			return ErrNoKeychain
@@ -230,6 +255,13 @@ func (v *Vault) create(protection Protection, passphrase string, payload []byte)
 	}
 	h := header{Format: format, Version: version, ID: id, Protection: protection}
 	if err := v.protectKey(&h, key, passphrase); err != nil {
+		if auto && protection != Passphrase {
+			// The keychain claimed to work but did not (no Secret Service
+			// provider behind the bus, a locked login keychain over SSH):
+			// treat it as absent from now on.
+			v.keyringFailed = true
+			return fmt.Errorf("%w (%v)", ErrNoKeychain, err)
+		}
 		return err
 	}
 	if payload == nil {
@@ -357,6 +389,11 @@ func (v *Vault) readLocked() ([]byte, error) {
 func (v *Vault) Update(fn func(payload []byte) ([]byte, error)) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	unlock, err := v.fileLock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	h, err := v.readHeader()
 	if err != nil {
 		return err
@@ -384,6 +421,11 @@ func (v *Vault) Update(fn func(payload []byte) ([]byte, error)) error {
 func (v *Vault) Reprotect(protection Protection, passphrase string) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	unlock, err := v.fileLock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	old, err := v.readHeader()
 	if err != nil {
 		return err
@@ -394,7 +436,7 @@ func (v *Vault) Reprotect(protection Protection, passphrase string) error {
 	}
 	defer clear(plain)
 	if protection == Auto {
-		if v.keyring == nil || !v.keyring.Available() {
+		if !v.keyringUsable() {
 			return ErrNoKeychain
 		}
 		protection = v.keyring.Kind()
@@ -409,6 +451,9 @@ func (v *Vault) Reprotect(protection Protection, passphrase string) error {
 		return err
 	}
 	if err := v.writeLocked(h, key, plain); err != nil {
+		if (protection == Keychain || protection == SecretService) && v.keyring != nil {
+			_ = v.keyring.Delete(id)
+		}
 		return err
 	}
 	if old.Protection == Keychain || old.Protection == SecretService {
@@ -429,8 +474,21 @@ func (v *Vault) Reprotect(protection Protection, passphrase string) error {
 func (v *Vault) Destroy() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	unlock, err := v.fileLock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	h, err := v.readHeader()
-	if err != nil && !errors.Is(err, ErrCorrupt) {
+	if errors.Is(err, ErrCorrupt) {
+		// Still find the keychain entry to remove, if the id is readable.
+		if data, rerr := os.ReadFile(v.path); rerr == nil && len(data) <= maxFileBytes {
+			var loose header
+			if json.Unmarshal(data, &loose) == nil && validID(loose.ID) {
+				h = loose
+			}
+		}
+	} else if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return nil
 		}
@@ -645,7 +703,11 @@ func writeAtomic(path string, data []byte) error {
 	if err := rejectLinks(path); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := renameReplace(tmp, path); err != nil {
+		return err
+	}
+	syncDir(dir)
+	return nil
 }
 
 // rejectLinks refuses a vault file, or vault folder, that is a symbolic
@@ -709,5 +771,23 @@ func TakeEnvPassphrase() {
 		envCaptured = p
 	}
 	envMu.Unlock()
+	// Neither the passphrase nor where to find it reaches child processes.
 	_ = os.Unsetenv(PassphraseEnv)
+	_ = os.Unsetenv(PassphraseFileEnv)
+}
+
+// RedactionValues are forms of the vault's own key material that must never
+// reach a model: the data key in hex, and the protected key in the header.
+// Empty until the vault has been opened in this process.
+func (v *Vault) RedactionValues() []string {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.key == nil {
+		return nil
+	}
+	out := []string{hex.EncodeToString(v.key), strings.ToUpper(hex.EncodeToString(v.key))}
+	if h, err := v.readHeader(); err == nil && h.WrappedKey != "" {
+		out = append(out, h.WrappedKey)
+	}
+	return out
 }

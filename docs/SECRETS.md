@@ -24,12 +24,18 @@ It is protected by:
 The header names the protection and binds it to the encrypted data, so
 editing the file makes it unreadable instead of quietly changing it. Writes go
 through a temporary file and a rename, so a crash leaves the old vault or the
-new one, never half of one. A vault file or folder that is a symbolic link is
-refused.
+new one, never half of one, and a lock file keeps two NullBot processes (the
+desktop app and `nullbot serve`, say) from writing at once. A vault file or
+folder that is a symbolic link is refused. If a keychain says it is there but
+cannot store a key (a Secret Service bus with nothing behind it, a locked
+keychain over SSH), NullBot treats it as absent and asks for a passphrase.
 
 Older versions kept API keys in `api/keys.json` and the ChatGPT sign-in in
 `api/codex_auth.json` in plain text. NullBot moves both into the vault the
-first time it can, overwrites the old files and deletes them. On a system
+first time it can, then overwrites and deletes each file, but only once
+everything in it is in the vault. Provider names are normalized on the way
+(`Perplexity AI` becomes `perplexity-ai`); a name that cannot be used keeps
+the file and is noted in the log. On a system
 with no keychain and no passphrase configured, those two files stay where they
 are and keep working, and NullBot says so (`nullbot vault`, Settings >
 Secrets). Every other kind of secret needs the vault.
@@ -42,8 +48,11 @@ On a machine without a keychain, give NullBot the passphrase in one of:
 - `NULLBOT_VAULT_PASSPHRASE_FILE`: a file holding it, such as a systemd
   credential (`LoadCredential=` puts it under `$CREDENTIALS_DIRECTORY`).
 
-NullBot reads the variable at start and removes it from its own environment,
-so no command or tool server it starts inherits it. In the terminal UI, a
+NullBot reads them at start and removes both from its own environment, so no
+command, tool server or Codex run it starts inherits them. Prefer the file:
+on Linux a process's starting environment stays readable in
+`/proc/<pid>/environ` to programs running as the same user, even after
+NullBot removes the variable. In the terminal UI, a
 locked vault asks for its passphrase before the UI opens; the desktop app
 asks in Settings > Secrets.
 
@@ -98,14 +107,18 @@ What `secret_run` does:
    password.
 4. Writes SSH keys and key files to a private temporary folder (mode 0700,
    files 0600), and overwrites and deletes them when the command ends.
-5. Expands `${VAR}` in the arguments for the secrets' variables only, so a
-   request can say `curl -H "Authorization: Bearer ${GH_TOKEN}"` without the
-   value appearing in the conversation.
-6. Runs the command with a time limit (300 seconds by default, at most an
-   hour) and stops its whole process tree at the limit.
-7. Removes every secret value from what the command printed, including the
-   Base64 form, before the agent sees it, and records the use in the activity
-   log (secret names, project and program, never values).
+5. Passes arguments exactly as written. Values are never put into a command
+   line, where other programs on the computer can read them; programs read
+   them from the environment (`gh`, `git`, `aws`, `gcloud` and most SDKs do).
+   With `shell`, `"$GH_TOKEN"` works, but the value then sits in that
+   program's arguments while it runs.
+6. Runs the command in a session (on Windows, a job) of its own, with a time
+   limit (300 seconds by default, at most an hour). When the command ends,
+   anything it left running is stopped, so nothing keeps the secrets after
+   the call.
+7. Removes every secret value from what the command printed before the agent
+   sees it, and records the use in the activity log (secret names, project,
+   program and the agent's stated reason, never values).
 
 `save_output_as` stores what a command prints as a new secret instead of
 returning it, for credentials a command creates (an access key, a generated
@@ -113,12 +126,18 @@ password). An agent can only overwrite secrets agents made.
 
 ### Every tool result is checked
 
-Every tool's result, built in or from a tool server, passes through the same
-filter before it reaches a model: saved secret values, the ChatGPT sign-in,
-provider keys from the environment and the vault passphrase are replaced with
-`[secret:name]`. So reading a file that happens to contain a saved key shows
-the placeholder, not the key. The tool servers' error output shown in Tools is
-filtered the same way.
+Every tool's result, built in or from a tool server, and every Codex answer
+passes through the same filter before it reaches a model: saved secret
+values, the ChatGPT sign-in, provider keys from the environment, the vault
+passphrase and the vault's own key are replaced with `[secret:name]`. Each
+value is caught as written, escaped inside JSON, in Base64 (on one line or
+wrapped), and for private keys line by line; a Google Cloud key file's private
+key and key id are caught on their own. Values stay known for the rest of the
+session after they are rotated or removed, or the vault is locked. The tool
+servers' error output shown in Tools is filtered the same way.
+
+Agents cannot read the vault, or the legacy `api/` files, with NullBot's own
+file tools.
 
 ## Tool servers
 
@@ -168,14 +187,22 @@ value reads it from standard input; a kind with several reads a JSON object
   use a secret only where you would let them act with it, and prefer narrowly
   scoped tokens (fine-grained GitHub tokens, IAM users limited to what the
   task needs).
-- The output filter replaces exact values and their Base64 forms. A command
-  that prints a secret transformed some other way (hex, reversed, split)
-  defeats it.
+- **Running programs means reaching the keychain.** A command runs as you, so
+  in a project that allows running programs it can ask your keychain for the
+  vault's key just as NullBot does (`security` on macOS, `secret-tool` on
+  Linux, DPAPI on Windows), and with it every secret, including ones agents
+  may not use. The vault keeps secrets encrypted on disk and out of the
+  model's context; it is not a barrier against programs you let run. Where
+  that matters, run NullBot as its own operating-system user, with the vault
+  and its passphrase file readable only by that user.
+- The output filter replaces values in the forms above. A command that
+  prints a secret transformed some other way (hex, reversed, split across
+  separate outputs) defeats it.
 - Short values (under eight characters) are not filtered vault-wide, only in
   the output of the command they were given to.
 - The overwrite before deleting temporary and legacy files does not reach
   every disk: SSDs and copy-on-write file systems may keep old blocks.
 - Anyone who can run programs as you on an unlocked session can ask the
   keychain for the vault key, as they can for your browser's passwords. The
-  vault protects secrets at rest and from the agent, not from malware running
-  as you.
+  vault protects secrets at rest and keeps them out of what the model reads;
+  it does not protect them from programs running as you.

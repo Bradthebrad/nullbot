@@ -16,12 +16,15 @@
 - **Agents use secrets without seeing them.** `secrets_list` shows names,
   kinds and what each provides; `secret_run` runs a command with chosen
   secrets in its environment (GitHub tokens sign git in over HTTPS, SSH keys
-  become `GIT_SSH_COMMAND`, cloud keys become their usual variables) and
-  removes the values from what it prints. `save_output_as` keeps a credential
+  become `GIT_SSH_COMMAND`, cloud keys become their usual variables), never
+  in its arguments, stops anything the command leaves running, and removes
+  the values from what it prints. `save_output_as` keeps a credential
   a command creates as a new secret instead of showing it. A secret is usable
   by agents only once you allow it.
-- **Every tool result is filtered** for saved secret values and their Base64
-  forms before it reaches a model, and so is tool servers' error output.
+- **Every tool result is filtered** for saved secret values (as written,
+  JSON-escaped, Base64 and line by line for private keys) before it reaches a
+  model, and so are Codex answers and tool servers' error output. Agents
+  cannot read the vault or `api/` with NullBot's file tools.
 - **Tool servers** can be given secrets by ID; they get them in their
   environment when they start and restart when they change.
 - **GitHub:** check a token (login and scopes), generate an Ed25519 SSH key or

@@ -477,28 +477,50 @@ func apiKeysFromPayload(payload vaultPayload) APIKeys {
 			keys.Other[provider] = value
 		}
 	}
-	// A secret named after its provider is the provider's key; other API key
-	// secrets fill in providers without one.
+	// Each provider's managed secret is its key; other API key secrets fill
+	// in providers without one.
+	managed := managedAPIKeys(payload)
 	for _, pass := range []bool{true, false} {
-		for _, s := range payload.Secrets {
+		for i, s := range payload.Secrets {
 			if s.Kind != SecretAPIKey || s.Values["value"] == "" {
 				continue
 			}
-			provider := s.Public["provider"]
-			if providerNamed(s) != pass {
+			provider := apiProvider(s)
+			if j, ok := managed[provider]; (ok && j == i) != pass {
 				continue
 			}
 			if !pass && keys.ForProvider(provider) != "" {
-				continue
-			}
-			// With both a "google" and a "gemini" key, "google" is the one.
-			if pass && provider == "gemini" && keys.Google != "" {
 				continue
 			}
 			set(provider, s.Values["value"])
 		}
 	}
 	return keys
+}
+
+// managedAPIKeys picks, for each provider, the one API key secret Settings
+// shows and changes: one named exactly for the provider ("google"), then one
+// named for its own provider ("gemini"), then one whose name normalizes to it
+// ("x.ai" for x-ai), the first of each. Other API key secrets are left alone.
+func managedAPIKeys(payload vaultPayload) map[string]int {
+	best, rank := map[string]int{}, map[string]int{}
+	for i, s := range payload.Secrets {
+		if !providerNamed(s) {
+			continue
+		}
+		provider := apiProvider(s)
+		r := 2
+		switch s.Name {
+		case provider:
+			r = 0
+		case s.Public["provider"]:
+			r = 1
+		}
+		if prev, ok := rank[provider]; !ok || r < prev {
+			best[provider], rank[provider] = i, r
+		}
+	}
+	return best
 }
 
 // NormalizeProvider turns a provider name into the form secrets use:
@@ -599,17 +621,10 @@ func setAPIKeysInPayload(payload *vaultPayload, keys APIKeys, by string) error {
 		return err
 	}
 	now := time.Now().UTC().Truncate(time.Second)
-	// With both a "google" and a "gemini" key, the Google key in Settings is
-	// "google"; the "gemini" secret is left as it is.
-	hasGoogle := false
-	for _, s := range payload.Secrets {
-		if providerNamed(s) && s.Public["provider"] == "google" {
-			hasGoogle = true
-		}
-	}
+	managed := managedAPIKeys(*payload)
 	kept := payload.Secrets[:0]
-	for _, s := range payload.Secrets {
-		if provider, ok := canonicalProvider(s); ok && !(hasGoogle && s.Public["provider"] == "gemini") {
+	for i, s := range payload.Secrets {
+		if provider, ok := canonicalProvider(s); ok && managed[provider] == i {
 			value := strings.TrimSpace(want[provider])
 			delete(want, provider)
 			switch {
@@ -686,6 +701,33 @@ func addMissingAPIKeys(payload *vaultPayload, keys APIKeys, by string) error {
 			*dst = v
 		}
 	}
+	// A key the vault already has a newer one for is kept as its own
+	// secret ("openai-legacy"), so moving the file loses nothing.
+	var older []Secret
+	keepOlder := func(provider, v string) {
+		v = strings.TrimSpace(v)
+		if v == "" || looksMasked(v) || strings.TrimSpace(merged.ForProvider(provider)) == "" || strings.TrimSpace(merged.ForProvider(provider)) == v {
+			return
+		}
+		for _, s := range append(payload.Secrets, older...) {
+			if s.Kind == SecretAPIKey && strings.TrimSpace(s.Values["value"]) == v {
+				return
+			}
+		}
+		name := provider + "-legacy"
+		for n := 2; secretIndex(*payload, name) >= 0 || secretIndexIn(older, name) >= 0; n++ {
+			name = fmt.Sprintf("%s-legacy-%d", provider, n)
+		}
+		now := time.Now().UTC().Truncate(time.Second)
+		older = append(older, Secret{
+			Name: name, Kind: SecretAPIKey, Description: "An older " + provider + " key, moved from api/keys.json",
+			Values: map[string]string{"value": v}, Public: map[string]string{"provider": provider},
+			CreatedBy: by, Created: now, Updated: now,
+		})
+	}
+	for _, k := range []struct{ provider, value string }{{"openai", keys.OpenAI}, {"anthropic", keys.Anthropic}, {"openrouter", keys.OpenRouter}, {"google", keys.Google}} {
+		keepOlder(k.provider, k.value)
+	}
 	fill(&merged.OpenAI, "openai", keys.OpenAI)
 	fill(&merged.Anthropic, "anthropic", keys.Anthropic)
 	fill(&merged.OpenRouter, "openrouter", keys.OpenRouter)
@@ -705,6 +747,10 @@ func addMissingAPIKeys(payload *vaultPayload, keys APIKeys, by string) error {
 			problems = append(problems, fmt.Errorf("%q is not a usable provider name", name))
 			continue
 		}
+		if provider == "gemini" {
+			provider = "google"
+		}
+		keepOlder(provider, v)
 		if merged.ForProvider(provider) == "" && !blocked(provider) {
 			merged.Other[provider] = v
 		}
@@ -712,7 +758,17 @@ func addMissingAPIKeys(payload *vaultPayload, keys APIKeys, by string) error {
 	if err := setAPIKeysInPayload(payload, merged, by); err != nil {
 		return err
 	}
+	payload.Secrets = append(payload.Secrets, older...)
 	return errors.Join(problems...)
+}
+
+func secretIndexIn(secrets []Secret, name string) int {
+	for i, s := range secrets {
+		if s.Name == name {
+			return i
+		}
+	}
+	return -1
 }
 
 // apiKeysStored reports whether every key in keys is now in payload.

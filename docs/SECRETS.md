@@ -36,9 +36,11 @@ Older versions kept API keys in `api/keys.json` and the ChatGPT sign-in in
 `api/codex_auth.json` in plain text. NullBot moves both into the vault the
 first time it can, then overwrites and deletes each file, but only once
 everything in it is in the vault. Provider names are normalized on the way
-(`Perplexity AI` becomes `perplexity-ai`). A key that cannot be moved (its
-name cannot be used, or another secret already has it) keeps the file and is
-noted in the log; the other keys move. On a system
+(`Perplexity AI` becomes `perplexity-ai`). Where the vault already has a
+different key for a provider, the vault's key stays in use and the file's
+older one is kept as its own secret (`openai-legacy`). A key that cannot be
+moved (its name cannot be used, or a secret of another kind has it) keeps the
+file and is noted in the log; the other keys move. On a system
 with no keychain and no passphrase configured, those two files stay where they
 are and keep working, and NullBot says so (`nullbot vault`, Settings >
 Secrets). Every other kind of secret needs the vault.
@@ -152,9 +154,13 @@ looks like a credential, apart from its own `CODEX_API_KEY`.
 The provider keys in Settings are API key secrets named after their provider
 (`openai`, `brave`, or `x.ai` for provider `x-ai`). Changing a key there
 changes that secret; clearing it removes the secret. Other API key secrets
-(`openai-work`) are left alone. Google's key may be named `google` or
-`gemini`; with both, Settings uses and changes `google` and leaves `gemini`
-as it is.
+(`openai-work`) are left alone. When several secrets are named for one
+provider, Settings uses and changes one of them: the one named exactly for
+the provider (`google`, `x-ai`), then one named for its own provider
+(`gemini`), then the first other match (`x.ai`). The rest are left as they
+are, and after a clear the next one in that order becomes the provider's key.
+A key a form sends back masked means "unchanged"; it never replaces or
+removes a key.
 
 ## Tool servers
 

@@ -59,23 +59,29 @@ func (p *secretProcess) start() error {
 	if p.job == 0 {
 		return nil
 	}
+	// abort ends a process that could not be put in the job, and reaps it.
+	abort := func(err error) error {
+		_ = p.cmd.Process.Kill()
+		_ = p.cmd.Wait()
+		p.finish()
+		return err
+	}
 	h, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE|windows.PROCESS_SUSPEND_RESUME, false, uint32(p.cmd.Process.Pid))
 	if err != nil {
 		if suspended {
 			// It cannot be put in the job or resumed: don't leave it hanging.
-			_ = p.cmd.Process.Kill()
-			p.finish()
-			return err
+			return abort(err)
 		}
 		return nil
 	}
 	defer windows.CloseHandle(h)
-	_ = windows.AssignProcessToJobObject(p.job, h)
+	if err := windows.AssignProcessToJobObject(p.job, h); err != nil && suspended {
+		// Resumed outside the job, what it starts could outlive it.
+		return abort(fmt.Errorf("could not contain the command: %w", err))
+	}
 	if suspended {
-		if status, _, _ := procNtResumeProcess.Call(uintptr(h)); status != 0 {
-			_ = p.cmd.Process.Kill()
-			p.finish()
-			return fmt.Errorf("could not start the command (NTSTATUS 0x%x)", status)
+		if status, _, _ := procNtResumeProcess.Call(uintptr(h)); uint32(status) != 0 {
+			return abort(fmt.Errorf("could not start the command (NTSTATUS 0x%x)", uint32(status)))
 		}
 	}
 	return nil

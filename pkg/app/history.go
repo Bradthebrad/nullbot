@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -31,8 +32,26 @@ type HistorySessionSummary struct {
 	ModTime   time.Time `json:"mod_time"`
 }
 
+var (
+	sessionIDMu   sync.Mutex
+	sessionIDLast string
+	sessionIDN    int
+)
+
+// newSessionID names a history file by the time it starts. Chats opened in
+// the same second get -2, -3... so each keeps its own file.
 func newSessionID() string {
-	return time.Now().UTC().Format("20060102-150405")
+	id := time.Now().UTC().Format("20060102-150405")
+	sessionIDMu.Lock()
+	defer sessionIDMu.Unlock()
+	if strings.HasPrefix(sessionIDLast, id) {
+		sessionIDN++
+		id = fmt.Sprintf("%s-%d", id, sessionIDN)
+	} else {
+		sessionIDN = 1
+	}
+	sessionIDLast = id
+	return id
 }
 
 func (a *App) persistMessage(message Message) {

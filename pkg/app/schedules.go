@@ -47,6 +47,9 @@ type ScheduleRequest struct {
 }
 
 func (a *App) StartScheduler() {
+	if owner := a.scheduleOwner(); owner != a {
+		return // the main chat runs the schedule
+	}
 	a.mu.Lock()
 	if a.schedulerCancel != nil {
 		a.mu.Unlock()
@@ -76,12 +79,18 @@ func (a *App) StopScheduler() {
 }
 
 func (a *App) ScheduledTasks() []ScheduledTask {
+	if owner := a.scheduleOwner(); owner != a {
+		return owner.ScheduledTasks()
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.scheduledSnapshotsLocked()
 }
 
 func (a *App) CreateScheduledTask(req ScheduleRequest) (ScheduledTask, error) {
+	if owner := a.scheduleOwner(); owner != a {
+		return owner.CreateScheduledTask(req)
+	}
 	req.Prompt = strings.TrimSpace(req.Prompt)
 	if req.Prompt == "" {
 		return ScheduledTask{}, fmt.Errorf("schedule prompt is required")
@@ -115,6 +124,9 @@ func (a *App) CreateScheduledTask(req ScheduleRequest) (ScheduledTask, error) {
 }
 
 func (a *App) CancelScheduledTask(id string) (ScheduledTask, bool) {
+	if owner := a.scheduleOwner(); owner != a {
+		return owner.CancelScheduledTask(id)
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.ensureSchedulesLocked()
@@ -131,6 +143,9 @@ func (a *App) CancelScheduledTask(id string) (ScheduledTask, bool) {
 }
 
 func (a *App) DeleteScheduledTask(id string) bool {
+	if owner := a.scheduleOwner(); owner != a {
+		return owner.DeleteScheduledTask(id)
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.ensureSchedulesLocked()
@@ -143,6 +158,9 @@ func (a *App) DeleteScheduledTask(id string) bool {
 }
 
 func (a *App) RunScheduledTaskNow(id string) (ScheduledTask, error) {
+	if owner := a.scheduleOwner(); owner != a {
+		return owner.RunScheduledTaskNow(id)
+	}
 	a.mu.Lock()
 	a.ensureSchedulesLocked()
 	task := a.schedules[strings.TrimSpace(id)]
@@ -512,4 +530,16 @@ func scheduleSummary(tasks []ScheduledTask) string {
 		fmt.Fprintf(&b, "- `%s` [%s] %s at `%s`%s - %s\n", task.ID, task.Status, task.Name, when, repeat, truncate(task.Prompt, 120))
 	}
 	return strings.TrimSpace(b.String())
+}
+
+// scheduleOwner is the App that keeps the schedule: the main chat when
+// NullBot runs several chats, so each task runs once.
+func (a *App) scheduleOwner() *App {
+	a.mu.Lock()
+	hub, chat := a.hub, a.chatID
+	a.mu.Unlock()
+	if hub == nil || chat == MainChat {
+		return a
+	}
+	return hub.main
 }

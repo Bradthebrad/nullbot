@@ -49,8 +49,5 @@ an environment for a task and remove it afterwards. Planned rules:
 
 ## Also queued
 
-- Sessions: several conversations at once in tabs or side-by-side splits, and
-  a main conversation that watches every session and its subagents and can
-  steer them.
 - A Claude Code provider that runs your own installed `claude` command with
   your own sign-in and streams what it does into NullBot.

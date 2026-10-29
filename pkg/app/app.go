@@ -61,6 +61,9 @@ type App struct {
 	visualKeyMu   sync.Mutex
 	visualKeyPath string
 	visualKeyData []byte
+	// hub runs this App as one of several chats; chatID names it there.
+	hub    *Hub
+	chatID string
 }
 
 const (
@@ -93,7 +96,9 @@ type Message struct {
 type ActivityRecord struct {
 	// Seq increases by one for every record the app publishes, so consumers
 	// can deduplicate and order records without comparing payloads.
-	Seq          uint64    `json:"seq,omitempty"`
+	Seq uint64 `json:"seq,omitempty"`
+	// Chat is the chat the record belongs to, when NullBot runs several.
+	Chat         string    `json:"chat,omitempty"`
 	SubmissionID string    `json:"submission_id,omitempty"`
 	Lane         string    `json:"lane,omitempty"`
 	AgentID      string    `json:"agent_id,omitempty"`
@@ -216,16 +221,30 @@ func (a *App) UpdateConfig(update func(*Config)) error {
 	a.config = config
 	a.logger = NewLogger(config)
 	pool := a.mcpPool
+	hub := a.hub
 	a.mu.Unlock()
 	a.logInfo("config saved", "app_dir", config.AppDir, "provider", config.Model.Provider, "model", config.Model.Model)
 	if pool != nil {
 		go pool.Reconfigure(config)
 	}
 	a.notifyChange(ChangeConfig)
+	if hub != nil {
+		hub.configSaved(a, config)
+	}
 	return nil
 }
 
 func (a *App) MarkRuntimeDirty(reason string) {
+	a.markRuntimeDirty(reason)
+	a.mu.Lock()
+	hub := a.hub
+	a.mu.Unlock()
+	if hub != nil {
+		hub.runtimeDirty(a, reason)
+	}
+}
+
+func (a *App) markRuntimeDirty(reason string) {
 	a.mu.Lock()
 	a.runtimeDirty = true
 	a.runtimeDirtyReason = reason
@@ -418,6 +437,9 @@ func (a *App) appendActivity(record ActivityRecord) {
 	a.mu.Lock()
 	a.activitySeq++
 	record.Seq = a.activitySeq
+	if record.Chat == "" {
+		record.Chat = a.chatID
+	}
 	if !record.IsStreamDelta() {
 		a.activity = append(a.activity, record)
 		if len(a.activity) > activityRingSize {

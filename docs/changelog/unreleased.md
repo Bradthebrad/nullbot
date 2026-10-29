@@ -1,5 +1,18 @@
 # Unreleased
 
+## Chats
+
+- **Several chats at once.** A `Hub` runs chats that share the configuration,
+  projects, tool servers, schedule and vault; each has its own history file,
+  queue, run controls and subagents. Activity records carry their chat.
+- **The main chat steers the others** with `chats_list`, `chat_read`,
+  `chat_send` (send, queue, steer, or steer one subagent), `chat_control` and
+  `chat_open`.
+- **Open chats come back** after a restart (`chats.json`), each continuing
+  its own history. History file names stay unique when chats start in the
+  same second.
+- See [docs/CHATS.md](../CHATS.md).
+
 ## Secrets vault
 
 - **One encrypted vault** at `~/.nullbot/vault/vault.json` (AES-256-GCM)

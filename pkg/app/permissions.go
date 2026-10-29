@@ -266,6 +266,11 @@ var internalBuiltins = map[string]string{
 	"read_skill":            "reads installed skills",
 	"visualize_results":     "reads your responses to visuals",
 	"secrets_list":          "lists saved secrets by name, never their values",
+	"chats_list":            "reads the open chats' state",
+	"chat_read":             "reads another chat",
+	"chat_send":             "sends a request to another chat, which runs it under the same permissions",
+	"chat_control":          "pauses, resumes or stops another chat",
+	"chat_open":             "opens a new chat",
 }
 
 var (

@@ -64,13 +64,16 @@ at once, and the main chat can see and steer the others
 nullbot                                   # terminal UI
 nullbot -p "What changed in export/ this week?"
 git diff | nullbot -p - --json --project acme-web
+nullbot -c -p "Now fix the first one" --timeout 15m -o fix.md   # same conversation
 nullbot serve --app-dir /srv/nullbot      # scheduled tasks + requests on stdin
 ```
 
 Headless runs use the same configuration, projects, permissions, skills, tool
-servers and history as the apps; overrides such as `--project` and `--model`
-apply to one run. Exit status is 0 when the request finished, 1 when it failed
-and 130 when it was interrupted. See [docs/HEADLESS.md](docs/HEADLESS.md).
+servers and history as the apps; overrides such as `--project`, `--model`,
+`--subagent-model`, `--effort` and `--max-subagents` apply to one run, and
+`--continue` carries on the last conversation. Exit status is 0 when the
+request finished, 1 when it failed, 124 when `--timeout` stopped it and 130
+when it was interrupted. See [docs/HEADLESS.md](docs/HEADLESS.md).
 
 <img alt="The NullBot terminal UI: the conversation on the left, every tool call and subagent on the right" src="docs/images/tui.png">
 

@@ -13,8 +13,10 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -43,17 +45,29 @@ Usage:
   nullbot version             print the version
 
 Options (headless):
-  --json             print each reply as JSON: the answer, its status and the
-                     tool calls made
-  --activity         stream progress (tool calls, subagents) to standard error
-  --project NAME     work in this project for the run (its id or name)
-  --model P/MODEL    use this provider/model for the manager for the run
-  --app-dir DIR      use another NullBot folder (default ~/.nullbot, or
-                     NULLBOT_APP_DIR)
+  --json                 print each reply as JSON: the answer, its status, the
+                         tool calls made and the session it was saved to
+  --activity             stream progress (tool calls, subagents) to standard
+                         error
+  --output FILE          write the reply to FILE instead of standard output
+  --project NAME         work in this project for the run (its id or name)
+  --model P/MODEL        use this provider/model for the manager for the run
+  --subagent-model P/MODEL
+                         use this provider/model for subagents for the run
+  --effort LEVEL         reasoning effort: minimal, low, medium, high or xhigh
+  --max-iterations N     at most N model turns per agent
+  --max-subagents N      at most N subagents at once
+  --continue             carry on the most recent conversation
+  --session ID           carry on this saved conversation (see History)
+  --timeout DURATION     stop the request after this long, such as 10m
+  --app-dir DIR          use another NullBot folder (default ~/.nullbot, or
+                         NULLBOT_APP_DIR)
 
 Headless runs use the same configuration, projects, permissions, skills,
-MCP servers and history as the terminal and desktop apps. Exit status is 0
-when the request finished, 1 when it failed, 130 when it was interrupted.
+MCP servers and history as the terminal and desktop apps; options change
+this run only. Exit status is 0 when the request finished, 1 when it
+failed, 2 for a usage error, 124 when --timeout stopped it, 130 when it
+was interrupted.
 `
 
 func main() {
@@ -66,6 +80,11 @@ func main() {
 type options struct {
 	prompt, project, model, appDir string
 	json, activity                 bool
+
+	subagentModel, effort, output, session string
+	maxIterations, maxSubagents            int
+	continueLast                           bool
+	timeout                                time.Duration
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -94,6 +113,16 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	flags.StringVar(&opts.appDir, "app-dir", "", "")
 	flags.BoolVar(&opts.json, "json", false, "")
 	flags.BoolVar(&opts.activity, "activity", false, "")
+	flags.StringVar(&opts.subagentModel, "subagent-model", "", "")
+	flags.StringVar(&opts.effort, "effort", "", "")
+	flags.StringVar(&opts.output, "output", "", "")
+	flags.StringVar(&opts.output, "o", "", "")
+	flags.StringVar(&opts.session, "session", "", "")
+	flags.BoolVar(&opts.continueLast, "continue", false, "")
+	flags.BoolVar(&opts.continueLast, "c", false, "")
+	flags.IntVar(&opts.maxIterations, "max-iterations", 0, "")
+	flags.IntVar(&opts.maxSubagents, "max-subagents", 0, "")
+	flags.DurationVar(&opts.timeout, "timeout", 0, "")
 	showVersion := flags.Bool("version", false, "")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -143,6 +172,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 	})
 
+	if err := checkRunOptions(opts, command, command == "serve" || opts.prompt != "" || promptSet); err != nil {
+		fmt.Fprintln(stderr, "nullbot:", err)
+		return 2
+	}
 	config, err := loadConfig(opts)
 	if err != nil {
 		fmt.Fprintln(stderr, "nullbot:", err)
@@ -150,6 +183,21 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	bot := app.New(config)
 	defer bot.Shutdown()
+	if opts.continueLast || opts.session != "" {
+		id := opts.session
+		if id == "" {
+			latest, ok := app.LatestHistorySession(config)
+			if !ok {
+				fmt.Fprintln(stderr, "nullbot: there is no saved conversation to continue")
+				return 1
+			}
+			id = latest
+		}
+		if err := bot.ContinueSession(id); err != nil {
+			fmt.Fprintln(stderr, "nullbot:", err)
+			return 1
+		}
+	}
 	if command == "serve" || opts.prompt != "" || promptSet {
 		if info := app.VaultStatus(config); info.Exists && !info.Unlocked {
 			fmt.Fprintf(stderr, "nullbot: the secrets vault is locked (%s); saved keys and secrets are unavailable. Set %s or %s.\n", info.Error, vault.PassphraseEnv, vault.PassphraseFileEnv)
@@ -169,7 +217,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			}
 			request = string(data)
 		}
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 		defer stop()
 		return ask(ctx, bot, strings.TrimSpace(request), opts, stdout, stderr)
 	}
@@ -225,7 +273,55 @@ func loadConfig(opts options) (app.Config, error) {
 		}
 		config.Model.Provider, config.Model.Model = provider, model
 	}
+	if opts.subagentModel != "" {
+		provider, model, ok := strings.Cut(opts.subagentModel, "/")
+		if !ok || provider == "" || model == "" {
+			return config, fmt.Errorf("--subagent-model takes provider/model, such as anthropic/claude-haiku-5-5")
+		}
+		config.SubagentModel.Provider, config.SubagentModel.Model = provider, model
+	}
+	if opts.effort != "" {
+		config.Model.ReasoningEffort = app.NormalizeEffort(opts.effort)
+		config.SubagentModel.ReasoningEffort = config.Model.ReasoningEffort
+	}
+	if opts.maxIterations > 0 {
+		config.Agent.MaxIterations = opts.maxIterations
+	}
+	if opts.maxSubagents > 0 {
+		config.Agent.MaxSubagents = opts.maxSubagents
+	}
 	return config, nil
+}
+
+// checkRunOptions refuses options that make no sense, before anything
+// starts.
+func checkRunOptions(opts options, command string, headless bool) error {
+	used := opts.subagentModel != "" || opts.effort != "" || opts.output != "" || opts.session != "" || opts.continueLast ||
+		opts.maxIterations != 0 || opts.maxSubagents != 0 || opts.timeout != 0
+	if used && !headless {
+		return errors.New("run options go with a request (-p) or serve")
+	}
+	if opts.effort != "" {
+		if _, ok := app.EffortByID(opts.effort); !ok {
+			return fmt.Errorf("--effort is one of minimal, low, medium, high or xhigh, not %q", opts.effort)
+		}
+	}
+	if opts.maxIterations < 0 || opts.maxIterations > 500 {
+		return errors.New("--max-iterations is between 1 and 500")
+	}
+	if opts.maxSubagents < 0 || opts.maxSubagents > 32 {
+		return errors.New("--max-subagents is between 1 and 32")
+	}
+	if opts.timeout < 0 {
+		return errors.New("--timeout is a duration such as 90s or 10m")
+	}
+	if opts.continueLast && opts.session != "" {
+		return errors.New("give --continue or --session, not both")
+	}
+	if opts.output != "" && command == "serve" {
+		return errors.New("serve prints each reply as it is ready; --output goes with a single request (-p)")
+	}
+	return nil
 }
 
 // ask runs one request and prints its answer.
@@ -233,6 +329,17 @@ func ask(ctx context.Context, bot *app.App, request string, opts options, stdout
 	if request == "" {
 		fmt.Fprintln(stderr, "nullbot: the request is empty")
 		return 2
+	}
+	if opts.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeoutCause(ctx, opts.timeout, errTimedOut)
+		defer cancel()
+	}
+	// --output: the reply goes to a file, written whole when it is ready.
+	var file *strings.Builder
+	if opts.output != "" {
+		file = &strings.Builder{}
+		stdout = file
 	}
 	tools := []map[string]any{}
 	sink := func(record app.ActivityRecord) {
@@ -253,8 +360,12 @@ func ask(ctx context.Context, bot *app.App, request string, opts options, stdout
 		}
 	}
 	reply, status, err := bot.Ask(ctx, request, sink)
+	timedOut := errors.Is(context.Cause(ctx), errTimedOut)
+	if timedOut {
+		status, err = "timed out", fmt.Errorf("stopped after %s (--timeout)", opts.timeout)
+	}
 	if opts.json {
-		out := map[string]any{"answer": reply.Message, "status": status, "tools": tools}
+		out := map[string]any{"answer": reply.Message, "status": status, "tools": tools, "session": bot.SessionID()}
 		if err != nil {
 			out["error"] = err.Error()
 		}
@@ -266,13 +377,51 @@ func ask(ctx context.Context, bot *app.App, request string, opts options, stdout
 			fmt.Fprintln(stderr, "nullbot:", err)
 		}
 	}
+	if file != nil {
+		if werr := writeOutput(opts.output, file.String()); werr != nil {
+			fmt.Fprintln(stderr, "nullbot:", werr)
+			if err == nil {
+				return 1
+			}
+		}
+	}
 	switch {
+	case timedOut:
+		return 124
 	case status == "canceled" || ctx.Err() != nil:
 		return 130
 	case err != nil:
 		return 1
 	}
 	return 0
+}
+
+var errTimedOut = errors.New("timed out")
+
+// writeOutput replaces path with content, readable by you only: a reply
+// can hold what the agent read.
+func writeOutput(path, content string) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".nullbot-reply-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	_, werr := tmp.WriteString(content)
+	cerr := tmp.Close()
+	if werr != nil || cerr != nil {
+		os.Remove(name)
+		return errors.Join(werr, cerr)
+	}
+	if err := os.Chmod(name, 0o600); err != nil {
+		os.Remove(name)
+		return err
+	}
+	if err := os.Rename(name, path); err != nil {
+		os.Remove(name)
+		return err
+	}
+	return nil
 }
 
 // serve runs scheduled tasks and answers requests from stdin until it is

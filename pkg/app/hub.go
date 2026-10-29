@@ -249,6 +249,33 @@ func (a *App) continueSession(historyID string) error {
 	return nil
 }
 
+// ContinueSession carries on a saved conversation: the next request sees
+// it, and is saved to the same history file. Headless runs use it for
+// --continue and --session.
+func (a *App) ContinueSession(historyID string) error {
+	id, err := ValidHistorySessionID(historyID)
+	if err != nil {
+		return err
+	}
+	return a.continueSession(id)
+}
+
+// SessionID is the history file this App's conversation is saved to.
+func (a *App) SessionID() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.sessionID
+}
+
+// LatestHistorySession is the most recently saved conversation, if any.
+func LatestHistorySession(config Config) (string, bool) {
+	summaries := listHistorySessionSummaries(config, 1)
+	if len(summaries) == 0 {
+		return "", false
+	}
+	return summaries[0].SessionID, true
+}
+
 func chatTitleFromHistory(a *App) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()

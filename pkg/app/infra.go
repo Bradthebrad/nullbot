@@ -160,7 +160,7 @@ func (a *App) PlanInfra(ctx context.Context, req InfraRequest, requester string)
 		}
 	}
 	if spec.Cloud == infra.GCP && spec.Project == "" {
-		spec.Project = gcpProject(cred)
+		spec.Project = gcpAccountProject(cred)
 	}
 	if spec.Cloud == infra.AWS && spec.Region == "" {
 		spec.Region = cred.Public["region"]
@@ -603,6 +603,10 @@ type InfraState struct {
 	// CostHourly is what the live resources cost per hour, approximately.
 	CostHourly float64           `json:"cost_hourly"`
 	Tools      map[string]string `json:"tools"` // aws/gcloud: path, or why not found
+	// Accounts are the aws and gcp secrets plans can use; AccountsError
+	// says why they could not be read (a locked vault).
+	Accounts      []CloudAccount `json:"accounts"`
+	AccountsError string         `json:"accounts_error,omitempty"`
 }
 
 // InfraState reads plans and resources.
@@ -622,6 +626,9 @@ func (a *App) InfraState() (InfraState, error) {
 		if r.Live() {
 			state.CostHourly += r.CostHourly
 		}
+	}
+	if state.Accounts, err = CloudAccounts(config); err != nil {
+		state.Accounts, state.AccountsError = []CloudAccount{}, err.Error()
 	}
 	for _, name := range []string{"aws", "gcloud"} {
 		if path, err := infraCLI(name); err == nil {

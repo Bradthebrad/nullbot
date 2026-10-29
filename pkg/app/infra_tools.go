@@ -17,7 +17,7 @@ import (
 // them. An agent proposes; a person approves; then the agent (or the
 // person) runs the plan.
 
-const infraGuidance = "Cloud infrastructure: infra_status lists what NullBot created on AWS and Google Cloud, with plans and their state. infra_plan proposes machines or buckets as a plan of aws/gcloud commands; nothing runs until the user approves it in NullBot. infra_apply waits for that approval and then runs the plan. infra_destroy proposes removing resources NullBot made. infra_inspect shows what a machine (or this computer) runs and which ports are open. Prefer the smallest machine that does the job, open only the ports needed, from the narrowest addresses (\"my-ip\" is the user's address), and remove what is no longer needed. Credentials are vault secrets of kind aws or gcp, named in the plan; secrets_list shows them.\n"
+const infraGuidance = "Cloud infrastructure: infra_status lists what NullBot created on AWS and Google Cloud, with plans and their state. infra_plan proposes machines or buckets as a plan of aws/gcloud commands; nothing runs until the user approves it in NullBot. infra_apply waits for that approval and then runs the plan. infra_destroy proposes removing resources NullBot made. infra_inspect shows what a machine (or this computer) runs and which ports are open. Prefer the smallest machine that does the job, open only the ports needed, from the narrowest addresses (\"my-ip\" is the user's address), and remove what is no longer needed. Credentials are vault secrets of kind aws or gcp, named in the plan; infra_status lists the ones you may use.\n"
 
 func infraTools(state *App) []agent.Tool {
 	return []agent.Tool{infraStatusTool(state), infraPlanTool(state), infraApplyTool(state), infraDestroyTool(state), infraInspectTool(state)}
@@ -45,7 +45,7 @@ func infraInspectTool(state *App) agent.Tool {
 func infraStatusTool(state *App) agent.Tool {
 	return agent.ToolFunc{
 		Name:        "infra_status",
-		Description: "List the cloud resources NullBot created (machines with their addresses, buckets, firewall rules), their state and hourly cost, and recent plans with their state.",
+		Description: "List the cloud resources NullBot created (machines with their addresses, buckets, firewall rules), their state and hourly cost, recent plans with their state, and the cloud accounts you may plan with.",
 		Schema:      agent.ToolSchema(map[string]any{}),
 		Func: func(ctx context.Context, args map[string]any) (string, error) {
 			st, err := state.InfraState()
@@ -70,7 +70,20 @@ func infraStatusTool(state *App) agent.Tool {
 					live = append(live, r)
 				}
 			}
-			return prettyJSON(map[string]any{"resources": live, "cost_hourly": st.CostHourly, "plans": plans, "tools": st.Tools}), nil
+			// The accounts agents may plan with, by name.
+			type account struct {
+				Name    string `json:"name"`
+				Cloud   string `json:"cloud"`
+				Region  string `json:"region,omitempty"`
+				Project string `json:"project,omitempty"`
+			}
+			accounts := []account{}
+			for _, a := range st.Accounts {
+				if a.AgentUse {
+					accounts = append(accounts, account{a.Name, a.Cloud, a.Region, a.Project})
+				}
+			}
+			return prettyJSON(map[string]any{"resources": live, "cost_hourly": st.CostHourly, "plans": plans, "tools": st.Tools, "accounts": accounts}), nil
 		},
 	}
 }

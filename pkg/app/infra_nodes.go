@@ -586,11 +586,36 @@ func (a *App) ConnectNodeOllama(id string) (LocalEndpoint, error) {
 	if err != nil {
 		return LocalEndpoint{}, err
 	}
-	name := strings.ToLower(t.Name)
-	if !localIDPattern.MatchString(name) {
-		name = "node"
+	id, previous, err := nodeServerID(a.Config(), t.Name)
+	if err == nil {
+		var e LocalEndpoint
+		if e, err = a.SaveLocalEndpoint(LocalEndpoint{ID: id, Name: t.Name + " (cloud)", Kind: "ollama", BaseURL: fmt.Sprintf("http://127.0.0.1:%d", t.LocalPort)}, previous); err == nil {
+			return e, nil
+		}
 	}
-	return a.SaveLocalEndpoint(LocalEndpoint{ID: name, Name: t.Name + " (cloud)", Kind: "ollama", BaseURL: fmt.Sprintf("http://127.0.0.1:%d", t.LocalPort)}, name)
+	CloseTunnel(t.ID)
+	return LocalEndpoint{}, err
+}
+
+// nodeServerID is the local model server name for a machine's tunnel, and
+// the server it replaces: reconnecting updates the one added last time,
+// while a server of your own with the same name is left alone.
+func nodeServerID(config Config, machine string) (id, previous string, err error) {
+	title := machine + " (cloud)"
+	id = strings.ToLower(machine)
+	if !localIDPattern.MatchString(id) {
+		id = "node"
+	}
+	if e, ok := localEndpointByID(config, id); ok && e.Name != title {
+		id = strings.TrimSuffix(id[:min(len(id), 26)], "-") + "-cloud"
+		if e, ok := localEndpointByID(config, id); ok && e.Name != title {
+			return "", "", fmt.Errorf("local model servers %s and %s are already set up; remove one to connect %s", strings.ToLower(machine), id, machine)
+		}
+	}
+	if _, ok := localEndpointByID(config, id); ok {
+		previous = id
+	}
+	return id, previous, nil
 }
 
 // procNetListeners reads listening TCP sockets from /proc/net/tcp{,6}, and

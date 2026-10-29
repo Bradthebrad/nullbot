@@ -222,3 +222,23 @@ done
 		t.Fatalf("tunnel: %v", err)
 	}
 }
+
+func TestConnectingANodeNeverReplacesYourServer(t *testing.T) {
+	config := Config{}
+	if id, previous, err := nodeServerID(config, "gpu-box"); err != nil || id != "gpu-box" || previous != "" {
+		t.Fatalf("first connect %q %q %v", id, previous, err)
+	}
+	config.LocalEndpoints = []LocalEndpoint{{ID: "gpu-box", Name: "gpu-box (cloud)", Kind: "ollama"}}
+	if id, previous, err := nodeServerID(config, "gpu-box"); err != nil || id != "gpu-box" || previous != "gpu-box" {
+		t.Fatalf("reconnect %q %q %v", id, previous, err)
+	}
+	// Your own server named like the machine stays; the tunnel gets its own.
+	config.LocalEndpoints = []LocalEndpoint{{ID: "ollama", Kind: "ollama"}}
+	if id, previous, err := nodeServerID(config, "Ollama"); err != nil || id != "ollama-cloud" || previous != "" {
+		t.Fatalf("clash %q %q %v", id, previous, err)
+	}
+	config.LocalEndpoints = append(config.LocalEndpoints, LocalEndpoint{ID: "ollama-cloud", Kind: "vllm"})
+	if _, _, err := nodeServerID(config, "Ollama"); err == nil {
+		t.Fatal("a server was replaced")
+	}
+}

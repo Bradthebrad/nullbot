@@ -70,16 +70,18 @@ func runCodexExec(ctx context.Context, config Config, model, prompt string) (str
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return "", lc.UsageMetadata{}, codexRunError(command, err, stderr.String())
+		return "", lc.UsageMetadata{}, codexRunError(command, err, RedactSecrets(config, stderr.String()))
 	}
 	text, usage := parseCodexJSONL(stdout.Bytes())
 	if strings.TrimSpace(text) == "" {
 		text = strings.TrimSpace(stdout.String())
 	}
 	if strings.TrimSpace(text) == "" {
-		return "", usage, fmt.Errorf("codex model: no final response returned%s", stderrSuffix(stderr.String()))
+		return "", usage, fmt.Errorf("codex model: no final response returned%s", stderrSuffix(RedactSecrets(config, stderr.String())))
 	}
-	return text, usage, nil
+	// Codex runs commands of its own; what it says goes through the same
+	// filter as every tool result.
+	return RedactSecrets(config, text), usage, nil
 }
 
 func codexPromptFromMessages(messages []lc.BaseMessage, tools []tcagent.Tool) string {
@@ -169,7 +171,16 @@ func codexCommand() (string, error) {
 }
 
 func codexCommandEnv(config Config) []string {
-	env := os.Environ()
+	var env []string
+	for _, item := range os.Environ() {
+		key, _, _ := strings.Cut(item, "=")
+		// Codex is an agent with a shell: like a secret_run command, it gets
+		// no credential from NullBot's environment, except its own key.
+		if commandCredentialEnv(key) && !strings.EqualFold(key, "CODEX_API_KEY") {
+			continue
+		}
+		env = append(env, item)
+	}
 	if strings.TrimSpace(config.AppDir) != "" {
 		env = append(env, "NULLBOT_APP_DIR="+config.AppDir)
 	}

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/Bradthebrad/nullbot/pkg/app"
 )
 
 func runCLI(t *testing.T, stdin string, args ...string) (int, string, string) {
@@ -53,5 +55,56 @@ func TestHeadlessCommands(t *testing.T) {
 		if code, _, _ := runCLI(t, "", "--app-dir", dir, "-p", empty); code != 2 {
 			t.Fatalf("empty request %q: %d", empty, code)
 		}
+	}
+}
+
+func TestSecretsCommands(t *testing.T) {
+	// A passphrase from the environment, as on a server; it also keeps the
+	// test away from any real keychain.
+	t.Setenv("NULLBOT_VAULT_PASSPHRASE", "test passphrase for the cli")
+	t.Setenv("NULLBOT_APP_DIR", "")
+	dir := t.TempDir()
+	token := "ghp_cliTestToken0000000000"
+	if code, out, errOut := runCLI(t, token+"\n", "secrets", "set", "github", "--kind", "github_token", "--agent", "--app-dir", dir); code != 0 || !strings.Contains(out, "Provides GH_TOKEN") {
+		t.Fatalf("set: %d %q %q", code, out, errOut)
+	}
+	code, out, _ := runCLI(t, "", "--app-dir", dir, "secrets")
+	if code != 0 || !strings.Contains(out, "github") || !strings.Contains(out, "agents may use") || strings.Contains(out, token) {
+		t.Fatalf("list: %d %q", code, out)
+	}
+	if code, out, _ := runCLI(t, "", "--app-dir="+dir, "vault"); code != 0 || !strings.Contains(out, "protected by a passphrase") {
+		t.Fatalf("vault: %d %q", code, out)
+	}
+	aws := `{"access_key_id":"AKIACLITEST000000000","secret_access_key":"cli/secret/access/key/000000000000000"}`
+	if code, out, errOut := runCLI(t, aws, "secrets", "set", "aws-prod", "--kind", "aws", "--set", "region=eu-west-1", "--app-dir", dir); code != 0 || !strings.Contains(out, "AWS_REGION") {
+		t.Fatalf("aws: %d %q %q", code, out, errOut)
+	}
+	if code, out, _ := runCLI(t, "", "secrets", "ssh-keygen", "deploy", "--host", "github.com", "--app-dir", dir); code != 0 || !strings.Contains(out, "ssh-ed25519 ") {
+		t.Fatalf("ssh-keygen: %d %q", code, out)
+	}
+	if code, _, errOut := runCLI(t, "", "secrets", "set", "x", "--app-dir", dir); code != 1 || !strings.Contains(errOut, "--kind") {
+		t.Fatalf("no kind: %d %q", code, errOut)
+	}
+	// Rotating a token keeps who may use it.
+	if code, _, errOut := runCLI(t, "ghp_rotated0000000000000\n", "--app-dir", dir, "secrets", "set", "github", "--kind", "github_token"); code != 0 {
+		t.Fatalf("rotate: %d %q", code, errOut)
+	}
+	if _, out, _ := runCLI(t, "", "secrets", "--app-dir", dir, "list"); !strings.Contains(out, "agents may use") {
+		t.Fatalf("rotating dropped agent use: %q", out)
+	}
+	if code, _, errOut := runCLI(t, "", "secrets", "set", "x", "--kind", "github_token", "--set", "token=ghp_inargv", "--app-dir", dir); code != 1 || !strings.Contains(errOut, "secret value") {
+		t.Fatalf("--set of a secret field: %d %q", code, errOut)
+	}
+	if code, out, _ := runCLI(t, "", "secrets", "remove", "github", "--app-dir", dir); code != 0 || !strings.Contains(out, "Removed github") {
+		t.Fatalf("remove: %d %q", code, out)
+	}
+	if code, out, _ := runCLI(t, "", "secrets", "kinds"); code != 0 || !strings.Contains(out, "github_token") {
+		t.Fatalf("kinds: %d %q", code, out)
+	}
+	// Without the passphrase the vault stays shut.
+	t.Setenv("NULLBOT_VAULT_PASSPHRASE", "")
+	app.LockVault(app.Config{AppDir: dir})
+	if code, _, errOut := runCLI(t, "", "--app-dir", dir, "secrets"); code != 1 || !strings.Contains(errOut, "locked") {
+		t.Fatalf("locked: %d %q", code, errOut)
 	}
 }

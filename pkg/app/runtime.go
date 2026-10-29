@@ -357,6 +357,9 @@ func subagentSystemPrompt(config Config, name, task string, tools []tcagent.Tool
 			fmt.Fprintf(&b, "- %s: %s\n", def.Name, def.Description)
 		}
 	}
+	if hasTool(tools, "secret_run") {
+		b.WriteString("Secrets: credentials the user saved (API keys, GitHub tokens, SSH keys, cloud keys) are in NullBot's vault. You never see their values. secrets_list shows what exists; secret_run runs a command with chosen secrets in its environment and removes their values from the output. Never ask the user to paste a credential into the chat, never print or write one to a file, and never send one anywhere but the service it belongs to. If a secret you need is missing, ask the user to add it in Settings > Secrets.\n")
+	}
 	if hasTool(tools, "visualize") {
 		b.WriteString(visualizeGuidance)
 	}
@@ -626,6 +629,10 @@ func (a *App) loadMCPTools(ctx context.Context, config Config) ([]tcagent.Tool, 
 func mcpRuntimeEnv(config Config, id string, entry MCPEntry) map[string]string {
 	env := scopedMCPBaseEnv(entry)
 	addScopedServiceAccounts(config, id, entry, env)
+	// Secrets the user gave this server in Settings > Secrets.
+	for k, v := range serverSecretEnv(config, id) {
+		env[k] = v
+	}
 	if shouldPassWebEnvToMCP(id, entry) {
 		keys, _ := LoadAPIKeys(config)
 		if key := strings.TrimSpace(keys.ForProvider("brave")); key != "" {

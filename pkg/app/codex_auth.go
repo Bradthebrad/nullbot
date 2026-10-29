@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Bradthebrad/nullbot/pkg/vault"
 )
 
 const (
@@ -300,14 +302,19 @@ func codexStoreFromTokenResponse(out map[string]any) (codexAuthStore, error) {
 	}, nil
 }
 
+// loadCodexAuth reads the ChatGPT sign-in from the vault, or from the legacy
+// plain-text file on a system that cannot encrypt.
 func loadCodexAuth(config Config) (codexAuthStore, error) {
-	data, err := os.ReadFile(CodexAuthPath(config))
-	if err != nil {
-		return codexAuthStore{}, err
-	}
 	var auth codexAuthStore
-	if err := json.Unmarshal(data, &auth); err != nil {
+	payload, err := loadSecretsPayload(config)
+	if err == nil && payload.System.CodexAuth != nil {
+		auth = *payload.System.CodexAuth
+	} else if legacy, lerr := readLegacyCodexAuth(config); lerr == nil {
+		auth = legacy
+	} else if err != nil {
 		return codexAuthStore{}, err
+	} else {
+		return codexAuthStore{}, os.ErrNotExist
 	}
 	if auth.BaseURL == "" {
 		auth.BaseURL = defaultCodexBackendURL
@@ -328,6 +335,21 @@ func saveCodexAuth(config Config, auth codexAuthStore) error {
 	if auth.LastRefresh.IsZero() {
 		auth.LastRefresh = time.Now().UTC()
 	}
+	err := updateSecrets(config, func(payload *vaultPayload) error {
+		stored := auth
+		payload.System.CodexAuth = &stored
+		return nil
+	})
+	if err == nil {
+		if _, statErr := os.Lstat(CodexAuthPath(config)); statErr == nil {
+			removeLegacyFile(CodexAuthPath(config))
+		}
+		return nil
+	}
+	if !errors.Is(err, vault.ErrNoKeychain) {
+		return err
+	}
+	// No way to encrypt on this system: keep the old plain-text file.
 	if err := os.MkdirAll(filepath.Dir(CodexAuthPath(config)), 0700); err != nil {
 		return err
 	}
@@ -335,7 +357,10 @@ func saveCodexAuth(config Config, auth codexAuthStore) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(CodexAuthPath(config), append(data, '\n'), 0600)
+	defer clear(data)
+	err = os.WriteFile(CodexAuthPath(config), append(data, '\n'), 0600)
+	invalidateRedactor(config)
+	return err
 }
 
 func importCodexCLIAuth() (codexAuthStore, error) {

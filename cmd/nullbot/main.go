@@ -20,6 +20,7 @@ import (
 
 	"github.com/Bradthebrad/nullbot/internal/tui"
 	"github.com/Bradthebrad/nullbot/pkg/app"
+	"github.com/Bradthebrad/nullbot/pkg/vault"
 )
 
 // version is set at build time: -ldflags "-X main.version=v0.5.0".
@@ -33,6 +34,8 @@ Usage:
   nullbot -p - < request.txt  read the request from standard input
   nullbot serve               run headless: scheduled tasks run, and each line
                               on standard input is a request
+  nullbot secrets             list saved secrets; nullbot secrets help for more
+  nullbot vault               show how the secrets vault is protected
   nullbot version             print the version
 
 Options (headless):
@@ -50,6 +53,9 @@ when the request finished, 1 when it failed, 130 when it was interrupted.
 `
 
 func main() {
+	// Keep the vault passphrase in memory only; nothing NullBot starts
+	// inherits it.
+	vault.TakeEnvPassphrase()
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
@@ -59,6 +65,10 @@ type options struct {
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	// nullbot [--app-dir DIR] vault|secrets ... has its own options.
+	if appDir, rest, ok := vaultCommand(args); ok {
+		return runVaultCLI(rest[0], rest[1:], appDir, stdin, stdout, stderr)
+	}
 	command := ""
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		command, args = args[0], args[1:]
@@ -130,6 +140,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	bot := app.New(config)
 	defer bot.Shutdown()
+	if command == "serve" || opts.prompt != "" || promptSet {
+		if info := app.VaultStatus(config); info.Exists && !info.Unlocked {
+			fmt.Fprintf(stderr, "nullbot: the secrets vault is locked (%s); saved keys and secrets are unavailable. Set %s or %s.\n", info.Error, vault.PassphraseEnv, vault.PassphraseFileEnv)
+		}
+	}
 
 	switch {
 	case command == "serve":
@@ -149,6 +164,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return ask(ctx, bot, strings.TrimSpace(request), opts, stdout, stderr)
 	}
 
+	// A passphrase-protected vault is unlocked before the terminal UI starts.
+	if err := unlockFromTerminal(config, newCLIInput(stdin, stderr), stderr, true); err != nil {
+		fmt.Fprintln(stderr, "nullbot:", err)
+		return 1
+	}
 	bot.StartScheduler()
 	defer bot.StopScheduler()
 	program := tea.NewProgram(tui.New(bot), tea.WithAltScreen(), tea.WithMouseCellMotion())
@@ -322,4 +342,28 @@ func oneLine(s string, max int) string {
 		s = s[:max] + "…"
 	}
 	return s
+}
+
+// vaultCommand recognizes "vault ..." and "secrets ...", with an optional
+// --app-dir before them.
+func vaultCommand(args []string) (string, []string, bool) {
+	appDir := ""
+	for len(args) > 0 {
+		switch {
+		case args[0] == "--app-dir" || args[0] == "-app-dir":
+			if len(args) < 2 {
+				return "", nil, false
+			}
+			appDir, args = args[1], args[2:]
+			continue
+		case strings.HasPrefix(args[0], "--app-dir=") || strings.HasPrefix(args[0], "-app-dir="):
+			appDir, args = args[0][strings.Index(args[0], "=")+1:], args[1:]
+			continue
+		}
+		break
+	}
+	if len(args) > 0 && (args[0] == "vault" || args[0] == "secrets") {
+		return appDir, args, true
+	}
+	return "", nil, false
 }

@@ -28,8 +28,10 @@ there in the others.
 within their permissions, subagents, plans, history, skills, the Marketplace
 and visuals. Anything heavier, such as running commands, browsing the web,
 reading mail or generating images, is a separate tool server you choose to
-install, can read the source of, and can turn off. The core stays small enough
-to audit.
+install, can read the source of, and can turn off. The one command runner in
+the core is `secret_run`, which exists so saved secrets never leave NullBot:
+it runs only with secrets you allowed, in projects that allow running
+programs. The core stays small enough to audit.
 
 **Two ways to talk.** Most work is text. Some questions are easier to answer by
 pointing: which of three headlines, where the scratches are on a photo, which
@@ -123,6 +125,7 @@ with its size; the full history stays searchable. See
 | History | `history_search`, `history_session_read`, `history_sessions`, `history_recent` |
 | Skills | `skills_list`, `skill_read`, `skill_references`, `create_skill` |
 | Marketplace and servers | `market_list_available`, `market_read_package`, `market_install_package`, `market_refresh`, `mcp_list_servers`, `mcp_enable_server`, `mcp_disable_server`, `mcp_remove_server` |
+| Secrets | `secrets_list` (names only), `secret_run` (a command with secrets in its environment, values removed from its output) |
 | NullBot itself | `config_dir_list`, `config_dir_read`, `logs_recent` |
 
 ### Tool servers
@@ -145,6 +148,26 @@ Accounts for the email, drives and messages servers are added in the
 desktop app (Settings > Accounts), kept with Windows DPAPI, and passed only to
 the matching server installed from the Marketplace. See
 [docs/SERVICE_ACCOUNTS.md](docs/SERVICE_ACCOUNTS.md).
+
+### Secrets
+
+API keys, the ChatGPT sign-in, GitHub tokens, SSH keys and AWS or Google Cloud
+credentials live in one encrypted vault, protected by Windows DPAPI, the macOS
+keychain, the Linux Secret Service, or a passphrase on servers. Agents never
+see a value: `secrets_list` shows names and what each provides, and
+`secret_run` runs a command with the secrets it names in its environment (a
+GitHub token signs git in over HTTPS; an SSH key becomes `GIT_SSH_COMMAND`),
+then removes their values from the output. Every other tool's result is
+filtered the same way. A secret reaches agents only once you allow it, and a
+tool server only if you name it.
+
+```sh
+nullbot secrets set github --kind github_token --agent   # asks for the token without echo
+nullbot secrets ssh-keygen deploy --host github.com --agent
+nullbot secrets github github                            # check who the token signs in as
+```
+
+See [docs/SECRETS.md](docs/SECRETS.md).
 
 ### Skills
 
@@ -179,6 +202,7 @@ per tool on the Tools page. See [docs/PERMISSIONS.md](docs/PERMISSIONS.md).
 | `/help` | Show commands |
 | `/models`, `/effort` | Choose provider and model; choose reasoning effort |
 | `/accounts` | API key and subscription status; `/accounts codex login` signs in to a ChatGPT subscription |
+| `/secrets` | Saved secrets (never their values) and how the vault is protected |
 | `/agents`, `/tasks`, `/thoughts` | Live manager and subagent dashboard; inspect or cancel tasks; reasoning and progress |
 | `/plan` | Open, focus or execute a plan |
 | `/schedule` | Create, list, run and cancel scheduled tasks (`in 2h`, `at 09:00`, `every 24h`) |
@@ -211,7 +235,7 @@ per tool on the Tools page. See [docs/PERMISSIONS.md](docs/PERMISSIONS.md).
 ```text
 ~/.nullbot/                 (or NULLBOT_APP_DIR)
   config.json               settings, models, projects and their permissions
-  api/keys.json             API keys
+  vault/vault.json          encrypted secrets: API keys, sign-ins, tokens, keys
   history/                  every message and tool call, by session
   logs/nullbot.log          runtime log
   market/                   Marketplace catalog
@@ -263,6 +287,7 @@ See [docs/ROADMAP.md](docs/ROADMAP.md).
 | Steering and stopping runs | [docs/RUNS.md](docs/RUNS.md) |
 | Context and compaction | [docs/CONTEXT.md](docs/CONTEXT.md) |
 | History and search | [docs/HISTORY.md](docs/HISTORY.md) |
+| Secrets and the vault | [docs/SECRETS.md](docs/SECRETS.md) |
 | Service accounts | [docs/SERVICE_ACCOUNTS.md](docs/SERVICE_ACCOUNTS.md) |
 | Activity events API | [docs/ACTIVITY_API.md](docs/ACTIVITY_API.md) |
 | Marketplace server lifecycle | [docs/MARKETPLACE_MCP_LIFECYCLE_SPEC.md](docs/MARKETPLACE_MCP_LIFECYCLE_SPEC.md) |

@@ -11,6 +11,9 @@ const (
 	ChangeSchedules   = "schedules"
 	// ChangeVisuals: a visual was shown, answered, or stopped being waited on.
 	ChangeVisuals = "visuals"
+	// ChangeSecrets: a secret was added, changed or removed, or the vault
+	// was unlocked or moved to another protection.
+	ChangeSecrets = "secrets"
 )
 
 // SubscribeChanges registers fn to be told when a snapshot changes. fn must

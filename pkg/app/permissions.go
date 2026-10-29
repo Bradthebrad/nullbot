@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -152,6 +153,7 @@ var builtinRequirements = map[string]ToolRequirement{
 	"mcp_disable_server":     {Capability: CapWrite, Reason: "changes tool server configuration"},
 	"mcp_remove_server":      {Capability: CapDelete, Reason: "removes a tool server"},
 	"visualize":              {Capability: CapRead, Reason: "shows you a visual and records how you respond"},
+	"secret_run":             {Capability: CapExecute, Reason: "runs a command with saved secrets in its environment"},
 }
 
 // officialServerRequirements classifies the tools of NullBot's own tool
@@ -263,6 +265,7 @@ var internalBuiltins = map[string]string{
 	"subagent_wait":         "waits for a subagent",
 	"read_skill":            "reads installed skills",
 	"visualize_results":     "reads your responses to visuals",
+	"secrets_list":          "lists saved secrets by name, never their values",
 }
 
 var (
@@ -843,6 +846,14 @@ func (t *policyTool) CallWithMeta(ctx context.Context, args map[string]any) (str
 	}
 	for k, v := range innerMeta {
 		meta[k] = v
+	}
+	// No tool result reaches a model with a saved secret in it.
+	config := t.state.Config()
+	out = RedactSecrets(config, out)
+	if err != nil {
+		if clean := RedactSecrets(config, err.Error()); clean != err.Error() {
+			err = errors.New(clean)
+		}
 	}
 	return out, meta, err
 }

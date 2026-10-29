@@ -12,6 +12,8 @@ import (
 
 	tcagent "github.com/Bradthebrad/tinychain/agent"
 	"github.com/Bradthebrad/tinychain/mcp"
+
+	"github.com/Bradthebrad/nullbot/pkg/vault"
 )
 
 func TestMain(m *testing.M) {
@@ -19,6 +21,8 @@ func TestMain(m *testing.M) {
 		runTestMCPServer()
 		return
 	}
+	// Tests never touch the real keychain.
+	vaultOptions = vault.Options{Keyring: testKeyring, Passphrase: func() (string, bool) { return "", false }, Iterations: 1000}
 	os.Exit(m.Run())
 }
 

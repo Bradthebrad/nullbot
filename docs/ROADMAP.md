@@ -43,10 +43,14 @@ an environment for a task and remove it afterwards. Planned rules:
 - every create, change and delete is shown and confirmed before it runs, with
   the expected cost where the provider reports one;
 - everything NullBot creates is tagged, so it can be listed and removed;
-- credentials are scoped accounts in Settings > Accounts, passed only to the
-  matching server, as the email, drive and message servers do today.
+- credentials come from the vault ([SECRETS.md](SECRETS.md)): an `aws` or
+  `gcp` secret is handed to the provider's tools for the call and never shown
+  to the agent.
 
 ## Also queued
 
-- Releases of the email, drives and messages servers, so the Marketplace can
-  install them (their code is on `main` and tested against mocked providers).
+- Sessions: several conversations at once in tabs or side-by-side splits, and
+  a main conversation that watches every session and its subagents and can
+  steer them.
+- A Claude Code provider that runs your own installed `claude` command with
+  your own sign-in and streams what it does into NullBot.

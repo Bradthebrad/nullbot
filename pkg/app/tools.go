@@ -44,6 +44,8 @@ func BuiltinToolsFor(config Config, state *App, includeSpawner bool) []agent.Too
 		mcpRemoveServerTool(state),
 		marketListTool(config),
 		mcpListTool(config),
+		secretsListTool(config, state),
+		secretRunTool(state),
 	}
 	if includeSpawner {
 		tools = append(tools, spawnSubagentTool(state), subagentStatusTool(state), subagentWaitTool(state))
@@ -887,6 +889,22 @@ func safeConfigPath(root, rel string) (string, error) {
 	rootClean := filepath.Clean(root)
 	if full != rootClean && !strings.HasPrefix(full, rootClean+string(os.PathSeparator)) {
 		return "", fmt.Errorf("path escapes config directory")
+	}
+	// Credentials stay out of the agent's reach, even encrypted: the vault,
+	// legacy key files and the vault's lock.
+	if inner, err := filepath.Rel(rootClean, full); err == nil {
+		parts := strings.Split(filepath.ToSlash(inner), "/")
+		for _, part := range parts {
+			// Windows reads "api." and "api " as "api", and "api:x" as a
+			// stream of it; no settings file needs either form.
+			if strings.Contains(part, ":") {
+				return "", fmt.Errorf("%q is not a settings file name", part)
+			}
+		}
+		first := strings.ToLower(strings.TrimRight(parts[0], ". "))
+		if first == "vault" || first == "api" {
+			return "", fmt.Errorf("%s holds credentials; agents use secrets through secrets_list and secret_run", first)
+		}
 	}
 	return full, nil
 }

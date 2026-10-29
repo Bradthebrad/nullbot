@@ -64,6 +64,9 @@ var claudeSessions = struct {
 
 const maxClaudeSessions = 500
 
+// claudeAfterResult is how long the CLI may stay open after its answer.
+var claudeAfterResult = 15 * time.Second
+
 func rememberClaudeSession(key, id string) {
 	if key == "" || id == "" {
 		return
@@ -80,10 +83,22 @@ func rememberClaudeSession(key, id string) {
 	}
 }
 
-func claudeSessionFor(key string) string {
+// takeClaudeSession returns the session for a conversation and forgets it.
+func takeClaudeSession(key string) string {
 	claudeSessions.Lock()
 	defer claudeSessions.Unlock()
-	return claudeSessions.ids[key]
+	id, ok := claudeSessions.ids[key]
+	if !ok {
+		return ""
+	}
+	delete(claudeSessions.ids, key)
+	for i, k := range claudeSessions.order {
+		if k == key {
+			claudeSessions.order = append(claudeSessions.order[:i], claudeSessions.order[i+1:]...)
+			break
+		}
+	}
+	return id
 }
 
 // claudeConversationKey identifies the visible conversation: who said what,
@@ -100,23 +115,29 @@ func claudeConversationKey(scope string, messages []lc.BaseMessage) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// claudePlan is how one request runs: the folder, the tools and the
-// permission mode, from the primary project's permission.
+// claudePlan is how one request runs: the folders, the tools and the
+// permission mode, from the permissions of the projects involved.
 type claudePlan struct {
 	Dir     string
 	AddDirs []string
 	Tools   []string
 	Allowed []string
-	Mode    string
+	// Denied are rules for files Claude may read but not change: projects
+	// inside the folders that allow less than the folder's own project.
+	Denied []string
+	Mode   string
 }
 
 func claudePlanFor(config Config) (claudePlan, error) {
 	plan := claudePlan{}
-	caps := []Capability{CapRead}
+	has := map[Capability]bool{CapRead: true}
 	primary, ok := PrimaryProject(config)
 	if ok && primary.Path != "" {
 		plan.Dir = primary.Path
-		caps = ProjectCapabilities(primary)
+		has = map[Capability]bool{}
+		for _, c := range ProjectCapabilities(primary) {
+			has[c] = true
+		}
 	} else if root, err := workspaceRoot(config); err == nil {
 		plan.Dir = root
 	} else {
@@ -125,17 +146,80 @@ func claudePlanFor(config Config) (claudePlan, error) {
 	if info, err := os.Stat(plan.Dir); err != nil || !info.IsDir() {
 		return plan, fmt.Errorf("Claude CLI: the project folder %s is not available", plan.Dir)
 	}
-	has := map[Capability]bool{}
-	for _, c := range caps {
-		has[c] = true
+	dir, err := canonicalPath(plan.Dir)
+	if err != nil {
+		return plan, fmt.Errorf("Claude CLI: the project folder %s is not available: %w", plan.Dir, err)
 	}
-	// Reading inside the project folders needs no approval; reading
-	// elsewhere would, and nobody is there to give it, so it is refused.
+	type root struct {
+		project Project
+		path    string
+	}
+	var roots []root
+	for _, p := range effectiveProjects(config) {
+		if strings.TrimSpace(p.Path) == "" {
+			continue
+		}
+		if path, err := canonicalPath(p.Path); err == nil {
+			roots = append(roots, root{p, path})
+		}
+	}
+	// Every project holding the folder limits what may happen in it, as it
+	// does for NullBot's own tools.
+	for _, r := range roots {
+		if pathWithin(r.path, dir) {
+			for c := range has {
+				if !ProjectAllows(r.project, c) {
+					delete(has, c)
+				}
+			}
+		}
+	}
+	// Other projects join only when they allow everything the folder's
+	// does, since the CLI applies one set of tools to every folder.
+	folders := []string{dir}
+	for _, r := range roots {
+		if pathWithin(dir, r.path) || pathWithin(r.path, dir) {
+			continue
+		}
+		allows := true
+		for c := range has {
+			if !ProjectAllows(r.project, c) {
+				allows = false
+			}
+		}
+		if info, err := os.Stat(r.path); allows && err == nil && info.IsDir() {
+			plan.AddDirs = append(plan.AddDirs, r.path)
+			folders = append(folders, r.path)
+		}
+	}
+	// A project inside those folders that allows less keeps its limits:
+	// its files cannot be changed, and if it may not run programs, nothing
+	// may, because a command cannot be held to some folders.
+	for _, r := range roots {
+		inside := false
+		for _, f := range folders {
+			if r.path != f && pathWithin(f, r.path) {
+				inside = true
+			}
+		}
+		if !inside {
+			continue
+		}
+		if has[CapWrite] && !ProjectAllows(r.project, CapWrite) {
+			rule := claudePathRule(r.path)
+			plan.Denied = append(plan.Denied, "Edit("+rule+")", "Write("+rule+")", "NotebookEdit("+rule+")")
+		}
+		if has[CapExecute] && !ProjectAllows(r.project, CapExecute) {
+			delete(has, CapExecute)
+		}
+	}
+	// Reading inside the folders needs no approval; reading elsewhere
+	// would, and nobody is there to give it, so it is refused.
 	plan.Tools = []string{"Read", "Grep", "Glob", "WebFetch", "WebSearch", "TodoWrite"}
 	plan.Allowed = []string{"WebFetch", "WebSearch", "TodoWrite"}
 	plan.Mode = "dontAsk"
 	if has[CapWrite] {
-		// Edits inside the project folders are approved; others are refused.
+		// Edits inside the folders are approved; others are refused.
 		plan.Tools = append(plan.Tools, "Edit", "Write", "NotebookEdit")
 		plan.Mode = "acceptEdits"
 	}
@@ -143,23 +227,21 @@ func claudePlanFor(config Config) (claudePlan, error) {
 		plan.Tools = append(plan.Tools, "Bash")
 		plan.Allowed = append(plan.Allowed, "Bash")
 	}
-	// Other projects join only when they allow everything the primary one
-	// does, since the CLI applies one set of tools to every folder.
-	for _, p := range effectiveProjects(config) {
-		if p.ID == primary.ID || strings.TrimSpace(p.Path) == "" {
-			continue
-		}
-		allows := true
-		for c := range has {
-			if !ProjectAllows(p, c) {
-				allows = false
-			}
-		}
-		if info, err := os.Stat(p.Path); allows && err == nil && info.IsDir() {
-			plan.AddDirs = append(plan.AddDirs, p.Path)
-		}
+	if !has[CapWrite] {
+		plan.Denied = nil
 	}
+	plan.Dir = dir
 	return plan, nil
+}
+
+// claudePathRule is a permission rule pattern for everything under path:
+// "//abs/path/**", with a Windows drive written as /c/.
+func claudePathRule(path string) string {
+	slashed := filepath.ToSlash(path)
+	if vol := filepath.VolumeName(path); len(vol) == 2 && vol[1] == ':' {
+		slashed = "/" + strings.ToLower(vol[:1]) + filepath.ToSlash(path[2:])
+	}
+	return "//" + strings.Trim(slashed, "/") + "/**"
 }
 
 // claudeEnv is NullBot's environment without credentials, like a secret_run
@@ -176,9 +258,13 @@ func claudeEnv() []string {
 		if commandCredentialEnv(key) && upper != "CLAUDE_CODE_OAUTH_TOKEN" {
 			continue
 		}
+		if upper == "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS" {
+			continue
+		}
 		env = append(env, item)
 	}
-	return env
+	// A background command would keep the run open after Claude answers.
+	return append(env, "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1")
 }
 
 func (m ClaudeCLIModel) Call(ctx context.Context, messages []lc.BaseMessage, _ []tcagent.Tool) (lc.BaseMessage, error) {
@@ -205,9 +291,12 @@ func (m ClaudeCLIModel) Call(ctx context.Context, messages []lc.BaseMessage, _ [
 	if cut == len(messages) {
 		return lc.BaseMessage{}, errors.New("Claude CLI: there is no request to send")
 	}
+	// A session is continued once: taking it means a retry, a second chat
+	// with the same history or a concurrent request starts afresh instead
+	// of joining a session that holds turns it cannot see.
 	resume := ""
 	if cut > 0 {
-		resume = claudeSessionFor(claudeConversationKey(scope, messages[:cut]))
+		resume = takeClaudeSession(claudeConversationKey(scope, messages[:cut]))
 	}
 	var prompt string
 	if resume != "" {
@@ -220,11 +309,16 @@ func (m ClaudeCLIModel) Call(ctx context.Context, messages []lc.BaseMessage, _ [
 	}
 
 	args := []string{"-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
-		"--strict-mcp-config", "--setting-sources", "user",
+		// No tool servers, no project settings or hooks, and no skills or
+		// commands, which a project can bring along with hooks of its own.
+		"--strict-mcp-config", "--setting-sources", "user", "--disable-slash-commands",
 		"--permission-mode", plan.Mode, "--tools", strings.Join(plan.Tools, ","),
 	}
 	if len(plan.Allowed) > 0 {
 		args = append(args, "--allowedTools", strings.Join(plan.Allowed, ","))
+	}
+	if len(plan.Denied) > 0 {
+		args = append(args, "--disallowedTools", strings.Join(plan.Denied, ","))
 	}
 	for _, dir := range plan.AddDirs {
 		args = append(args, "--add-dir", dir)
@@ -238,7 +332,9 @@ func (m ClaudeCLIModel) Call(ctx context.Context, messages []lc.BaseMessage, _ [
 	}
 	if resume != "" {
 		args = append(args, "--resume", resume)
-	} else if system := claudeSystemText(messages); system != "" {
+	}
+	// Always, so a session the CLI compacts keeps NullBot's instructions.
+	if system := claudeSystemText(messages); system != "" {
 		file, err := writeClaudePromptFile(system)
 		if err != nil {
 			return lc.BaseMessage{}, err
@@ -248,11 +344,9 @@ func (m ClaudeCLIModel) Call(ctx context.Context, messages []lc.BaseMessage, _ [
 	}
 
 	run, err := runClaude(ctx, m.Config, command, args, plan.Dir, prompt)
-	if err != nil && resume != "" && run.sessionGone() {
-		// The CLI no longer has that session: start over with everything.
-		claudeSessions.Lock()
-		delete(claudeSessions.ids, claudeConversationKey(scope, messages[:cut]))
-		claudeSessions.Unlock()
+	if err != nil && resume != "" && ctx.Err() == nil && run.sessionGone() {
+		// The CLI no longer has that session, so nothing ran: start over
+		// with the whole conversation.
 		return m.Call(ctx, messages, nil)
 	}
 	if err != nil {
@@ -361,12 +455,13 @@ type claudeRun struct {
 	isError   bool
 	errorText string
 	stderr    string
+	sawResult bool
 }
 
-// sessionGone reports a failed resume of a session the CLI does not have.
+// sessionGone reports a resume the CLI refused because it does not have
+// the session; nothing ran.
 func (r claudeRun) sessionGone() bool {
-	text := strings.ToLower(r.errorText + " " + r.stderr)
-	return strings.Contains(text, "no conversation found") || strings.Contains(text, "session") && strings.Contains(text, "not found")
+	return !r.sawResult && strings.Contains(strings.ToLower(r.errorText+" "+r.stderr), "no conversation found with session id")
 }
 
 // claudeStream turns the CLI's stream-json output into NullBot's live
@@ -386,7 +481,9 @@ type claudeStream struct {
 	lastText string          // the last message's text, if the result has none
 	tools    map[string]string
 	meta     map[string]map[string]any
-	usage    claudeUsage
+	// resultSeen closes when the result arrives.
+	resultSeen chan struct{}
+	usage      claudeUsage
 }
 
 type claudeUsage struct {
@@ -447,7 +544,7 @@ func runClaude(ctx context.Context, config Config, command string, args []string
 	stderr.limit = 64 * 1024
 	cmd.Stderr = &stderr
 	redactor := currentRedactor(config)
-	stream := &claudeStream{ctx: ctx, redactor: redactor, text: newStreamRedactor(redactor), thinking: newStreamRedactor(redactor), run: &run, tools: map[string]string{}, meta: map[string]map[string]any{}}
+	stream := &claudeStream{ctx: ctx, redactor: redactor, text: newStreamRedactor(redactor), thinking: newStreamRedactor(redactor), run: &run, tools: map[string]string{}, meta: map[string]map[string]any{}, resultSeen: make(chan struct{})}
 	// The stream is a writer, so a program the CLI leaves holding its
 	// output cannot keep the call waiting past WaitDelay.
 	cmd.Stdout = stream
@@ -464,7 +561,24 @@ func runClaude(ctx context.Context, config Config, command string, args []string
 		}
 		return run, fmt.Errorf("Claude CLI: could not start %s: %w", filepath.Base(command), err)
 	}
+	// Once Claude has answered, the run is over: anything that keeps the
+	// CLI open afterwards is stopped after a short grace.
+	exited, watched := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(watched)
+		select {
+		case <-stream.resultSeen:
+			select {
+			case <-exited:
+			case <-time.After(claudeAfterResult):
+				proc.killAll()
+			}
+		case <-exited:
+		}
+	}()
 	waitErr := cmd.Wait()
+	close(exited)
+	<-watched
 	proc.finish()
 	stream.finish()
 	run.stderr = RedactSecrets(config, strings.TrimSpace(stderr.buf.String()))
@@ -474,8 +588,12 @@ func runClaude(ctx context.Context, config Config, command string, args []string
 	if run.isError {
 		return run, claudeError(firstNonEmpty(run.errorText, run.stderr, "the run failed"))
 	}
-	if waitErr != nil && !errors.Is(waitErr, exec.ErrWaitDelay) && run.answer == "" {
-		return run, claudeError(firstNonEmpty(run.stderr, waitErr.Error()))
+	if !run.sawResult {
+		// It ended without answering: whatever streamed is not an answer.
+		if waitErr != nil && !errors.Is(waitErr, exec.ErrWaitDelay) {
+			return run, claudeError(firstNonEmpty(run.stderr, waitErr.Error()))
+		}
+		return run, claudeError(firstNonEmpty(run.stderr, "the run ended without an answer"))
 	}
 	if strings.TrimSpace(run.answer) == "" {
 		return run, claudeError(firstNonEmpty(run.stderr, "no answer came back"))
@@ -563,6 +681,10 @@ func (s *claudeStream) handle(line []byte) {
 	case "user":
 		s.toolResults(event.Message.Content)
 	case "result":
+		if !s.run.sawResult {
+			s.run.sawResult = true
+			close(s.resultSeen)
+		}
 		s.run.answer = event.Result
 		s.run.isError = event.IsError || strings.HasPrefix(event.Subtype, "error")
 		if s.run.isError {
@@ -640,9 +762,10 @@ func (s *claudeStream) assistant(blocks []claudeContentBlock) {
 				continue
 			}
 			s.tools[b.ID] = b.Name
-			meta := claudeStepMetadata(b.Name, b.Input)
+			input := redactArgs(s.redactor, b.Input)
+			meta := claudeStepMetadata(b.Name, input)
 			s.meta[b.ID] = meta
-			streaming.EmitStep(s.ctx, streaming.Step{ID: b.ID, Name: b.Name, Input: redactArgs(s.redactor, b.Input), Metadata: meta})
+			streaming.EmitStep(s.ctx, streaming.Step{ID: b.ID, Name: b.Name, Input: input, Metadata: meta})
 		}
 	}
 }
@@ -847,13 +970,29 @@ func (s *streamRedactor) cut() int {
 	return cut
 }
 
+// flush ends the stream. What was held back is the start of a secret, or
+// text that happens to look like one: four characters or more become the
+// secret's label, shorter starts are let through.
 func (s *streamRedactor) flush() string {
-	out := s.pending
-	s.pending = ""
-	if out == "" {
+	if s.pending == "" {
 		return ""
 	}
-	return s.r.trimPartialSecret(s.r.replacer.Replace(out))
+	cut := s.cut()
+	head, tail := s.pending[:cut], s.pending[cut:]
+	s.pending = ""
+	out := s.r.replacer.Replace(head)
+	if tail == "" {
+		return out
+	}
+	if len(tail) < 4 {
+		return out + tail
+	}
+	for _, v := range s.r.values {
+		if strings.HasPrefix(v.value, tail) {
+			return out + v.label
+		}
+	}
+	return out + s.r.replacer.Replace(tail)
 }
 
 // --- account status ----------------------------------------------------------

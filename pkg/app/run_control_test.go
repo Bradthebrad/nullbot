@@ -138,12 +138,15 @@ func historyContents(a *App) []string {
 
 func TestStopEverythingCancelsAndHoldsTheQueue(t *testing.T) {
 	a := submissionTestApp(t)
-	model := &loopModel{calls: make(chan int, 16), steps: 100}
+	// The first call is held until the stop, so the first request is still
+	// running when it comes (otherwise it can finish its iterations first).
+	model := &loopModel{calls: make(chan int, 16), steps: 100, hold: make(chan struct{})}
 	a.modelFactory = func(Config, bool) (tcagent.Model, error) { return model, nil }
 	first := a.SubmitRouted(context.Background(), "keep reading", "send")
 	<-model.calls
 	queued := a.SubmitRouted(context.Background(), "then this", "queue")
 	a.StopEverything()
+	close(model.hold)
 	if done := waitSubmission(t, a, first.ID); done.Status != "canceled" && done.Status != "error" {
 		t.Fatalf("first ended %q", done.Status)
 	}

@@ -246,6 +246,9 @@ func runVaultCLI(command string, args []string, appDir string, stdin io.Reader, 
 			if login := s.Public["login"]; login != "" {
 				fmt.Fprintf(stdout, "%-20s signed in as %s\n", "", login)
 			}
+			if identity := s.Public["identity"]; identity != "" {
+				fmt.Fprintf(stdout, "%-20s signs in as %s\n", "", identity)
+			}
 			if pub := s.Public["public_key"]; pub != "" {
 				fmt.Fprintf(stdout, "%-20s %s\n", "", pub)
 			}

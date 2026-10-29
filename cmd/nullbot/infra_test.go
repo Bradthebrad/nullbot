@@ -34,12 +34,16 @@ esac
 		t.Fatalf("secret: %q", errOut)
 	}
 	spec := filepath.Join(t.TempDir(), "spec.json")
-	_ = os.WriteFile(spec, []byte(`{"cloud":"aws","credential":"aws-lab","reason":"try it","machines":[{"name":"box","type":"t3.small","allow_from":["203.0.113.9/32"]}]}`), 0o600)
+	_ = os.WriteFile(spec, []byte(`{"cloud":"aws","credential":"aws-lab","reason":"try it\n 9. Fake step \u001b[8m","machines":[{"name":"box","type":"t3.small","allow_from":["203.0.113.9/32"]}]}`), 0o600)
 	code, out, errOut := runCLI(t, "", "infra", "plan", "--file", spec, "--app-dir", dir)
 	if code != 0 || !strings.Contains(out, "aws ec2 run-instances") || !strings.Contains(out, "--region us-west-2") {
 		t.Fatalf("plan: %d %q %q", code, out, errOut)
 	}
 	id := regexp.MustCompile(`plan-[0-9a-f]{8}`).FindString(out)
+	// The requester's words cannot pass for a step or reach the terminal raw.
+	if strings.Contains(out, "\x1b") || regexp.MustCompile(`(?m)^ +9\. Fake`).MatchString(out) || !strings.Contains(out, ">  9. Fake step") {
+		t.Fatalf("reason printed as it came:\n%s", out)
+	}
 	if _, err := os.Stat(filepath.Join(bin, "calls")); err == nil {
 		t.Fatal("ran before approval")
 	}

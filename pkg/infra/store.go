@@ -262,8 +262,12 @@ func (s *Store) Propose(p Plan) error {
 // Decide approves or rejects a proposed plan. Only a person decides: the
 // caller is a user interface or the command line, never an agent's tool.
 // seen is the Hash of the plan the person looked at; approving fails if
-// the plan changed since, and the approval covers exactly that content.
-func (s *Store) Decide(id string, approve bool, by, seen string) (Plan, error) {
+// the plan changed since, and the approval covers exactly that content,
+// sealed with key (see Plan.Seal).
+func (s *Store) Decide(id string, approve bool, by, seen string, key []byte) (Plan, error) {
+	if approve && len(key) == 0 {
+		return Plan{}, errors.New("approving needs NullBot's approval key from the vault, which is not available")
+	}
 	unlock, err := s.lock()
 	if err != nil {
 		return Plan{}, err
@@ -283,7 +287,7 @@ func (s *Store) Decide(id string, approve bool, by, seen string) (Plan, error) {
 	event := "rejected"
 	if approve {
 		p.State, event = PlanApproved, "approved"
-		p.ApprovedHash = p.ContentHash()
+		p.Approval = p.Seal(key, by)
 	}
 	if err := s.savePlanLocked(p); err != nil {
 		return p, err

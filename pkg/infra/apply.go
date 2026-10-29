@@ -28,6 +28,8 @@ type ApplyOptions struct {
 	By string
 	// TempDir holds first-boot scripts while a command reads them.
 	TempDir string
+	// ApprovalKey checks the plan's approval seal (see Plan.Seal).
+	ApprovalKey []byte
 }
 
 // Apply runs an approved plan, one step at a time, recording each in the
@@ -48,10 +50,18 @@ func (s *Store) Apply(ctx context.Context, id string, opts ApplyOptions) (Plan, 
 			err = fmt.Errorf("plan %s is waiting for approval", id)
 		}
 	}
-	if err == nil && (plan.ApprovedHash == "" || plan.ApprovedHash != plan.ContentHash()) {
-		// The plan file changed after it was approved: what would run is
-		// not what was approved.
-		err = fmt.Errorf("plan %s changed after it was approved, so it will not run; propose it again", id)
+	if err == nil && len(opts.ApprovalKey) == 0 {
+		err = errors.New("running a plan needs NullBot's approval key from the vault, which is not available")
+	} else if err == nil && plan.Approval == "" {
+		// Approved by a version of NullBot without seals: look at it again.
+		err = fmt.Errorf("plan %s needs approving again", id)
+		plan.State, plan.Decided, plan.DecidedBy = PlanProposed, time.Time{}, ""
+		_ = s.savePlanLocked(plan)
+	} else if err == nil && !plan.sealed(opts.ApprovalKey) {
+		// The plan file changed after it was approved, or was written as
+		// approved without being approved: what would run is not what a
+		// person approved.
+		err = fmt.Errorf("plan %s does not match what was approved, so it will not run; propose it again", id)
 		plan.State, plan.Error, plan.Finished = PlanFailed, err.Error(), time.Now().UTC()
 		_ = s.savePlanLocked(plan)
 		_ = s.logLocked(LedgerEntry{Plan: plan.ID, Event: "failed", Error: err.Error(), By: opts.By})
@@ -477,7 +487,20 @@ func (s *Store) RecoverStale(alive func(pid int) bool) error {
 	}
 	host := hostName()
 	for _, p := range plans {
-		if p.State != PlanApplying || p.RunnerHost != host || p.RunnerPID == 0 || p.RunnerPID == os.Getpid() || alive(p.RunnerPID) {
+		if p.State != PlanApplying {
+			continue
+		}
+		// A step runs for at most 30 minutes, so a plan with no step
+		// started for hours was left by a NullBot that stopped, wherever it
+		// ran (a laptop's host name can change).
+		lastRan := p.Decided
+		for _, step := range p.Steps {
+			if step.Ran.After(lastRan) {
+				lastRan = step.Ran
+			}
+		}
+		stale := !lastRan.IsZero() && time.Since(lastRan) > 3*time.Hour
+		if !stale && (p.RunnerHost != host || p.RunnerPID == 0 || p.RunnerPID == os.Getpid() || alive(p.RunnerPID)) {
 			continue
 		}
 		unlock, err := s.lock()
@@ -485,7 +508,7 @@ func (s *Store) RecoverStale(alive func(pid int) bool) error {
 			return err
 		}
 		current, err := s.Plan(p.ID)
-		if err == nil && current.State == PlanApplying && current.RunnerPID == p.RunnerPID {
+		if err == nil && current.State == PlanApplying && current.RunnerPID == p.RunnerPID && current.RunnerHost == p.RunnerHost {
 			msg := "NullBot stopped while this plan ran; what it was doing may be half done"
 			current.State, current.Error, current.Finished = PlanFailed, msg, time.Now().UTC()
 			for i := range current.Steps {

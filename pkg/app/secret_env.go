@@ -367,6 +367,7 @@ func payloadValues(payload vaultPayload) map[string]string {
 			add(v, "[secret:"+s.Name+"]")
 		}
 	}
+	add(payload.System.InfraKey, "[secret:approval-key]")
 	if c := payload.System.CodexAuth; c != nil {
 		add(c.AccessToken, "[secret:chatgpt-sign-in]")
 		add(c.RefreshToken, "[secret:chatgpt-sign-in]")

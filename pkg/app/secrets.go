@@ -167,6 +167,9 @@ type vaultPayload struct {
 // systemSet holds credentials NullBot manages itself; agents never see them.
 type systemSet struct {
 	CodexAuth *codexAuthStore `json:"codex_auth,omitempty"`
+	// InfraKey seals cloud plan approvals (see infra.Plan.Seal), so a plan
+	// file cannot be approved by writing it.
+	InfraKey string `json:"infra_key,omitempty"`
 }
 
 var (

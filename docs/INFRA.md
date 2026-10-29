@@ -8,9 +8,10 @@ your control:
 - **Every change is a plan you approve.** A plan lists the exact `aws` or
   `gcloud` commands it will run, any first-boot script in full, and roughly
   what it costs per hour. Nothing runs until you approve it, in the app or
-  in your terminal, and an approval covers exactly the commands you saw: a
-  plan that changes afterwards does not run. Agents can propose plans and
-  run the ones you approved; they cannot approve them.
+  in your terminal, and an approval covers exactly the commands you saw: it
+  is sealed with a key kept in the vault, so a plan changed afterwards, or a
+  plan file written as approved, does not run. Agents can propose plans and
+  run the ones you approved; they cannot approve them (but see Limits).
 - **NullBot only removes what it made.** A machine or bucket counts as
   NullBot's only once the command creating it succeeded, and NullBot checks
   its tag (label on Google Cloud) again before removing a bucket or a Google
@@ -204,6 +205,14 @@ secret.
 - The cost estimate covers machines and disks, not traffic, snapshots or
   bucket storage.
 - Approving is the control: read the commands before you approve them.
+- Approval separates you from agents that use NullBot's tools. An agent
+  you also let run any program (a full-access project, code tools, or
+  `secret_run` with a broad secret) runs it as you, and such a program
+  could approve a plan the way you would in a terminal. If that matters,
+  don't give agents both cloud plans and free command running.
+- `connect` saves the machine's Ollama as a model server at a port on this
+  computer; while the tunnel is closed it shows as not answering. Connect
+  again to use it (the same port is used when it is free).
 - On Windows, `gcloud` is a batch file, which cannot take some characters
   safely; NullBot refuses arguments containing `" & | < > ^ % !`.
 - A Google Cloud project with OS Login enforced ignores SSH keys in

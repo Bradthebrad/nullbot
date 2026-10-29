@@ -14,6 +14,7 @@
 package infra
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -143,9 +144,11 @@ type Plan struct {
 	DecidedBy  string    `json:"decided_by,omitempty"`
 	Finished   time.Time `json:"finished,omitempty"`
 	Error      string    `json:"error,omitempty"`
-	// ApprovedHash is ContentHash when the plan was approved: a plan whose
-	// commands changed after approval does not run.
-	ApprovedHash string `json:"approved_hash,omitempty"`
+	// Approval seals the approval: a keyed hash (HMAC-SHA256, with a key
+	// kept in the vault) of the plan's id, its ContentHash and who approved
+	// it. A plan whose commands changed after approval, or a plan file
+	// written as approved without going through Decide, does not run.
+	Approval string `json:"approval,omitempty"`
 	// RunnerPID and RunnerHost are the process applying it, so a run whose
 	// process ended without finishing can be recognized.
 	RunnerPID  int    `json:"runner_pid,omitempty"`
@@ -184,6 +187,22 @@ func (p Plan) ContentHash() string {
 	data, _ := json.Marshal(content)
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+// Seal is the approval seal for this plan's current content, approved by
+// by, under key.
+func (p Plan) Seal(key []byte, by string) string {
+	mac := hmac.New(sha256.New, key)
+	fmt.Fprintf(mac, "nullbot infra approval\n%s\n%s\n%s", p.ID, p.ContentHash(), by)
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// sealed reports whether the plan carries a valid approval seal.
+func (p Plan) sealed(key []byte) bool {
+	if len(key) == 0 || p.Approval == "" {
+		return false
+	}
+	return hmac.Equal([]byte(p.Approval), []byte(p.Seal(key, p.DecidedBy)))
 }
 
 // CleanText drops control characters (keeping new lines and tabs), so text

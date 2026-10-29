@@ -121,6 +121,19 @@ func TestInfraPlanApproveApply(t *testing.T) {
 	if err != nil || destroy.Kind != "destroy" || destroy.State != infra.PlanProposed {
 		t.Fatalf("%v %+v", err, destroy)
 	}
+	// The user approves and runs it while the agent waits on it: whichever
+	// starts first runs it, and the agent reports that run, not a failure.
+	_, _ = a.DecideInfraPlan(destroy.ID, true, "you")
+	userDone := make(chan struct{})
+	go func() {
+		defer close(userDone)
+		_, _ = a.ApplyInfraPlan(context.Background(), destroy.ID, "you")
+	}()
+	out, err = apply(context.Background(), map[string]any{"plan": destroy.ID, "wait_minutes": 1})
+	<-userDone
+	if err != nil || strings.Contains(out, "failed step") || !strings.Contains(out, `"state": "applied"`) {
+		t.Fatalf("agent alongside the user: %v\n%s", err, out)
+	}
 }
 
 func TestInfraToolsOffByDefault(t *testing.T) {

@@ -133,6 +133,10 @@ func planSummary(plan infra.Plan, next string) string {
 		steps = append(steps, step{s.Summary, strings.Join(s.Argv, " "), s.State, s.Error})
 	}
 	out := map[string]any{"plan": plan.ID, "title": plan.Title, "state": plan.State, "steps": steps, "cost_hourly": fmt.Sprintf("$%.3f", plan.CostHourly), "cost_note": plan.CostNote}
+	if plan.CostHourly < 0 {
+		delete(out, "cost_hourly")
+		out["saves_hourly"] = fmt.Sprintf("$%.3f", -plan.CostHourly)
+	}
 	if len(plan.Notes) > 0 {
 		out["notes"] = plan.Notes
 	}
@@ -167,9 +171,19 @@ func infraApplyTool(state *App) agent.Tool {
 				case infra.PlanApproved:
 					done, err := state.ApplyInfraPlan(ctx, id, "agent "+runtimeAgentName(ctx))
 					if err != nil {
+						if done.State == infra.PlanApplying || done.State == infra.PlanApplied {
+							// The user ran it first; report that run.
+							break
+						}
 						return planSummary(done, "It stopped at the failed step. What it created is in infra_status; propose removing it with infra_destroy if it is not wanted."), nil
 					}
 					return planSummary(done, ""), nil
+				case infra.PlanApplying:
+					// Running already (the user approved and ran it); report
+					// when it ends.
+					deadline = time.Now().Add(wait)
+				case infra.PlanApplied, infra.PlanFailed:
+					return planSummary(plan, "This plan has run."), nil
 				case infra.PlanProposed:
 					if time.Now().After(deadline) {
 						return planSummary(plan, "Still waiting for the user's approval. Tell them, and call infra_apply again later."), nil

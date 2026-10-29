@@ -12,12 +12,16 @@
 - **A run checks its server answers** before it starts.
 - **Ollama**: pull models (including `hf.co/...` GGUF builds), delete them,
   and make a copy with a larger context.
+- **Which models run well here**: a Go port of llmfit (Alex Jones, MIT)
+  detects the CPU, memory and GPUs and ranks a catalog of about 1,400
+  models by fit, speed and quality, with the quantization to use and how to
+  install each (`nullbot models machine`, `nullbot models fit`).
 - **Install from Hugging Face**: search GGUF models, see each build and its
   size, and install one into Ollama, LM Studio's folder or NullBot's own,
   with resumable, checksum-verified downloads. A token for gated models
   comes from the vault and is sent only to huggingface.co.
 - `nullbot models`, `nullbot models local find|add|remove`, `nullbot models
-  pull|context|remove|search|builds|install`.
+  pull|context|remove|machine|fit|search|builds|install`.
 - See [docs/LOCAL_MODELS.md](../LOCAL_MODELS.md).
 
 ## Claude CLI provider

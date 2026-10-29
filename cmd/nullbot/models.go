@@ -30,6 +30,10 @@ const modelsUsage = `Usage:
                                            make an Ollama copy of MODEL that runs
                                            with an N-token context
   nullbot models remove NAME [--server ID] delete a model from Ollama
+  nullbot models machine                   this computer's CPU, memory and GPUs
+  nullbot models fit [--use-case coding] [--context N] [--runtime ollama] [--limit 20] [--small]
+                                           the models that run well here, best first
+                                           (--small includes models under 1.5B parameters)
   nullbot models search TEXT [--sort downloads|likes|trending|lastModified]
                                            find GGUF models on Hugging Face
   nullbot models builds OWNER/REPO         a repo's GGUF builds and their sizes
@@ -79,6 +83,10 @@ func runModelsCLI(args []string, appDir string, stdout, stderr io.Writer) int {
 	quant := flags.String("quant", "", "")
 	build := flags.String("build", "", "")
 	to := flags.String("to", "ollama", "")
+	useCase := flags.String("use-case", "", "")
+	contextLen := flags.Int("context", 0, "")
+	runtimeName := flags.String("runtime", "", "")
+	small := flags.Bool("small", false, "")
 	if err := flags.Parse(rest); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -299,6 +307,43 @@ func runModelsCLI(args []string, appDir string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "Removed %s from %s.\n", positional[0], target)
 		return 0
 
+	case "machine":
+		hw, err := app.MachineHardware(ctx, true)
+		if err != nil {
+			return fail(err)
+		}
+		if *asJSON {
+			return emit(hw)
+		}
+		fmt.Fprintln(stdout, app.MachineSummary(hw))
+		fmt.Fprintf(stdout, "%s/%s, %d cores, %.0f GB of RAM free, runs on %s\n", hw.OS, hw.Arch, hw.CPUCores, hw.AvailableRAMGB, hw.Backend)
+		for _, g := range hw.GPUs {
+			fmt.Fprintf(stdout, "GPU: %s ×%d, %.0f GB each (%s)\n", g.Name, g.Count, g.VRAMGB, g.Backend)
+		}
+		return 0
+
+	case "fit":
+		res, err := a.SuggestModels(ctx, app.ModelFitOptions{UseCase: *useCase, ContextLength: *contextLen, Runtime: *runtimeName, Limit: *limit, Refresh: true, IncludeSmall: *small})
+		if err != nil {
+			return fail(err)
+		}
+		if *asJSON {
+			return emit(res)
+		}
+		fmt.Fprintf(stdout, "%s\nFor a %d-token context%s:\n\n", app.MachineSummary(res.Hardware), res.Options.ContextLength, map[bool]string{true: ", with " + res.Options.Runtime, false: ""}[res.Options.Runtime != ""])
+		w := tabwriter.NewWriter(stdout, 0, 2, 2, ' ', 0)
+		fmt.Fprintln(w, "MODEL\tSIZE\tQUANT\tFIT\tRUNS ON\tSPEED\tINSTALL")
+		for _, f := range res.Fits {
+			install := f.OllamaTag
+			if install == "" && f.GGUFRepo != "" {
+				install = f.GGUFRepo
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t~%.0f tok/s\t%s\n", f.Model.Name, f.Model.ParameterCount, f.Quant, f.Level, strings.ReplaceAll(string(f.RunMode), "_", " "), f.TokensPerSecond, install)
+		}
+		_ = w.Flush()
+		fmt.Fprintln(stdout, "\nInstall one with nullbot models pull TAG (Ollama) or nullbot models install REPO.")
+		return 0
+
 	case "search":
 		found, err := a.SearchHFModels(ctx, strings.Join(positional, " "), *sortBy, *limit)
 		if err != nil {
@@ -393,7 +438,7 @@ func runModelsCLI(args []string, appDir string, stdout, stderr io.Writer) int {
 // so "--server ollama pull" keeps "ollama" with its flag.
 func flagTakesValue(arg string) bool {
 	switch strings.TrimLeft(arg, "-") {
-	case "id", "url", "name", "key-secret", "server", "size", "sort", "limit", "quant", "build", "to":
+	case "id", "url", "name", "key-secret", "server", "size", "sort", "limit", "quant", "build", "to", "use-case", "context", "runtime":
 		return true
 	}
 	return false

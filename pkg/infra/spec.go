@@ -38,8 +38,10 @@ type MachineSpec struct {
 	// AllowFrom, which must be given: there is no "from anywhere" default.
 	Ports     []int    `json:"ports,omitempty"`
 	AllowFrom []string `json:"allow_from"`
-	// UserData is a cloud-init script run on first boot (see Bootstrap).
-	UserData string `json:"user_data,omitempty"`
+	// UserData is a cloud-init script run on first boot; Bootstrap writes
+	// one for common setups instead.
+	UserData  string     `json:"user_data,omitempty"`
+	Bootstrap *Bootstrap `json:"bootstrap,omitempty"`
 	// Spot asks for spare capacity at a lower price, which the provider
 	// may take back at any time.
 	Spot bool `json:"spot,omitempty"`
@@ -149,6 +151,20 @@ func (s *Spec) normalize() error {
 		}
 		if !ValidName(m.SSHUser) {
 			return fmt.Errorf("machine %s: %q is not a user name", m.Name, m.SSHUser)
+		}
+		if m.Bootstrap != nil {
+			if m.UserData != "" {
+				return fmt.Errorf("machine %s: give a first-boot script or a bootstrap, not both", m.Name)
+			}
+			arm := (s.Cloud == AWS && armType(m.Type)) || (s.Cloud == GCP && gcpArmType(m.Type))
+			script, err := m.Bootstrap.Script(m.Name, m.SSHUser, arm)
+			if err != nil {
+				return fmt.Errorf("machine %s: %w", m.Name, err)
+			}
+			m.UserData = script
+			if m.Bootstrap.Ollama {
+				m.DiskGB = max(m.DiskGB, 60) // room for models
+			}
 		}
 		if len(m.UserData) > 16<<10 {
 			return fmt.Errorf("machine %s: the first-boot script is larger than 16 KB", m.Name)

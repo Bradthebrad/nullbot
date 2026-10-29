@@ -262,3 +262,40 @@ func TestApplyFailureLeavesARecord(t *testing.T) {
 		t.Fatalf("%v %+v", err, destroy)
 	}
 }
+
+func TestBootstrapScript(t *testing.T) {
+	b := Bootstrap{Ollama: true, OllamaModels: []string{"qwen2.5:7b"}, GPUDrivers: true, NullBot: true, NullBotVersion: "v0.5.0"}
+	script, err := b.Script("gpu", "ubuntu", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"#!/bin/bash", "ubuntu-drivers install --gpgpu", "reboot", "OLLAMA_HOST=127.0.0.1:11434", "OLLAMA_CONTEXT_LENGTH=16384", "ollama pull qwen2.5:7b",
+		"releases/download/v0.5.0/nullbot-linux-amd64", "sha256sum -c -", "models use local:ollama/qwen2.5:7b", "ExecStart=/usr/local/bin/nullbot serve", BootstrapDone} {
+		if !strings.Contains(script, want) {
+			t.Errorf("script lacks %q", want)
+		}
+	}
+	for _, bad := range []Bootstrap{
+		{Ollama: true, OllamaModels: []string{"x; rm -rf /"}},
+		{Packages: []string{"curl && wget evil"}},
+		{NullBot: true, NullBotVersion: "latest; id"},
+		{OllamaModels: []string{"qwen"}},
+	} {
+		if _, err := bad.Script("m", "ubuntu", false); err == nil {
+			t.Errorf("accepted %+v", bad)
+		}
+	}
+	spec := awsSpec()
+	spec.Machines[0].UserData = ""
+	spec.Machines[0].Bootstrap = &Bootstrap{Ollama: true, OllamaModels: []string{"qwen2.5:7b"}}
+	spec.Machines[0].DiskGB = 30
+	plan, err := BuildCreatePlan(spec, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range plan.Steps {
+		if strings.Contains(strings.Join(s.Argv, " "), "run-instances") && (!strings.Contains(s.Input, "ollama pull qwen2.5:7b") || !strings.Contains(strings.Join(s.Argv, " "), "VolumeSize=60")) {
+			t.Fatalf("bootstrap not in the plan: %v", s.Argv)
+		}
+	}
+}

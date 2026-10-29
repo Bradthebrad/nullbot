@@ -246,7 +246,9 @@ func TestStopEverythingWithAnEmptyQueueLeavesNothingHeld(t *testing.T) {
 
 func TestStopOnlyStopsTheRequestItWasMeantFor(t *testing.T) {
 	a := submissionTestApp(t)
-	model := &loopModel{calls: make(chan int, 16), steps: 100}
+	// Held on its first call, so the request is still running when it is
+	// stopped instead of finishing its turns first.
+	model := &loopModel{calls: make(chan int, 16), steps: 100, hold: make(chan struct{})}
 	a.modelFactory = func(Config, bool) (tcagent.Model, error) { return model, nil }
 	first := a.SubmitRouted(context.Background(), "keep reading", "send")
 	<-model.calls
@@ -259,5 +261,6 @@ func TestStopOnlyStopsTheRequestItWasMeantFor(t *testing.T) {
 	if err := a.StopRequest(first.ID); err != nil {
 		t.Fatal(err)
 	}
+	close(model.hold)
 	waitSubmission(t, a, first.ID)
 }

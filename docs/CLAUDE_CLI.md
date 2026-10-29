@@ -24,8 +24,10 @@ it prints. `claude auth status` is how it learns whether you are signed in.
 
 ## What Claude may do
 
-Claude works in the primary project's folder. The project's permission
-decides which of Claude's tools exist for the run. Anything that would need
+Claude works in the primary project's folder. The permissions of the
+projects involved decide which of Claude's tools exist for the run, the same
+way they limit NullBot's own tools: a project around the folder that allows
+less limits the whole run. Anything that would need
 someone to approve it is refused, because nobody is there to approve it in a
 background run.
 
@@ -38,12 +40,20 @@ background run.
 
 Another project is added to the run (`--add-dir`) only when it allows
 everything the primary project does, since the CLI applies one set of tools
-to every folder.
+to every folder. A project inside those folders that allows less keeps its
+limits: when it is read-only, Claude may read its files but not edit them
+(a deny rule for its path), and when it may not run programs, Bash is left
+out of the whole run, because a command cannot be held to some folders.
 
 Each run also starts with:
 - no MCP servers (`--strict-mcp-config`), so only the tools above exist;
 - only your user settings (`--setting-sources user`), so hooks and settings
   in a project's `.claude` folder do not run;
+- no skills or slash commands (`--disable-slash-commands`), which a project
+  could bring along with hooks and tool permissions of their own;
+- no background commands (`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`), so the
+  run ends when Claude answers. Anything still running 15 seconds after the
+  answer is stopped;
 - an environment without credentials. Variables that look like a key,
   token, password or secret, and every `AWS_` variable, are removed, the same
   as for `secret_run`. Only `CLAUDE_CODE_OAUTH_TOKEN` is kept.
@@ -60,10 +70,14 @@ split across two pieces of the stream is still caught.
 The first request in a chat starts a CLI session. NullBot's instructions are
 passed as an addition to Claude's system prompt, and earlier messages are
 passed as context. Later requests continue the same session (`--resume`) and
-send only what is new, so Claude keeps what it read and did. If the
-conversation has changed since (it was compacted, or you continued an old
-chat after a restart), NullBot starts a new session with the whole
-conversation instead.
+send only what is new, so Claude keeps what it read and did. A session is
+continued once per answer: if the conversation has changed since (it was
+compacted, a request is sent again after an error, another chat has the same
+history, or you continued an old chat after a restart), NullBot starts a new
+session with the whole conversation instead. NullBot's instructions are
+passed on every request, so they survive when the CLI compacts a session. A
+run that ends without an answer is an error, not an answer, even if some
+text streamed.
 
 Stopping a run interrupts the CLI, which ends its turn and stops its
 commands. Anything still running afterwards is stopped with it.
@@ -78,3 +92,7 @@ commands. Anything still running afterwards is stopped with it.
   run fails with "unknown option", update the CLI with `claude update`.
 - With Full access, Bash can do anything you can do, as it can with
   NullBot's own command tools.
+- Your own Claude Code settings still apply: your user-level permission
+  rules, extra directories and hooks.
+- Streamed text is filtered piece by piece; Base64 wrapped across lines is
+  caught in the final answer and commentary, not in the live stream.

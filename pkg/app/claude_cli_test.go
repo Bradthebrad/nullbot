@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Bradthebrad/tinychain/lc"
 	"github.com/Bradthebrad/tinychain/streaming"
@@ -186,7 +187,7 @@ func TestClaudeCLIStreamsStepsAndContinuesTheSession(t *testing.T) {
 	if _, err := model.Call(c.ctx(), next, nil); err != nil {
 		t.Fatal(err)
 	}
-	if args := fake.file(t, "args", 2); !strings.Contains(args, "--resume\nsess-1") || strings.Contains(args, "--append-system-prompt-file") {
+	if args := fake.file(t, "args", 2); !strings.Contains(args, "--resume\nsess-1") || !strings.Contains(args, "--append-system-prompt-file") {
 		t.Fatalf("second call args:\n%s", args)
 	}
 	if stdin := fake.file(t, "stdin", 2); stdin != "How many functions?" {
@@ -367,5 +368,133 @@ func TestClaudeCLIStepsShowInTheChat(t *testing.T) {
 	joined := strings.Join(roles, "|")
 	if !strings.Contains(joined, "commentary:Let me look.") || !strings.Contains(joined, "assistant:It is a Go package.") {
 		t.Fatalf("history %v", roles)
+	}
+}
+
+func TestClaudeCLIPlanFollowsEveryProject(t *testing.T) {
+	root := t.TempDir()
+	vendor := filepath.Join(root, "vendor")
+	other := t.TempDir()
+	_ = os.MkdirAll(vendor, 0o755)
+	config := DefaultConfig()
+	config.AppDir = t.TempDir()
+	config.WorkspaceDir = root
+	config.Projects = []Project{
+		{ID: "repo", Path: root, Permission: "full"},
+		{ID: "vendor", Path: vendor, Permission: "read-only"},
+		{ID: "notes", Path: other, Permission: "read-only"},
+	}
+	config.PrimaryProjectID = "repo"
+	plan, err := claudePlanFor(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools := strings.Join(plan.Tools, ",")
+	if strings.Contains(tools, "Bash") || !strings.Contains(tools, "Edit") {
+		t.Fatalf("a read-only project inside should take Bash away, keep edits: %v", plan.Tools)
+	}
+	vendorReal, _ := canonicalPath(vendor)
+	if !strings.Contains(strings.Join(plan.Denied, ","), "Edit("+claudePathRule(vendorReal)+")") || len(plan.AddDirs) != 0 {
+		t.Fatalf("plan %+v", plan)
+	}
+	// A read-only project around the folder makes everything read-only.
+	config.Projects = []Project{{ID: "outer", Path: filepath.Dir(root), Permission: "read-only"}, {ID: "repo", Path: root, Permission: "full"}}
+	plan, err = claudePlanFor(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Mode != "dontAsk" || strings.Contains(strings.Join(plan.Tools, ","), "Edit") {
+		t.Fatalf("outer read-only ignored: %+v", plan)
+	}
+	if got := claudePathRule(`/home/me/repo/`); got != "//home/me/repo/**" {
+		t.Fatal(got)
+	}
+}
+
+func TestClaudeCLISessionsAreContinuedOnce(t *testing.T) {
+	fake := newFakeClaude(t)
+	config := projectTestConfig(t, "read-only")
+	fake.output(t, 0, aRun("first")...)
+	model := ClaudeCLIModel{Config: config}
+	first := []lc.BaseMessage{lc.Human("one")}
+	reply, err := model.Call(context.Background(), first, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := append(append(first, reply), lc.Human("two"))
+	for i := 2; i <= 3; i++ {
+		if _, err := model.Call(context.Background(), next, nil); err != nil {
+			t.Fatal(err)
+		}
+		resumed := strings.Contains(fake.file(t, "args", i), "--resume")
+		if resumed != (i == 2) {
+			t.Fatalf("call %d resumed=%v", i, resumed)
+		}
+	}
+}
+
+func TestClaudeCLIFailuresAreNotAnswers(t *testing.T) {
+	fake := newFakeClaude(t)
+	config := projectTestConfig(t, "read-only")
+	// Text streamed, then the CLI died without a result.
+	fake.output(t, 0, map[string]any{"type": "system", "subtype": "init", "session_id": "s"}, streamEvent(map[string]any{"type": "message_start"}), textDelta("half an ans"))
+	if _, err := (ClaudeCLIModel{Config: config}).Call(context.Background(), []lc.BaseMessage{lc.Human("hi")}, nil); err == nil {
+		t.Fatal("a run without a result was an answer")
+	}
+	// A failure that merely mentions a session is not retried.
+	fake.output(t, 0, map[string]any{"type": "result", "is_error": true, "subtype": "error_during_execution", "result": "session hook: file not found"})
+	_, err := (ClaudeCLIModel{Config: config}).Call(context.Background(), []lc.BaseMessage{lc.Human("hi")}, nil)
+	if err == nil || fake.count(t) != 2 {
+		t.Fatalf("retried: %v, %d runs", err, fake.count(t))
+	}
+}
+
+func (f *fakeClaude) count(t *testing.T) int {
+	t.Helper()
+	data, _ := os.ReadFile(filepath.Join(f.dir, "count"))
+	var n int
+	fmt.Sscan(strings.TrimSpace(string(data)), &n)
+	return n
+}
+
+func TestClaudeCLIStopsLingeringAfterItsAnswer(t *testing.T) {
+	fake := newFakeClaude(t)
+	config := projectTestConfig(t, "read-only")
+	fake.output(t, 0, aRun("done")...)
+	// Keep the process open after printing, like a background command would.
+	script := filepath.Join(fake.dir, "claude")
+	data, _ := os.ReadFile(script)
+	_ = os.WriteFile(script, append(data, []byte("sleep 30\n")...), 0o755)
+	old := claudeAfterResult
+	claudeAfterResult = 200 * time.Millisecond
+	defer func() { claudeAfterResult = old }()
+	start := time.Now()
+	reply, err := (ClaudeCLIModel{Config: config}).Call(context.Background(), []lc.BaseMessage{lc.Human("hi")}, nil)
+	if err != nil || lcContentText(reply.Content) != "done" || time.Since(start) > 10*time.Second {
+		t.Fatalf("%v %v after %s", reply, err, time.Since(start))
+	}
+}
+
+func TestClaudeCLIRedactsStepTitlesAndHeldBackTails(t *testing.T) {
+	config := projectTestConfig(t, "full")
+	long := "abcdefghijklmnopqrstuvwxyz01234567"
+	if _, err := SaveSecret(config, SecretInput{Name: "v1", Kind: SecretGeneric, Values: map[string]string{"value": long}, Public: map[string]string{"env": "V1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SaveSecret(config, SecretInput{Name: "v2", Kind: SecretGeneric, Values: map[string]string{"value": "PASSWORDabcd1234"}, Public: map[string]string{"env": "V2"}}); err != nil {
+		t.Fatal(err)
+	}
+	r := currentRedactor(config)
+	s := newStreamRedactor(r)
+	out := s.write("x PASSWORDab") + s.write("cd") + s.flush()
+	if out != "x [secret:v2]" {
+		t.Fatalf("held-back tail leaked: %q", out)
+	}
+	if got := r.trimPartialSecret("x PASSWORDabcd"); got != "x [secret:v2]" {
+		t.Fatalf("trim: %q", got)
+	}
+	meta := claudeStepMetadata("Bash", redactArgs(r, map[string]any{"command": "curl", "description": "Call with " + long}))
+	if strings.Contains(fmt.Sprint(meta), long) {
+		t.Fatalf("title leaked: %v", meta)
 	}
 }

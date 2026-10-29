@@ -30,6 +30,9 @@ const modelsUsage = `Usage:
                                            make an Ollama copy of MODEL that runs
                                            with an N-token context
   nullbot models remove NAME [--server ID] delete a model from Ollama
+  nullbot models use PROVIDER/MODEL [--subagents]
+                                           make it the manager's model (or the
+                                           subagents'), saved for every run
   nullbot models machine                   this computer's CPU, memory and GPUs
   nullbot models fit [--use-case coding] [--context N] [--runtime ollama] [--limit 20] [--small]
                                            the models that run well here, best first
@@ -87,6 +90,7 @@ func runModelsCLI(args []string, appDir string, stdout, stderr io.Writer) int {
 	contextLen := flags.Int("context", 0, "")
 	runtimeName := flags.String("runtime", "", "")
 	small := flags.Bool("small", false, "")
+	forSubagents := flags.Bool("subagents", false, "")
 	if err := flags.Parse(rest); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -305,6 +309,28 @@ func runModelsCLI(args []string, appDir string, stdout, stderr io.Writer) int {
 			return fail(err)
 		}
 		fmt.Fprintf(stdout, "Removed %s from %s.\n", positional[0], target)
+		return 0
+
+	case "use":
+		if len(positional) != 1 || !strings.Contains(positional[0], "/") {
+			return fail(errors.New("say which model, as PROVIDER/MODEL, such as local:ollama/qwen2.5:7b"))
+		}
+		provider, model, _ := strings.Cut(positional[0], "/")
+		err := a.UpdateConfig(func(c *app.Config) {
+			if *forSubagents {
+				c.SubagentModel = app.ModelConfig{Provider: provider, Model: model}
+			} else {
+				c.Model = app.ModelConfig{Provider: provider, Model: model, ReasoningEffort: c.Model.ReasoningEffort}
+			}
+		})
+		if err != nil {
+			return fail(err)
+		}
+		if *forSubagents {
+			fmt.Fprintf(stdout, "Subagents now use %s.\n", positional[0])
+		} else {
+			fmt.Fprintf(stdout, "The manager now uses %s.\n", positional[0])
+		}
 		return 0
 
 	case "machine":

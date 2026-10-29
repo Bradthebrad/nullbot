@@ -38,6 +38,8 @@ Usage:
   nullbot vault               show how the secrets vault is protected
   nullbot models              list models; nullbot models help for local
                               model servers and installing models
+  nullbot infra               cloud machines and storage NullBot made, and
+                              plans waiting for approval; nullbot infra help
   nullbot version             print the version
 
 Options (headless):
@@ -71,6 +73,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if appDir, rest, ok := vaultCommand(args); ok {
 		if rest[0] == "models" {
 			return runModelsCLI(rest[1:], appDir, stdout, stderr)
+		}
+		if rest[0] == "infra" {
+			return runInfraCLI(rest[1:], appDir, stdout, stderr)
 		}
 		return runVaultCLI(rest[0], rest[1:], appDir, stdin, stdout, stderr)
 	}
@@ -367,7 +372,7 @@ func vaultCommand(args []string) (string, []string, bool) {
 		}
 		break
 	}
-	if len(args) > 0 && (args[0] == "vault" || args[0] == "secrets" || args[0] == "models") {
+	if len(args) > 0 && (args[0] == "vault" || args[0] == "secrets" || args[0] == "models" || args[0] == "infra") {
 		return appDir, args, true
 	}
 	return "", nil, false

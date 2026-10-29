@@ -131,11 +131,17 @@ func (b Bootstrap) Script(machine, sshUser string, arm bool) (string, error) {
 		home := "/home/" + sshUser
 		w("id %s >/dev/null 2>&1 || useradd -m -s /bin/bash %s", sshUser, sshUser)
 		if b.Ollama {
-			// The node's NullBot uses the node's own Ollama.
-			w("sudo -u %s nullbot --app-dir %s/.nullbot models local add ollama", sshUser, home)
+			// The node's NullBot uses the node's own Ollama. Releases before
+			// v0.6.0 have no "models" command; the rest of the setup goes on
+			// without it, and the log says what to do.
+			w("if sudo -u %s nullbot --app-dir %s/.nullbot models local add ollama; then", sshUser, home)
+			w("  echo 'Ollama on this machine is now a model server for NullBot'")
 			if len(b.OllamaModels) > 0 {
-				w("sudo -u %s nullbot --app-dir %s/.nullbot models use local:ollama/%s", sshUser, home, b.OllamaModels[0])
+				w("  sudo -u %s nullbot --app-dir %s/.nullbot models use local:ollama/%s || true", sshUser, home, b.OllamaModels[0])
 			}
+			w("else")
+			w("  echo 'this NullBot release cannot set up models; choose the model in its config.json, or use a release from v0.6.0'")
+			w("fi")
 		}
 		w("cat >/etc/systemd/system/nullbot.service <<'UNIT'")
 		w("[Unit]\nDescription=NullBot (headless)\nAfter=network-online.target ollama.service\nWants=network-online.target")

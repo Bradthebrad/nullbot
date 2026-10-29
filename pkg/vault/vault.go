@@ -138,9 +138,12 @@ type Vault struct {
 	passphrase func() (string, bool)
 	iterations int
 
-	mu  sync.Mutex
-	key []byte // cached data key for id
-	id  string
+	// writeMu queues this process's writers before the file lock, which
+	// only has to keep other processes out.
+	writeMu sync.Mutex
+	mu      sync.Mutex
+	key     []byte // cached data key for id
+	id      string
 	// given is a passphrase handed to Unlock; it lives only in memory.
 	given string
 	// keyringFailed is set when the keychain said it was available but
@@ -214,6 +217,8 @@ func (v *Vault) CreateWith(protection Protection, passphrase string, payload []b
 	}
 	// The file lock is taken before v.mu, so reads in this process never
 	// wait behind another process's write.
+	v.writeMu.Lock()
+	defer v.writeMu.Unlock()
 	unlock, err := v.fileLock()
 	if err != nil {
 		return err
@@ -400,6 +405,8 @@ var ErrNoChange = errors.New("vault: no change")
 // Update rereads the payload, passes it to fn and writes what fn returns,
 // all under the vault's lock. fn's input is cleared afterwards.
 func (v *Vault) Update(fn func(payload []byte) ([]byte, error)) error {
+	v.writeMu.Lock()
+	defer v.writeMu.Unlock()
 	unlock, err := v.fileLock()
 	if err != nil {
 		return err
@@ -435,6 +442,8 @@ func (v *Vault) Update(fn func(payload []byte) ([]byte, error)) error {
 // passphrase to the keychain, or to a new passphrase. The payload is
 // re-encrypted under a fresh data key.
 func (v *Vault) Reprotect(protection Protection, passphrase string) error {
+	v.writeMu.Lock()
+	defer v.writeMu.Unlock()
 	unlock, err := v.fileLock()
 	if err != nil {
 		return err
@@ -488,6 +497,8 @@ func (v *Vault) Reprotect(protection Protection, passphrase string) error {
 // Destroy removes the vault file and its keychain entry. Its secrets are
 // gone for good.
 func (v *Vault) Destroy() error {
+	v.writeMu.Lock()
+	defer v.writeMu.Unlock()
 	unlock, err := v.fileLock()
 	if err != nil {
 		return err

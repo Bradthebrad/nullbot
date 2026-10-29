@@ -75,14 +75,22 @@ func SaveAPIKeys(config Config, keys APIKeys) error {
 	if _, err := wantedAPIKeys(keys); err != nil {
 		return err
 	}
-	// A masked value from a form stands for the key behind it, which may
-	// still be in the legacy file.
 	legacy, legacyErr := readLegacyAPIKeys(config)
-	if legacyErr == nil {
-		keys = unmaskFrom(keys, legacy)
-	}
 	legacyDone := false
 	err := updateSecrets(config, func(payload *vaultPayload) error {
+		if legacyErr == nil {
+			// A mask stands for the key the form showed. That is the
+			// legacy file's key only where the vault has none and the mask
+			// matches it; otherwise the mask means "unchanged".
+			inVault := apiKeysFromPayload(*payload)
+			keys = replaceMasks(keys, func(provider, mask string) string {
+				old := legacy.forNormalized(provider)
+				if inVault.ForProvider(provider) == "" && old != "" && MaskSecret(old) == mask {
+					return old
+				}
+				return mask
+			})
+		}
 		if err := setAPIKeysInPayload(payload, keys, "user"); err != nil {
 			return err
 		}
@@ -100,7 +108,9 @@ func SaveAPIKeys(config Config, keys APIKeys) error {
 	if !errors.Is(err, vault.ErrNoKeychain) {
 		return err
 	}
-	// No way to encrypt on this system: the legacy file, as before.
+	// No way to encrypt on this system: the legacy file, as before. A mask
+	// keeps the key it stands for, and is never written as a key.
+	keys = replaceMasks(keys, func(provider, _ string) string { return legacy.forNormalized(provider) })
 	if err := os.MkdirAll(filepath.Dir(KeysPath(config)), 0700); err != nil {
 		return err
 	}
@@ -114,29 +124,49 @@ func SaveAPIKeys(config Config, keys APIKeys) error {
 	return err
 }
 
-// unmaskFrom replaces each masked value in keys with the key it stands for
-// in from.
-func unmaskFrom(keys, from APIKeys) APIKeys {
-	keep := func(next *string, old string) {
-		if looksMasked(*next) {
-			*next = old
+// replaceMasks replaces each masked value in keys with what fn returns for
+// its provider (normalized) and the mask.
+func replaceMasks(keys APIKeys, fn func(provider, mask string) string) APIKeys {
+	swap := func(provider string, value *string) {
+		if v := strings.TrimSpace(*value); looksMasked(v) {
+			*value = fn(provider, v)
 		}
 	}
-	keep(&keys.OpenAI, from.OpenAI)
-	keep(&keys.Anthropic, from.Anthropic)
-	keep(&keys.OpenRouter, from.OpenRouter)
-	keep(&keys.Google, from.Google)
+	swap("openai", &keys.OpenAI)
+	swap("anthropic", &keys.Anthropic)
+	swap("openrouter", &keys.OpenRouter)
+	swap("google", &keys.Google)
 	if len(keys.Other) > 0 {
 		other := make(map[string]string, len(keys.Other))
-		for p, v := range keys.Other {
-			if looksMasked(v) {
-				v = from.Other[p]
+		for name, v := range keys.Other {
+			provider := NormalizeProvider(name)
+			if provider == "gemini" {
+				provider = "google"
 			}
-			other[p] = v
+			swap(provider, &v)
+			other[name] = v
 		}
 		keys.Other = other
 	}
 	return keys
+}
+
+// forNormalized is the key for a normalized provider name, wherever keys
+// holds it ("Perplexity AI" serves perplexity-ai).
+func (k APIKeys) forNormalized(provider string) string {
+	if v := k.ForProvider(provider); v != "" {
+		return v
+	}
+	for name, v := range k.Other {
+		p := NormalizeProvider(name)
+		if p == "gemini" {
+			p = "google"
+		}
+		if p == provider {
+			return v
+		}
+	}
+	return ""
 }
 
 // legacyHandled reports whether every key in legacy is now in payload, or

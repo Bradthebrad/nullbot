@@ -453,3 +453,89 @@ func TestCodexGetsNoInheritedCredentials(t *testing.T) {
 		t.Fatal("codex lost its own key")
 	}
 }
+
+// --- third review -----------------------------------------------------------
+
+func TestMasksNeverDeleteOrRestoreKeys(t *testing.T) {
+	config := projectTestConfig(t, "full")
+	writeLegacyKeys(t, config, APIKeys{OpenAI: "sk-legacy-openai-0011", Other: map[string]string{"!!!": "kept-key-000000012"}})
+	if _, err := SaveSecret(config, SecretInput{Name: "anthropic", Kind: SecretAPIKey, Public: map[string]string{"provider": "anthropic"}, Values: map[string]string{"value": "sk-ant-vault-0000013"}}); err != nil {
+		t.Fatal(err)
+	}
+	shown, _ := LoadAPIKeys(config)
+	form := APIKeys{OpenAI: MaskSecret(shown.OpenAI), Anthropic: MaskSecret(shown.Anthropic), OpenRouter: MaskSecret(shown.OpenRouter), Google: MaskSecret(shown.Google)}
+	if err := SaveAPIKeys(config, form); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := LoadAPIKeys(config)
+	if got.Anthropic != "sk-ant-vault-0000013" || got.OpenAI != "sk-legacy-openai-0011" {
+		t.Fatalf("a masked form changed keys: %+v", got)
+	}
+}
+
+func TestAnOlderLegacyKeyIsKeptAndTheFileGoes(t *testing.T) {
+	config := projectTestConfig(t, "full")
+	if _, err := SaveSecret(config, SecretInput{Name: "openai", Kind: SecretAPIKey, Public: map[string]string{"provider": "openai"}, Values: map[string]string{"value": "sk-newer-openai-0014"}}); err != nil {
+		t.Fatal(err)
+	}
+	writeLegacyKeys(t, config, APIKeys{OpenAI: "sk-older-openai-0015"})
+	keys, _ := LoadAPIKeys(config)
+	if keys.OpenAI != "sk-newer-openai-0014" {
+		t.Fatalf("the older key won: %+v", keys)
+	}
+	if _, err := os.Stat(KeysPath(config)); !os.IsNotExist(err) {
+		t.Fatal("keys.json stayed although everything in it is kept")
+	}
+	payload, _ := loadSecretsPayload(config)
+	found := false
+	for _, s := range payload.Secrets {
+		if s.Name == "openai-legacy" && s.Values["value"] == "sk-older-openai-0015" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the older key was lost: %+v", payload.Secrets)
+	}
+	keys.OpenAI = MaskSecret(keys.OpenAI)
+	_ = SaveAPIKeys(config, keys)
+	if got, _ := LoadAPIKeys(config); got.OpenAI != "sk-newer-openai-0014" {
+		t.Fatalf("a mask brought back the older key: %+v", got)
+	}
+}
+
+func TestOneManagedSecretPerProvider(t *testing.T) {
+	config := projectTestConfig(t, "full")
+	if err := SaveAPIKeys(config, APIKeys{Other: map[string]string{"x-ai": "xai-settings-00016"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SaveSecret(config, SecretInput{Name: "x.ai", Kind: SecretAPIKey, Public: map[string]string{"provider": "x-ai"}, Values: map[string]string{"value": "xai-secrets-000017"}, AgentUse: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveAPIKeys(config, APIKeys{Other: map[string]string{"x-ai": "xai-settings-00018"}}); err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := loadSecretsPayload(config)
+	got := map[string]Secret{}
+	for _, s := range payload.Secrets {
+		got[s.Name] = s
+	}
+	if got["x-ai"].Values["value"] != "xai-settings-00018" || got["x.ai"].Values["value"] != "xai-secrets-000017" || !got["x.ai"].AgentUse {
+		t.Fatalf("secrets %+v", payload.Secrets)
+	}
+}
+
+func TestNoKeychainNeverWritesMasksAsKeys(t *testing.T) {
+	withoutKeychain(t)
+	t.Setenv(vault.PassphraseEnv, "")
+	config := projectTestConfig(t, "full")
+	if err := SaveAPIKeys(config, APIKeys{OpenAI: "(not set)", Anthropic: "sk-a...wxyz", OpenRouter: "sk-or-real-000019"}); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := readLegacyAPIKeys(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.OpenAI != "" || legacy.Anthropic != "" || legacy.OpenRouter != "sk-or-real-000019" {
+		t.Fatalf("written %+v", legacy)
+	}
+}

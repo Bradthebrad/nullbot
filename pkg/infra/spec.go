@@ -1,6 +1,7 @@
 package infra
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -91,6 +92,9 @@ func (s *Spec) normalize() error {
 		if s.Region == "" {
 			s.Region = zoneRegion(s.Zone)
 		}
+		if !ValidLocation(s.Region) {
+			return fmt.Errorf("%q is not a Google Cloud region or storage location", s.Region)
+		}
 		if s.Project == "" {
 			return errors.New("the Google Cloud project is unknown; give project, or use a key file that names one")
 		}
@@ -122,9 +126,11 @@ func (s *Spec) normalize() error {
 		if len(m.AllowFrom) == 0 {
 			return fmt.Errorf("machine %s: say who may connect (allow_from, such as your address/32)", m.Name)
 		}
-		for _, cidr := range m.AllowFrom {
+		for j, cidr := range m.AllowFrom {
+			cidr = strings.TrimSpace(cidr)
+			m.AllowFrom[j] = cidr
 			if !ValidCIDR(cidr) {
-				return fmt.Errorf("machine %s: %q is not an IPv4 range such as 203.0.113.4/32", m.Name, cidr)
+				return fmt.Errorf("machine %s: %q is not an IPv4 range such as 203.0.113.4/32%s", m.Name, cidr, CIDRHint(cidr))
 			}
 		}
 		ports := map[int]bool{22: true}
@@ -139,12 +145,14 @@ func (s *Spec) normalize() error {
 			m.Ports = append(m.Ports, p)
 		}
 		sort.Ints(m.Ports)
-		m.SSHKey = strings.TrimSpace(m.SSHKey)
-		if m.SSHKey != "" && !strings.HasPrefix(m.SSHKey, "ssh-") && !strings.HasPrefix(m.SSHKey, "ecdsa-") {
-			return fmt.Errorf("machine %s: the SSH key must be an OpenSSH public key", m.Name)
-		}
-		if strings.ContainsAny(m.SSHKey, "\n\r,") {
-			return fmt.Errorf("machine %s: the SSH key must be one line", m.Name)
+		if strings.TrimSpace(m.SSHKey) != "" {
+			key, err := NormalizeSSHKey(m.SSHKey)
+			if err != nil {
+				return fmt.Errorf("machine %s: %w", m.Name, err)
+			}
+			m.SSHKey = key
+		} else {
+			m.SSHKey = ""
 		}
 		if m.SSHUser == "" {
 			m.SSHUser = map[Cloud]string{AWS: "ubuntu", GCP: "nullbot"}[s.Cloud]
@@ -199,7 +207,7 @@ func BuildCreatePlan(spec Spec, requester string) (Plan, error) {
 	now := time.Now().UTC()
 	plan := Plan{
 		ID: NewPlanID(), Cloud: spec.Cloud, Credential: spec.Credential, Region: spec.Region, Project: spec.Project,
-		Kind: "create", State: PlanProposed, Reason: strings.TrimSpace(spec.Reason), Requester: requester, Created: now,
+		Kind: "create", State: PlanProposed, Reason: CleanText(strings.TrimSpace(spec.Reason)), Requester: requester, Created: now,
 	}
 	var titles []string
 	add := func(r Resource) Resource {
@@ -221,6 +229,17 @@ func BuildCreatePlan(spec Spec, requester string) (Plan, error) {
 		}
 		plan.CostHourly += cost
 		titles = append(titles, fmt.Sprintf("%s (%s)", m.Name, m.Type))
+		for _, cidr := range m.AllowFrom {
+			switch n := CIDRSize(cidr); {
+			case n == 1<<32:
+				plan.Notes = append(plan.Notes, fmt.Sprintf("%s is open to the whole internet (%s) on TCP %s.", m.Name, cidr, joinInts(m.Ports)))
+			case n > 256:
+				plan.Notes = append(plan.Notes, fmt.Sprintf("%s is open to %d addresses (%s) on TCP %s.", m.Name, n, cidr, joinInts(m.Ports)))
+			}
+		}
+		if m.SSHKey != "" {
+			plan.Notes = append(plan.Notes, fmt.Sprintf("%s lets in the SSH key %s.", m.Name, SSHKeyFingerprint(m.SSHKey)))
+		}
 		var steps []Step
 		switch spec.Cloud {
 		case AWS:
@@ -253,7 +272,9 @@ func BuildCreatePlan(spec Spec, requester string) (Plan, error) {
 func BuildDestroyPlan(resources []Resource, deleteContents bool, requester, reason string) (Plan, error) {
 	var live []Resource
 	for _, r := range resources {
-		if r.Live() && r.State != StateDeleting {
+		// Deleting counts: a removal that stopped partway can be tried
+		// again.
+		if r.Live() {
 			live = append(live, r)
 		}
 	}
@@ -267,7 +288,7 @@ func BuildDestroyPlan(resources []Resource, deleteContents bool, requester, reas
 		}
 	}
 	plan := Plan{ID: NewPlanID(), Cloud: first.Cloud, Credential: first.Credential, Region: first.Region, Project: first.Project,
-		Kind: "destroy", State: PlanProposed, Requester: requester, Reason: strings.TrimSpace(reason), Created: time.Now().UTC(), Resources: live}
+		Kind: "destroy", State: PlanProposed, Requester: requester, Reason: CleanText(strings.TrimSpace(reason)), Created: time.Now().UTC(), Resources: live}
 	// Machines first, then what they used: rules, keys; buckets any time.
 	order := map[string]int{KindInstance: 0, KindBucket: 1, KindFirewall: 2, KindSecurityGroup: 2, KindKeyPair: 3}
 	sort.SliceStable(live, func(i, j int) bool { return order[live[i].Kind] < order[live[j].Kind] })
@@ -312,3 +333,42 @@ func placeholder(id string) string { return "{{cloud_id:" + id + "}}" }
 const fileArg = "{{input_file}}"
 
 func encodeKey(pub string) string { return base64.StdEncoding.EncodeToString([]byte(pub)) }
+
+var sshKeyTypes = map[string]bool{
+	"ssh-ed25519": true, "ssh-rsa": true, "ecdsa-sha2-nistp256": true, "ecdsa-sha2-nistp384": true, "ecdsa-sha2-nistp521": true,
+	"sk-ssh-ed25519@openssh.com": true, "sk-ecdsa-sha2-nistp256@openssh.com": true,
+}
+
+// NormalizeSSHKey checks an OpenSSH public key and returns its type and key
+// only: the comment is dropped, so nothing else rides along into the
+// commands and the machine's metadata.
+func NormalizeSSHKey(pub string) (string, error) {
+	fields := strings.Fields(pub)
+	if len(fields) < 2 || !sshKeyTypes[fields[0]] {
+		return "", errors.New("the SSH key must be an OpenSSH public key, such as ssh-ed25519 AAAA…")
+	}
+	blob, err := base64.StdEncoding.DecodeString(fields[1])
+	if err != nil || len(blob) < 20 || len(blob) > 4096 {
+		return "", errors.New("the SSH key's key part is not valid")
+	}
+	// The key part starts with its own type, as a length-prefixed string.
+	if n := int(blob[0])<<24 | int(blob[1])<<16 | int(blob[2])<<8 | int(blob[3]); n < 0 || n+4 > len(blob) || string(blob[4:4+n]) != fields[0] {
+		return "", errors.New("the SSH key's type and key part do not match")
+	}
+	return fields[0] + " " + fields[1], nil
+}
+
+// SSHKeyFingerprint is the key's SHA256 fingerprint, as ssh-keygen -l
+// shows it.
+func SSHKeyFingerprint(pub string) string {
+	fields := strings.Fields(pub)
+	if len(fields) < 2 {
+		return ""
+	}
+	blob, err := base64.StdEncoding.DecodeString(fields[1])
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(blob)
+	return "SHA256:" + base64.RawStdEncoding.EncodeToString(sum[:])
+}

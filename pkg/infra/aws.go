@@ -51,7 +51,7 @@ func awsMachineSteps(spec Spec, m MachineSpec, add func(Resource) Resource, cost
 		keyName = key.Name
 		deps = append(deps, key.ID)
 		steps = append(steps, Step{
-			Summary:  fmt.Sprintf("Upload the SSH public key for %s as key pair %s", m.Name, key.Name),
+			Summary:  fmt.Sprintf("Upload the SSH public key for %s (%s) as key pair %s", m.Name, SSHKeyFingerprint(m.SSHKey), key.Name),
 			Argv:     append([]string{"aws", "ec2", "import-key-pair", "--key-name", key.Name, "--public-key-material", encodeKey(m.SSHKey), "--tag-specifications", awsTags("key-pair", key, ""), "--output", "json"}, region...),
 			Resource: key.ID, Action: "create", Parse: "aws_key_pair",
 		})
@@ -110,13 +110,19 @@ func awsMachineSteps(spec Spec, m MachineSpec, add func(Resource) Resource, cost
 }
 
 func awsBucketSteps(spec Spec, b BucketSpec, add func(Resource) Resource) []Step {
-	bucket := add(Resource{Kind: KindBucket, Name: b.Name, Region: spec.Region, CloudID: b.Name})
+	// Its cloud id is set only when the create step succeeds, so a bucket
+	// that already existed is never taken over or removed.
+	bucket := add(Resource{Kind: KindBucket, Name: b.Name, Region: spec.Region})
 	create := []string{"aws", "s3api", "create-bucket", "--bucket", b.Name, "--region", spec.Region, "--output", "json"}
 	if spec.Region != "us-east-1" {
 		create = append(create, "--create-bucket-configuration", "LocationConstraint="+spec.Region)
 	}
 	tags := fmt.Sprintf("TagSet=[{Key=nullbot-managed,Value=true},{Key=nullbot-id,Value=%s},{Key=nullbot-plan,Value=%s}]", bucket.ID, bucket.PlanID)
 	return []Step{
+		// In us-east-1, creating a bucket you already own succeeds quietly;
+		// checking first keeps an existing bucket from being adopted.
+		{Summary: fmt.Sprintf("Check that there is no bucket named %s yet", b.Name), Argv: []string{"aws", "s3api", "head-bucket", "--bucket", b.Name, "--region", spec.Region},
+			Resource: bucket.ID, Action: "absent"},
 		{Summary: fmt.Sprintf("Create bucket %s in %s", b.Name, spec.Region), Argv: create, Resource: bucket.ID, Action: "create", Parse: "bucket"},
 		{Summary: fmt.Sprintf("Keep %s private", b.Name), Argv: []string{"aws", "s3api", "put-public-access-block", "--bucket", b.Name, "--region", spec.Region,
 			"--public-access-block-configuration", "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"}, Resource: bucket.ID, Action: "change"},
@@ -128,17 +134,46 @@ func awsDeleteSteps(r Resource, deleteContents bool) []Step {
 	region := []string{"--region", r.Region}
 	id := r.CloudID
 	if id == "" {
-		// Never created, or its id was never read: nothing to call.
-		return []Step{{Summary: fmt.Sprintf("Forget %s, which was never created", r.Name), Resource: r.ID, Action: "delete"}}
+		find := awsFindStep(r)
+		if find == nil {
+			// A bucket's id is its name, recorded only when NullBot created
+			// it; without one, it was never created by NullBot.
+			return []Step{{Summary: fmt.Sprintf("Forget %s, which NullBot never created", r.Name), Resource: r.ID, Action: "delete"}}
+		}
+		// Its id was never recorded (the plan stopped while it ran): look
+		// for it by NullBot's tag, and remove it only if it is there.
+		id = placeholder(r.ID)
+		return append([]Step{*find}, awsDeleteByID(r, id, region, deleteContents)...)
 	}
+	return awsDeleteByID(r, id, region, deleteContents)
+}
+
+func awsFindStep(r Resource) *Step {
+	region := []string{"--region", r.Region}
+	tag := "Name=tag:nullbot-id,Values=" + r.ID
+	var argv []string
+	switch r.Kind {
+	case KindInstance:
+		argv = []string{"aws", "ec2", "describe-instances", "--filters", tag, "Name=instance-state-name,Values=pending,running,stopping,stopped", "--query", "Reservations[].Instances[].InstanceId", "--output", "json"}
+	case KindSecurityGroup:
+		argv = []string{"aws", "ec2", "describe-security-groups", "--filters", tag, "--query", "SecurityGroups[].GroupId", "--output", "json"}
+	case KindKeyPair:
+		argv = []string{"aws", "ec2", "describe-key-pairs", "--filters", tag, "--query", "KeyPairs[].KeyPairId", "--output", "json"}
+	default:
+		return nil
+	}
+	return &Step{Summary: fmt.Sprintf("Look for %s by NullBot's tag %s", r.Name, r.ID), Argv: append(argv, region...), Resource: r.ID, Action: "find", Parse: "aws_find"}
+}
+
+func awsDeleteByID(r Resource, id string, region []string, deleteContents bool) []Step {
 	switch r.Kind {
 	case KindInstance:
 		return []Step{
-			{Summary: fmt.Sprintf("Terminate machine %s (%s); its disk is deleted with it", r.Name, id), Argv: append([]string{"aws", "ec2", "terminate-instances", "--instance-ids", id, "--output", "json"}, region...), Resource: r.ID, Action: "delete", IgnoreMissing: true},
+			{Summary: fmt.Sprintf("Terminate machine %s; its disk is deleted with it", r.Name), Argv: append([]string{"aws", "ec2", "terminate-instances", "--instance-ids", id, "--output", "json"}, region...), Resource: r.ID, Action: "delete", IgnoreMissing: true},
 			{Summary: fmt.Sprintf("Wait for %s to be gone", r.Name), Argv: append([]string{"aws", "ec2", "wait", "instance-terminated", "--instance-ids", id}, region...), Resource: r.ID, Action: "wait", IgnoreMissing: true},
 		}
 	case KindSecurityGroup:
-		return []Step{{Summary: fmt.Sprintf("Delete security group %s (%s)", r.Name, id), Argv: append([]string{"aws", "ec2", "delete-security-group", "--group-id", id}, region...), Resource: r.ID, Action: "delete", IgnoreMissing: true}}
+		return []Step{{Summary: fmt.Sprintf("Delete security group %s", r.Name), Argv: append([]string{"aws", "ec2", "delete-security-group", "--group-id", id}, region...), Resource: r.ID, Action: "delete", IgnoreMissing: true}}
 	case KindKeyPair:
 		return []Step{{Summary: fmt.Sprintf("Delete key pair %s", r.Name), Argv: append([]string{"aws", "ec2", "delete-key-pair", "--key-pair-id", id}, region...), Resource: r.ID, Action: "delete", IgnoreMissing: true}}
 	case KindBucket:
@@ -148,7 +183,11 @@ func awsDeleteSteps(r Resource, deleteContents bool) []Step {
 			argv = append(argv, "--force")
 			summary = fmt.Sprintf("Delete bucket %s and everything in it", r.Name)
 		}
-		return []Step{{Summary: summary, Argv: argv, Resource: r.ID, Action: "delete", IgnoreMissing: true}}
+		return []Step{
+			{Summary: fmt.Sprintf("Check that %s still carries NullBot's tag %s", r.Name, r.ID), Argv: []string{"aws", "s3api", "get-bucket-tagging", "--bucket", r.Name, "--region", r.Region, "--output", "json"},
+				Resource: r.ID, Action: "verify"},
+			{Summary: summary, Argv: argv, Resource: r.ID, Action: "delete", IgnoreMissing: true},
+		}
 	}
 	return nil
 }

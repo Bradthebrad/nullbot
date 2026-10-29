@@ -321,7 +321,7 @@ func runModelsCLI(args []string, appDir string, stdout, stderr io.Writer) int {
 		provider, model, _ := strings.Cut(positional[0], "/")
 		err := a.UpdateConfig(func(c *app.Config) {
 			if *forSubagents {
-				c.SubagentModel = app.ModelConfig{Provider: provider, Model: model}
+				c.SubagentModel = app.ModelConfig{Provider: provider, Model: model, ReasoningEffort: c.SubagentModel.ReasoningEffort}
 			} else {
 				c.Model = app.ModelConfig{Provider: provider, Model: model, ReasoningEffort: c.Model.ReasoningEffort}
 			}

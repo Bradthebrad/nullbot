@@ -15,8 +15,11 @@ package infra
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"net/netip"
 	"regexp"
 	"strings"
 	"time"
@@ -140,6 +143,66 @@ type Plan struct {
 	DecidedBy  string    `json:"decided_by,omitempty"`
 	Finished   time.Time `json:"finished,omitempty"`
 	Error      string    `json:"error,omitempty"`
+	// ApprovedHash is ContentHash when the plan was approved: a plan whose
+	// commands changed after approval does not run.
+	ApprovedHash string `json:"approved_hash,omitempty"`
+	// RunnerPID and RunnerHost are the process applying it, so a run whose
+	// process ended without finishing can be recognized.
+	RunnerPID  int    `json:"runner_pid,omitempty"`
+	RunnerHost string `json:"runner_host,omitempty"`
+	// Hash is ContentHash as the plan was read, for approving exactly what
+	// was shown. It is not stored.
+	Hash string `json:"hash,omitempty"`
+}
+
+// ContentHash covers everything a plan does: its cloud, credentials, each
+// step's command, input and handling, and the resources it touches.
+// Progress (states, output, times) is left out.
+func (p Plan) ContentHash() string {
+	type step struct {
+		Argv          []string `json:"argv"`
+		Input         string   `json:"input"`
+		Resource      string   `json:"resource"`
+		Action        string   `json:"action"`
+		Parse         string   `json:"parse"`
+		IgnoreMissing bool     `json:"ignore_missing"`
+	}
+	type resource struct {
+		ID, Kind, Name, Region, Zone, Project, CloudID string
+	}
+	content := struct {
+		ID, Cloud, Credential, Region, Project, Kind string
+		Steps                                        []step
+		Resources                                    []resource
+	}{ID: p.ID, Cloud: string(p.Cloud), Credential: p.Credential, Region: p.Region, Project: p.Project, Kind: p.Kind}
+	for _, s := range p.Steps {
+		content.Steps = append(content.Steps, step{s.Argv, s.Input, s.Resource, s.Action, s.Parse, s.IgnoreMissing})
+	}
+	for _, r := range p.Resources {
+		content.Resources = append(content.Resources, resource{r.ID, r.Kind, r.Name, r.Region, r.Zone, r.Project, r.CloudID})
+	}
+	data, _ := json.Marshal(content)
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// CleanText drops control characters (keeping new lines and tabs), so text
+// from an agent or a remote machine cannot rewrite a terminal: hide the
+// lines after it, move the cursor, or change the title.
+func CleanText(s string) string {
+	if !strings.ContainsFunc(s, isControl) {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if isControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+func isControl(r rune) bool {
+	return r != '\n' && r != '\t' && (r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) || r == 0x2028 || r == 0x2029 || (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069))
 }
 
 // Pending reports a plan waiting for a decision.
@@ -170,18 +233,32 @@ func ValidBucketName(name string) bool {
 	return bucketPattern.MatchString(name) && !strings.Contains(name, "..") && !strings.HasPrefix(name, "goog") && !strings.HasPrefix(name, "xn--")
 }
 
-var cidrPattern = regexp.MustCompile(`^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$`)
-
-// ValidCIDR reports an IPv4 range such as 203.0.113.4/32.
+// ValidCIDR reports an IPv4 range written as its network, such as
+// 203.0.113.4/32 or 10.0.0.0/16. A range whose address has bits past its
+// length (203.0.113.4/0) is refused: it reads like one address but opens
+// many.
 func ValidCIDR(cidr string) bool {
-	if !cidrPattern.MatchString(cidr) {
-		return false
+	prefix, err := netip.ParsePrefix(cidr)
+	return err == nil && prefix.Addr().Is4() && prefix.Masked() == prefix && prefix.String() == cidr
+}
+
+// CIDRSize is how many addresses a range covers.
+func CIDRSize(cidr string) uint64 {
+	prefix, err := netip.ParsePrefix(cidr)
+	if err != nil {
+		return 0
 	}
-	var a, b, c, d, bits int
-	if _, err := fmt.Sscanf(cidr, "%d.%d.%d.%d/%d", &a, &b, &c, &d, &bits); err != nil {
-		return false
+	return 1 << (32 - prefix.Bits())
+}
+
+// CIDRHint suggests the range someone probably meant, for an error.
+func CIDRHint(cidr string) string {
+	if prefix, err := netip.ParsePrefix(cidr); err == nil && prefix.Addr().Is4() {
+		if prefix.Masked() != prefix {
+			return fmt.Sprintf("; did you mean %s/32 (that address) or %s (the whole range)?", prefix.Addr(), prefix.Masked())
+		}
 	}
-	return a <= 255 && b <= 255 && c <= 255 && d <= 255 && bits >= 0 && bits <= 32
+	return ""
 }
 
 var regionPattern = regexp.MustCompile(`^[a-z]{2,}(-[a-z0-9]+){1,3}$`)
@@ -189,6 +266,14 @@ var regionPattern = regexp.MustCompile(`^[a-z]{2,}(-[a-z0-9]+){1,3}$`)
 // ValidRegion reports a region or zone name such as us-east-1 or
 // us-central1-a.
 func ValidRegion(region string) bool { return regionPattern.MatchString(region) }
+
+var locationPattern = regexp.MustCompile(`^(?i)[a-z][a-z0-9]{1,15}(-[a-z0-9]+){0,3}$`)
+
+// ValidLocation reports a Google Cloud Storage location: a region
+// (us-central1), a dual region (nam4) or a multi-region (US, EU, ASIA).
+func ValidLocation(location string) bool {
+	return len(location) <= 40 && locationPattern.MatchString(location)
+}
 
 var typePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,40}$`)
 

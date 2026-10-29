@@ -75,7 +75,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return runModelsCLI(rest[1:], appDir, stdout, stderr)
 		}
 		if rest[0] == "infra" {
-			return runInfraCLI(rest[1:], appDir, stdout, stderr)
+			return runInfraCLI(rest[1:], appDir, stdin, stdout, stderr)
 		}
 		return runVaultCLI(rest[0], rest[1:], appDir, stdin, stdout, stderr)
 	}

@@ -107,6 +107,7 @@ func (s *Store) savePlanLocked(p Plan) error {
 	if err != nil {
 		return err
 	}
+	p.Hash = ""
 	return writeJSON(path, p)
 }
 
@@ -124,7 +125,11 @@ func (s *Store) Plan(id string) (Plan, error) {
 	if err != nil {
 		return p, err
 	}
-	return p, json.Unmarshal(data, &p)
+	if err := json.Unmarshal(data, &p); err != nil {
+		return p, err
+	}
+	p.Hash = p.ContentHash()
+	return p, nil
 }
 
 // Plans lists plans, newest first.
@@ -256,7 +261,9 @@ func (s *Store) Propose(p Plan) error {
 
 // Decide approves or rejects a proposed plan. Only a person decides: the
 // caller is a user interface or the command line, never an agent's tool.
-func (s *Store) Decide(id string, approve bool, by string) (Plan, error) {
+// seen is the Hash of the plan the person looked at; approving fails if
+// the plan changed since, and the approval covers exactly that content.
+func (s *Store) Decide(id string, approve bool, by, seen string) (Plan, error) {
 	unlock, err := s.lock()
 	if err != nil {
 		return Plan{}, err
@@ -269,10 +276,14 @@ func (s *Store) Decide(id string, approve bool, by string) (Plan, error) {
 	if p.State != PlanProposed {
 		return p, fmt.Errorf("plan %s is %s, not waiting for a decision", id, p.State)
 	}
+	if approve && seen != "" && seen != p.ContentHash() {
+		return p, fmt.Errorf("plan %s changed since you looked at it; look at it again before approving", id)
+	}
 	p.State, p.Decided, p.DecidedBy = PlanRejected, time.Now().UTC(), by
 	event := "rejected"
 	if approve {
 		p.State, event = PlanApproved, "approved"
+		p.ApprovedHash = p.ContentHash()
 	}
 	if err := s.savePlanLocked(p); err != nil {
 		return p, err

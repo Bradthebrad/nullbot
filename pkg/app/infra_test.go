@@ -69,10 +69,23 @@ func TestInfraPlanApproveApply(t *testing.T) {
 	if plan == nil || apply == nil || status == nil {
 		t.Fatal("infra tools missing")
 	}
-	out, err := plan(context.Background(), map[string]any{
+	args := map[string]any{
 		"cloud": "aws", "credential": "aws-lab", "ssh_key_secret": "deploy", "reason": "eval box",
 		"machines": []any{map[string]any{"name": "eval", "type": "t3.medium", "allow_from": []any{"my-ip"}, "ports": []any{8080}}},
-	})
+	}
+	// Credentials not allowed for agents are refused, as for secret_run.
+	if _, err := plan(context.Background(), args); err == nil || !strings.Contains(err.Error(), "not allowed for agents") {
+		t.Fatalf("an agent used credentials it may not: %v", err)
+	}
+	if _, err := SaveSecret(config, SecretInput{Name: "aws-lab", Kind: SecretAWS, AgentUse: true, Public: map[string]string{"region": "eu-west-1"}}); err != nil {
+		t.Fatal(err)
+	}
+	// An agent cannot bring an SSH key of its own.
+	own := map[string]any{"cloud": "aws", "credential": "aws-lab", "machines": []any{map[string]any{"name": "x", "type": "t3.micro", "allow_from": []any{"198.51.100.7/32"}, "ssh_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey"}}}
+	if _, err := plan(context.Background(), own); err == nil || !strings.Contains(err.Error(), "ssh_key_secret") {
+		t.Fatalf("an agent's own key was accepted: %v", err)
+	}
+	out, err := plan(context.Background(), args)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +104,7 @@ func TestInfraPlanApproveApply(t *testing.T) {
 	// Approved while the agent waits.
 	go func() {
 		time.Sleep(300 * time.Millisecond)
-		_, _ = a.DecideInfraPlan(id, true, "you")
+		_, _ = a.DecideInfraPlan(id, true, "you", "")
 	}()
 	out, err = apply(context.Background(), map[string]any{"plan": id, "wait_minutes": 1})
 	if err != nil || !strings.Contains(out, `"state": "applied"`) {
@@ -123,7 +136,7 @@ func TestInfraPlanApproveApply(t *testing.T) {
 	}
 	// The user approves and runs it while the agent waits on it: whichever
 	// starts first runs it, and the agent reports that run, not a failure.
-	_, _ = a.DecideInfraPlan(destroy.ID, true, "you")
+	_, _ = a.DecideInfraPlan(destroy.ID, true, "you", "")
 	userDone := make(chan struct{})
 	go func() {
 		defer close(userDone)
@@ -208,7 +221,7 @@ done
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = a.DecideInfraPlan(plan.ID, true, "you")
+	_, _ = a.DecideInfraPlan(plan.ID, true, "you", "")
 	if _, err := a.ApplyInfraPlan(context.Background(), plan.ID, "you"); err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +238,14 @@ done
 	if report.Setup != "done" || len(report.Containers) != 1 || len(report.Services) != 3 {
 		t.Fatalf("report %+v", report)
 	}
+	// Agents need the SSH key to be allowed for them.
+	if _, err := a.inspectNode(context.Background(), "web", true); err == nil || !strings.Contains(err.Error(), "not allowed for agents") {
+		t.Fatalf("an agent used a key it may not: %v", err)
+	}
 	args, _ := os.ReadFile(filepath.Join(bin, "args"))
+	if !strings.Contains(string(args), "-F none") || !strings.Contains(string(args), `UserKnownHostsFile="`) {
+		t.Fatalf("ssh reads the user's configuration: %s", args)
+	}
 	if !strings.Contains(string(args), "-l ubuntu") || !strings.Contains(string(args), "34.1.2.3") || !strings.Contains(string(args), "StrictHostKeyChecking=accept-new") {
 		t.Fatalf("ssh args %s", args)
 	}
@@ -233,6 +253,28 @@ done
 	_ = os.WriteFile(filepath.Join(bin, "ssh"), []byte("#!/bin/sh\necho 'Permission denied (publickey).' >&2\nexit 255\n"), 0o755)
 	if _, err := a.OpenTunnel("web", 11434, 0); err == nil || !strings.Contains(err.Error(), "Permission denied") {
 		t.Fatalf("tunnel: %v", err)
+	}
+	// Removing the machine by name takes its security group and key pair
+	// along, and forgets its host key.
+	known := filepath.Join(config.AppDir, "infra", "known_hosts")
+	_ = os.WriteFile(known, []byte("34.1.2.3 ssh-ed25519 AAAAhost\n10.9.9.9 ssh-ed25519 AAAAother\n"), 0o600)
+	destroy, err := a.PlanInfraDestroy([]string{"web"}, false, "you", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	kinds := map[string]bool{}
+	for _, r := range destroy.Resources {
+		kinds[r.Kind] = true
+	}
+	if !kinds[infra.KindInstance] || !kinds[infra.KindSecurityGroup] || !kinds[infra.KindKeyPair] {
+		t.Fatalf("removal leaves things behind: %+v", destroy.Resources)
+	}
+	_, _ = a.DecideInfraPlan(destroy.ID, true, "you", "")
+	if _, err := a.ApplyInfraPlan(context.Background(), destroy.ID, "you"); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(known); strings.Contains(string(data), "34.1.2.3") || !strings.Contains(string(data), "10.9.9.9") {
+		t.Fatalf("known_hosts after removal: %q", data)
 	}
 }
 
@@ -253,5 +295,19 @@ func TestConnectingANodeNeverReplacesYourServer(t *testing.T) {
 	config.LocalEndpoints = append(config.LocalEndpoints, LocalEndpoint{ID: "ollama-cloud", Kind: "vllm"})
 	if _, _, err := nodeServerID(config, "Ollama"); err == nil {
 		t.Fatal("a server was replaced")
+	}
+}
+
+func TestBatchFilesGetOnlySafeArguments(t *testing.T) {
+	if err := checkBatchArgs(`C:\gcloud\bin\gcloud.cmd`, []string{"compute", "instances", "create", "web", "--description", "NullBot plan-1 for web"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"us&calc", `a"b`, "x|y", "50%", "a^b", "line\nbreak"} {
+		if err := checkBatchArgs(`C:\gcloud\bin\gcloud.CMD`, []string{bad}); err == nil {
+			t.Errorf("%q passed to a batch file", bad)
+		}
+	}
+	if err := checkBatchArgs("/usr/bin/gcloud", []string{"us&calc"}); err != nil {
+		t.Fatal("a program (not a batch file) was checked")
 	}
 }

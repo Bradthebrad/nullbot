@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -42,7 +43,21 @@ esac
 	if _, err := os.Stat(filepath.Join(bin, "calls")); err == nil {
 		t.Fatal("ran before approval")
 	}
-	if code, out, errOut := runCLI(t, "", "infra", "approve", id, "--apply", "--app-dir", dir); code != 0 || !strings.Contains(out, "[applied]") {
+	// Approving needs a person at a terminal, typing the plan's code.
+	if code, _, errOut := runCLI(t, "", "infra", "approve", id, "--app-dir", dir); code != 1 || !strings.Contains(errOut, "approve from a terminal") {
+		t.Fatalf("approved without a terminal: %d %q", code, errOut)
+	}
+	defer func(old func(io.Reader) bool) { isTerminal = old }(isTerminal)
+	isTerminal = func(io.Reader) bool { return true }
+	t.Setenv("NULLBOT_AGENT_COMMAND", "1")
+	if code, _, errOut := runCLI(t, id[len(id)-4:]+"\n", "infra", "approve", id, "--app-dir", dir); code != 1 || !strings.Contains(errOut, "agents cannot approve") {
+		t.Fatalf("an agent's command approved: %d %q", code, errOut)
+	}
+	t.Setenv("NULLBOT_AGENT_COMMAND", "")
+	if code, _, errOut := runCLI(t, "yes\n", "infra", "approve", id, "--app-dir", dir); code != 1 || !strings.Contains(errOut, "not approved") {
+		t.Fatalf("approved without the code: %d %q", code, errOut)
+	}
+	if code, out, errOut := runCLI(t, id[len(id)-4:]+"\n", "infra", "approve", id, "--apply", "--app-dir", dir); code != 0 || !strings.Contains(out, "[applied]") || !strings.Contains(out, "type "+id[len(id)-4:]) {
 		t.Fatalf("approve: %d %q %q", code, out, errOut)
 	}
 	if code, out, _ := runCLI(t, "", "--app-dir", dir, "infra"); code != 0 || !strings.Contains(out, "34.9.9.9") || !strings.Contains(out, "an hour") || !strings.Contains(out, "nullbot infra agents on") {

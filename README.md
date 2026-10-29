@@ -185,8 +185,10 @@ See [docs/SECRETS.md](docs/SECRETS.md).
 
 Machines and buckets on AWS and Google Cloud, made through the official
 `aws` and `gcloud` tools. Every change is a plan of exact commands with its
-hourly cost, and nothing runs until you approve it; every command goes in a
-ledger, and everything made is tagged and can be removed. A machine can set
+hourly cost, and nothing runs until you approve it, in the app's Cloud view
+or your terminal; the approval covers exactly those commands. Every command
+goes in a ledger, everything made is tagged, and NullBot only ever removes
+what it made. A machine can set
 itself up on first boot with NVIDIA drivers, Ollama and its models, and a
 headless NullBot; `nullbot infra connect` tunnels its model here so your
 agents use it. `nullbot infra inspect` shows what a machine runs: ports and
@@ -194,7 +196,7 @@ who can reach them, services, nginx sites, containers.
 
 ```sh
 nullbot infra plan --file gpu-box.json          # propose: every command, and the cost
-nullbot infra approve plan-1a2b3c4d --apply     # run it
+nullbot infra approve plan-1a2b3c4d --apply     # type its code to run it
 nullbot infra connect gpu-box                   # its Ollama becomes local:gpu-box
 nullbot infra destroy gpu-box                   # remove it, after you approve
 ```

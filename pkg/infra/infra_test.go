@@ -25,7 +25,9 @@ func TestSpecValidation(t *testing.T) {
 		"bad name":       func(s *Spec) { s.Machines[0].Name = "GPU box" },
 		"bad type":       func(s *Spec) { s.Machines[0].Type = "g6.xlarge; rm -rf /" },
 		"bad key":        func(s *Spec) { s.Machines[0].SSHKey = "-----BEGIN PRIVATE KEY-----" },
-		"key with comma": func(s *Spec) { s.Machines[0].SSHKey = pub + ",x" },
+		"key body":       func(s *Spec) { s.Machines[0].SSHKey = "ssh-ed25519 !!!!" },
+		"key mismatch":   func(s *Spec) { s.Machines[0].SSHKey = "ssh-rsa AAAAC3NzaC1lZDI1NTE5AAAAITestKey" },
+		"host bits":      func(s *Spec) { s.Machines[0].AllowFrom = []string{"203.0.113.4/0"} },
 		"bad port":       func(s *Spec) { s.Machines[0].Ports = []int{70000} },
 		"bad bucket":     func(s *Spec) { s.Buckets[0].Name = "Bad_Bucket" },
 		"gcp no project": func(s *Spec) { s.Cloud = GCP; s.Region = ""; s.Project = "" },
@@ -96,7 +98,8 @@ func TestGCPCreatePlan(t *testing.T) {
 		"gcloud compute firewall-rules create nb-", "--source-ranges 198.51.100.0/24", "--allow tcp:22",
 		"gcloud compute instances create gpu --zone us-central1-a --machine-type g2-standard-4",
 		"--image-family ubuntu-2404-lts-amd64", "--maintenance-policy TERMINATE", "--provisioning-model SPOT",
-		"--labels nullbot-managed=true,nullbot-id=nb-", "--metadata ssh-keys=nullbot:" + pub,
+		"--labels nullbot-managed=true,nullbot-id=nb-", "--metadata block-project-ssh-keys=TRUE,ssh-keys=nullbot:ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey --project",
+		"--no-service-account --no-scopes", "--action DENY --rules all --source-ranges 0.0.0.0/0 --priority 1000", "--priority 900",
 		"gcloud storage buckets create gs://acme-lab-scratch --location us-central1", "--public-access-prevention",
 		"--project acme-lab-123",
 	} {
@@ -104,8 +107,13 @@ func TestGCPCreatePlan(t *testing.T) {
 			t.Errorf("plan lacks %q:\n%s", want, joined)
 		}
 	}
-	if len(plan.Resources) != 3 {
+	if len(plan.Resources) != 4 {
 		t.Fatalf("resources %+v", plan.Resources)
+	}
+	for _, r := range plan.Resources {
+		if r.CloudID != "" {
+			t.Fatalf("%s has a cloud id before it exists", r.Name)
+		}
 	}
 }
 
@@ -143,11 +151,11 @@ func TestApplyNeedsApprovalThenRunsAndTearsDown(t *testing.T) {
 		"aws ec2 create-security-group": `{"GroupId": "sg-0abc"}`,
 		"aws ec2 run-instances":         `{"Instances": [{"InstanceId": "i-0abc", "PrivateIpAddress": "10.0.0.5"}]}`,
 		"aws ec2 describe-instances":    `{"public_ip": "34.1.2.3", "private_ip": "10.0.0.5", "state": "running"}`,
-	}}
+	}, fail: map[string]string{"aws s3api head-bucket": headBucket404}}
 	if _, err := store.Apply(context.Background(), plan.ID, ApplyOptions{Runner: runner}); err == nil || !strings.Contains(err.Error(), "waiting for approval") {
 		t.Fatalf("ran unapproved: %v", err)
 	}
-	if _, err := store.Decide(plan.ID, true, "you"); err != nil {
+	if _, err := store.Decide(plan.ID, true, "you", ""); err != nil {
 		t.Fatal(err)
 	}
 	var userData string
@@ -207,8 +215,9 @@ func TestApplyNeedsApprovalThenRunsAndTearsDown(t *testing.T) {
 		t.Fatalf("machine not first: %v", destroy.Steps[0].Argv)
 	}
 	_ = store.Propose(destroy)
-	_, _ = store.Decide(destroy.ID, true, "you")
-	runner.fail = map[string]string{"aws ec2 delete-key-pair": "An error occurred (InvalidKeyPair.NotFound)"}
+	_, _ = store.Decide(destroy.ID, true, "you", "")
+	runner.fail = map[string]string{"aws ec2 delete-key-pair": "An error occurred (InvalidKeyPair.NotFound) when calling the DeleteKeyPair operation"}
+	runner.answers["aws s3api get-bucket-tagging"] = `{"TagSet": [{"Key": "nullbot-id", "Value": "` + bucketID(resources) + `"}]}`
 	if _, err := store.Apply(context.Background(), destroy.ID, ApplyOptions{Runner: runner}); err != nil {
 		t.Fatal(err)
 	}
@@ -223,6 +232,17 @@ func TestApplyNeedsApprovalThenRunsAndTearsDown(t *testing.T) {
 	}
 }
 
+const headBucket404 = "An error occurred (404) when calling the HeadBucket operation: Not Found"
+
+func bucketID(resources []Resource) string {
+	for _, r := range resources {
+		if r.Kind == KindBucket {
+			return r.ID
+		}
+	}
+	return ""
+}
+
 type runnerFunc func([]string) (string, string, error)
 
 func (f runnerFunc) Run(_ context.Context, argv []string) (string, string, error) { return f(argv) }
@@ -231,19 +251,19 @@ func TestApplyFailureLeavesARecord(t *testing.T) {
 	store := Open(t.TempDir())
 	plan, _ := BuildCreatePlan(awsSpec(), "main")
 	_ = store.Propose(plan)
-	if _, err := store.Decide(plan.ID, false, "you"); err != nil {
+	if _, err := store.Decide(plan.ID, false, "you", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Decide(plan.ID, true, "you"); err == nil {
+	if _, err := store.Decide(plan.ID, true, "you", ""); err == nil {
 		t.Fatal("a rejected plan was approved")
 	}
 	plan, _ = BuildCreatePlan(awsSpec(), "main")
 	_ = store.Propose(plan)
-	_, _ = store.Decide(plan.ID, true, "you")
+	_, _ = store.Decide(plan.ID, true, "you", "")
 	runner := &fakeRunner{answers: map[string]string{
 		"aws ec2 import-key-pair":       `{"KeyPairId": "key-0abc"}`,
 		"aws ec2 create-security-group": `{"GroupId": "sg-0abc"}`,
-	}, fail: map[string]string{"aws ec2 run-instances": "An error occurred (InsufficientInstanceCapacity): no g6.xlarge capacity"}}
+	}, fail: map[string]string{"aws ec2 run-instances": "An error occurred (InsufficientInstanceCapacity): no g6.xlarge capacity", "aws s3api head-bucket": headBucket404}}
 	done, err := store.Apply(context.Background(), plan.ID, ApplyOptions{Runner: runner})
 	if err == nil || !strings.Contains(err.Error(), "InsufficientInstanceCapacity") || done.State != PlanFailed {
 		t.Fatalf("%v %+v", err, done.State)

@@ -33,7 +33,7 @@ func infraInspectTool(state *App) agent.Tool {
 			if machine == "here" || machine == "" {
 				return prettyJSON(ThisComputer(ctx)), nil
 			}
-			report, err := state.InspectNode(ctx, machine)
+			report, err := state.inspectNode(ctx, machine, true)
 			if err != nil {
 				return "", err
 			}
@@ -112,7 +112,7 @@ func infraPlanTool(state *App) agent.Tool {
 			if err := json.Unmarshal(data, &req.Spec); err != nil {
 				return "", fmt.Errorf("the plan request is malformed: %w", err)
 			}
-			plan, err := state.PlanInfra(ctx, req, runtimeAgentName(ctx))
+			plan, err := state.PlanInfra(ctx, req, "agent "+runtimeAgentName(ctx))
 			if err != nil {
 				return "", err
 			}
@@ -171,17 +171,24 @@ func infraApplyTool(state *App) agent.Tool {
 				case infra.PlanApproved:
 					done, err := state.ApplyInfraPlan(ctx, id, "agent "+runtimeAgentName(ctx))
 					if err != nil {
-						if done.State == infra.PlanApplying || done.State == infra.PlanApplied {
+						switch done.State {
+						case infra.PlanApplying, infra.PlanApplied:
 							// The user ran it first; report that run.
-							break
+						case infra.PlanApproved, "":
+							// It never started (credentials missing, vault
+							// locked): say why.
+							return "", err
+						default:
+							return planSummary(done, "It stopped at the failed step. What it created is in infra_status; propose removing it with infra_destroy if it is not wanted."), nil
 						}
-						return planSummary(done, "It stopped at the failed step. What it created is in infra_status; propose removing it with infra_destroy if it is not wanted."), nil
+						break
 					}
 					return planSummary(done, ""), nil
 				case infra.PlanApplying:
-					// Running already (the user approved and ran it); report
-					// when it ends.
-					deadline = time.Now().Add(wait)
+					// Running already (the user approved and ran it).
+					if time.Now().After(deadline) {
+						return planSummary(plan, "Still running. Call infra_apply again to wait for it to finish."), nil
+					}
 				case infra.PlanApplied, infra.PlanFailed:
 					return planSummary(plan, "This plan has run."), nil
 				case infra.PlanProposed:
@@ -220,7 +227,7 @@ func infraDestroyTool(state *App) agent.Tool {
 				}
 			}
 			contents, _ := args["delete_contents"].(bool)
-			plan, err := state.PlanInfraDestroy(ids, contents, runtimeAgentName(ctx), stringArg(args, "reason"))
+			plan, err := state.PlanInfraDestroy(ids, contents, "agent "+runtimeAgentName(ctx), stringArg(args, "reason"))
 			if err != nil {
 				return "", err
 			}

@@ -48,11 +48,20 @@ func (s *Store) Apply(ctx context.Context, id string, opts ApplyOptions) (Plan, 
 			err = fmt.Errorf("plan %s is waiting for approval", id)
 		}
 	}
+	if err == nil && (plan.ApprovedHash == "" || plan.ApprovedHash != plan.ContentHash()) {
+		// The plan file changed after it was approved: what would run is
+		// not what was approved.
+		err = fmt.Errorf("plan %s changed after it was approved, so it will not run; propose it again", id)
+		plan.State, plan.Error, plan.Finished = PlanFailed, err.Error(), time.Now().UTC()
+		_ = s.savePlanLocked(plan)
+		_ = s.logLocked(LedgerEntry{Plan: plan.ID, Event: "failed", Error: err.Error(), By: opts.By})
+	}
 	if err != nil {
 		unlock()
 		return plan, err
 	}
 	plan.State = PlanApplying
+	plan.RunnerPID, plan.RunnerHost = os.Getpid(), hostName()
 	err = s.savePlanLocked(plan)
 	if err == nil && plan.Kind == "create" {
 		// The resources go in first, so a failure halfway leaves a record of
@@ -81,12 +90,7 @@ func (s *Store) Apply(ctx context.Context, id string, opts ApplyOptions) (Plan, 
 			}
 		}
 		_ = s.SavePlan(plan)
-		_ = s.setStates(plan, func(r Resource) string {
-			if r.State == StateCreating {
-				return StateFailed
-			}
-			return r.State
-		})
+		_ = s.settleAfterFailure(plan)
 		_ = s.Log(LedgerEntry{Plan: plan.ID, Event: "failed", Error: msg, By: opts.By})
 		if opts.Progress != nil {
 			opts.Progress(plan)
@@ -94,6 +98,14 @@ func (s *Store) Apply(ctx context.Context, id string, opts ApplyOptions) (Plan, 
 		return plan, errors.New(msg)
 	}
 
+	// gone marks a resource as not there (never created, or already
+	// removed) and skips its remaining steps.
+	gone := func(i int, why string) {
+		for j := i + 1; j < len(plan.Steps) && plan.Steps[j].Resource == plan.Steps[i].Resource; j++ {
+			plan.Steps[j].State, plan.Steps[j].Output = "skipped", why
+		}
+		_ = s.setState(plan.Steps[i].Resource, StateDeleted, nil)
+	}
 	for i := range plan.Steps {
 		step := &plan.Steps[i]
 		if step.State == "done" || step.State == "skipped" {
@@ -125,6 +137,29 @@ func (s *Store) Apply(ctx context.Context, id string, opts ApplyOptions) (Plan, 
 		cleanup()
 		stdout, stderr = opts.Redact(stdout), opts.Redact(stderr)
 		entry := LedgerEntry{Plan: plan.ID, Event: "step", Step: step.ID, Summary: step.Summary, Argv: step.Argv, Resource: step.Resource, By: opts.By}
+		switch {
+		case step.Action == "absent" && runErr == nil:
+			msg := fmt.Sprintf("%s already exists; NullBot creates only new ones, so choose another name", resourceName(plan, step.Resource))
+			entry.Error = msg
+			_ = s.Log(entry)
+			return fail(step, msg)
+		case step.Action == "absent" && notFound(stderr+" "+stdout):
+			entry.Output = "not there yet"
+			_ = s.Log(entry)
+			step.State, step.Output = "done", "not there yet"
+			continue
+		case (step.Action == "verify" || step.Action == "find") && runErr != nil && notFound(stderr+" "+stdout):
+			entry.Output = "already gone"
+			_ = s.Log(entry)
+			step.State, step.Output = "done", "already gone"
+			gone(i, "already gone")
+			continue
+		case step.Action == "verify" && runErr == nil && !strings.Contains(stdout, step.Resource):
+			msg := fmt.Sprintf("%s does not carry NullBot's tag %s, so NullBot will not remove it; if NullBot made it and its tagging step failed, remove it yourself", resourceName(plan, step.Resource), step.Resource)
+			entry.Error = msg
+			_ = s.Log(entry)
+			return fail(step, msg)
+		}
 		if runErr != nil {
 			if step.IgnoreMissing && notFound(stderr+" "+stdout) {
 				entry.Output = "already gone"
@@ -146,8 +181,14 @@ func (s *Store) Apply(ctx context.Context, id string, opts ApplyOptions) (Plan, 
 		entry.Output = excerpt(stdout)
 		_ = s.Log(entry)
 		step.State, step.Output = "done", excerpt(stdout)
-		if err := s.parse(step, stdout); err != nil {
+		found, err := s.parse(step, stdout)
+		if err != nil {
 			return fail(step, "the command succeeded, but its answer could not be read: "+err.Error())
+		}
+		if step.Action == "find" && !found {
+			step.Output = "not found: NullBot never created it"
+			gone(i, "nothing to remove")
+			continue
 		}
 		if plan.Kind == "destroy" && (i+1 == len(plan.Steps) || plan.Steps[i+1].Resource != step.Resource) {
 			_ = s.setState(step.Resource, StateDeleted, nil)
@@ -253,24 +294,50 @@ func (s *Store) setStates(plan Plan, next func(Resource) string) error {
 	})
 }
 
-// parse reads what a create or read step printed into the inventory.
-func (s *Store) parse(step *Step, stdout string) error {
-	if step.Parse == "" || step.Parse == "bucket" {
-		return nil
+// parse reads what a create, read or find step printed into the
+// inventory. found is false when a find step found nothing.
+func (s *Store) parse(step *Step, stdout string) (found bool, err error) {
+	if step.Parse == "" {
+		return true, nil
 	}
 	details := map[string]string{}
 	cloudID := ""
+	// Buckets, Google Cloud machines and firewall rules are known by their
+	// names; the name becomes the cloud id only once creating succeeded.
+	byName := false
 	switch step.Parse {
+	case "bucket":
+		byName = true
+	case "aws_find":
+		var ids []string
+		if err := json.Unmarshal([]byte(stdout), &ids); err != nil {
+			return false, err
+		}
+		if len(ids) == 0 {
+			return false, nil
+		}
+		cloudID = ids[0]
+	case "gcp_find":
+		var out []struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+			return false, err
+		}
+		if len(out) == 0 || out[0].Name == "" {
+			return false, nil
+		}
+		cloudID = out[0].Name
 	case "aws_key_pair":
 		var out struct{ KeyPairId string }
 		if err := json.Unmarshal([]byte(stdout), &out); err != nil || out.KeyPairId == "" {
-			return fmt.Errorf("no key pair id")
+			return false, fmt.Errorf("no key pair id")
 		}
 		cloudID = out.KeyPairId
 	case "aws_security_group":
 		var out struct{ GroupId string }
 		if err := json.Unmarshal([]byte(stdout), &out); err != nil || out.GroupId == "" {
-			return fmt.Errorf("no security group id")
+			return false, fmt.Errorf("no security group id")
 		}
 		cloudID = out.GroupId
 	case "aws_instance":
@@ -281,14 +348,14 @@ func (s *Store) parse(step *Step, stdout string) error {
 			}
 		}
 		if err := json.Unmarshal([]byte(stdout), &out); err != nil || len(out.Instances) == 0 || out.Instances[0].InstanceId == "" {
-			return fmt.Errorf("no instance id")
+			return false, fmt.Errorf("no instance id")
 		}
 		cloudID = out.Instances[0].InstanceId
 		details["private_ip"] = out.Instances[0].PrivateIpAddress
 	case "aws_instance_details":
 		var out map[string]any
 		if err := json.Unmarshal([]byte(stdout), &out); err != nil {
-			return err
+			return false, err
 		}
 		for _, k := range []string{"public_ip", "private_ip", "state"} {
 			if v, ok := out[k].(string); ok && v != "" {
@@ -296,8 +363,9 @@ func (s *Store) parse(step *Step, stdout string) error {
 			}
 		}
 	case "gcp_firewall":
-		return nil
+		byName = true
 	case "gcp_instance":
+		byName = true
 		var out []struct {
 			Name              string `json:"name"`
 			Status            string `json:"status"`
@@ -309,7 +377,7 @@ func (s *Store) parse(step *Step, stdout string) error {
 			} `json:"networkInterfaces"`
 		}
 		if err := json.Unmarshal([]byte(stdout), &out); err != nil || len(out) == 0 {
-			return fmt.Errorf("no machine in the answer")
+			return false, fmt.Errorf("no machine in the answer")
 		}
 		details["state"] = strings.ToLower(out[0].Status)
 		if len(out[0].NetworkInterfaces) > 0 {
@@ -320,15 +388,17 @@ func (s *Store) parse(step *Step, stdout string) error {
 			}
 		}
 	default:
-		return fmt.Errorf("unknown parser %s", step.Parse)
+		return false, fmt.Errorf("unknown parser %s", step.Parse)
 	}
-	return s.UpdateResources(func(current []Resource) []Resource {
+	return true, s.UpdateResources(func(current []Resource) []Resource {
 		for i := range current {
 			if current[i].ID != step.Resource {
 				continue
 			}
 			if cloudID != "" {
 				current[i].CloudID = cloudID
+			} else if byName {
+				current[i].CloudID = current[i].Name
 			}
 			if current[i].Details == nil {
 				current[i].Details = map[string]string{}
@@ -344,15 +414,102 @@ func (s *Store) parse(step *Step, stdout string) error {
 	})
 }
 
-// notFound reports a provider error for something that does not exist.
+// notFound reports a provider error saying the thing does not exist. Only
+// the providers' own not-found codes count: a number or word somewhere in
+// another error (an id containing 404, a dependency that does not exist)
+// must never count a failed removal as done.
 func notFound(text string) bool {
 	lower := strings.ToLower(text)
-	for _, marker := range []string{".notfound", "notfound", "nosuchbucket", "was not found", "could not be found", "does not exist", "404"} {
+	for _, marker := range []string{
+		// AWS: InvalidInstanceID.NotFound, InvalidGroup.NotFound,
+		// InvalidKeyPair.NotFound, and S3's NoSuchBucket and HeadBucket 404.
+		"invalidinstanceid.notfound", "invalidgroup.notfound", "invalidkeypair.notfound",
+		"(nosuchbucket)", "(404) when calling the headbucket operation",
+		// Google Cloud: compute's "was not found", storage's 404s, and rm
+		// with nothing to remove.
+		"' was not found", "not found: 404", "notfoundexception", "matched no objects",
+	} {
 		if strings.Contains(lower, marker) {
 			return true
 		}
 	}
 	return false
+}
+
+func resourceName(plan Plan, id string) string {
+	for _, r := range plan.Resources {
+		if r.ID == id {
+			return r.Name
+		}
+	}
+	return id
+}
+
+// settleAfterFailure leaves the inventory true after a plan stopped:
+// what it was creating is failed (and may exist), what it was removing
+// goes back to how it was, so the removal can be tried again.
+func (s *Store) settleAfterFailure(plan Plan) error {
+	before := map[string]string{}
+	for _, r := range plan.Resources {
+		before[r.ID] = r.State
+	}
+	return s.setStates(plan, func(r Resource) string {
+		switch r.State {
+		case StateCreating:
+			return StateFailed
+		case StateDeleting:
+			if prev := before[r.ID]; prev != "" && prev != StateDeleting && prev != StatePlanned {
+				return prev
+			}
+			return StateFailed
+		}
+		return r.State
+	})
+}
+
+// RecoverStale fails plans left running by a process that ended (NullBot
+// quit or was killed while it applied them), so their resources can be
+// removed. alive reports whether a process on this computer is running.
+func (s *Store) RecoverStale(alive func(pid int) bool) error {
+	plans, err := s.Plans(0)
+	if err != nil {
+		return err
+	}
+	host := hostName()
+	for _, p := range plans {
+		if p.State != PlanApplying || p.RunnerHost != host || p.RunnerPID == 0 || p.RunnerPID == os.Getpid() || alive(p.RunnerPID) {
+			continue
+		}
+		unlock, err := s.lock()
+		if err != nil {
+			return err
+		}
+		current, err := s.Plan(p.ID)
+		if err == nil && current.State == PlanApplying && current.RunnerPID == p.RunnerPID {
+			msg := "NullBot stopped while this plan ran; what it was doing may be half done"
+			current.State, current.Error, current.Finished = PlanFailed, msg, time.Now().UTC()
+			for i := range current.Steps {
+				switch current.Steps[i].State {
+				case "running":
+					current.Steps[i].State, current.Steps[i].Error = "failed", "stopped while it ran"
+				case "pending":
+					current.Steps[i].State = "skipped"
+				}
+			}
+			_ = s.savePlanLocked(current)
+			_ = s.logLocked(LedgerEntry{Plan: current.ID, Event: "failed", Error: msg, By: "NullBot"})
+		}
+		unlock()
+		if err == nil {
+			_ = s.settleAfterFailure(current)
+		}
+	}
+	return nil
+}
+
+func hostName() string {
+	h, _ := os.Hostname()
+	return h
 }
 
 func excerpt(s string) string {

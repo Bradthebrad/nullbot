@@ -225,6 +225,7 @@ func (a *App) RunWithSecrets(ctx context.Context, req SecretRunRequest) (SecretR
 	defer injected.cleanup()
 
 	env := commandBaseEnv()
+	env[AgentCommandEnv] = "1"
 	for k, v := range injected.vars {
 		env[k] = v
 	}
@@ -372,10 +373,16 @@ var sweepOnce sync.Once
 // behind (older than an hour).
 func sweepSecretTemp() {
 	sweepOnce.Do(func() {
-		dirs, _ := filepath.Glob(filepath.Join(os.TempDir(), "nullbot-secrets-*"))
-		for _, dir := range dirs {
-			if info, err := os.Lstat(dir); err == nil && info.IsDir() && time.Since(info.ModTime()) > time.Hour {
-				(&secretEnv{dir: dir}).cleanup()
+		// Key files and gcloud's token cache left by a NullBot that was
+		// killed.
+		// A plan's run can take hours (machines with GPUs start slowly), so
+		// its folders are left longer.
+		for pattern, age := range map[string]time.Duration{"nullbot-secrets-*": time.Hour, "nullbot-infra-*": 12 * time.Hour} {
+			dirs, _ := filepath.Glob(filepath.Join(os.TempDir(), pattern))
+			for _, dir := range dirs {
+				if info, err := os.Lstat(dir); err == nil && info.IsDir() && time.Since(info.ModTime()) > age {
+					(&secretEnv{dir: dir}).cleanup()
+				}
 			}
 		}
 	})

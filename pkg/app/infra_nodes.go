@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"net"
 	"os"
 	"os/exec"
@@ -114,6 +115,12 @@ type nodeSSH struct {
 }
 
 func (a *App) nodeConnection(id string) (infra.Resource, nodeSSH, error) {
+	return a.nodeConnectionFor(id, false)
+}
+
+// nodeConnectionFor is nodeConnection for an agent when agent is set: the
+// machine's SSH key must then be allowed for agents.
+func (a *App) nodeConnectionFor(id string, agent bool) (infra.Resource, nodeSSH, error) {
 	config := a.Config()
 	resources, err := infraStore(config).Resources()
 	if err != nil {
@@ -149,10 +156,16 @@ func (a *App) nodeConnection(id string) (infra.Resource, nodeSSH, error) {
 	if key.Name == "" {
 		return node, nodeSSH{}, fmt.Errorf("the SSH key %s for %s is no longer in the vault", keyName, node.Name)
 	}
+	if agent {
+		if err := agentMayUse(key); err != nil {
+			return node, nodeSSH{}, err
+		}
+	}
 	bin, err := sshCommand()
 	if err != nil {
 		return node, nodeSSH{}, err
 	}
+	sweepSecretTemp()
 	env := &secretEnv{vars: map[string]string{}}
 	keyFile, err := env.file("node.key", key.Values["private_key"])
 	if err != nil {
@@ -162,8 +175,12 @@ func (a *App) nodeConnection(id string) (infra.Resource, nodeSSH, error) {
 	knownHosts := filepath.Join(config.AppDir, "infra", "known_hosts")
 	_ = os.MkdirAll(filepath.Dir(knownHosts), 0o700)
 	user := firstNonEmpty(node.Details["ssh_user"], "ubuntu")
-	argv := []string{bin, "-i", keyFile, "-l", user, "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes",
-		"-o", "StrictHostKeyChecking=accept-new", "-o", "UserKnownHostsFile=" + knownHosts, "-o", "ConnectTimeout=10",
+	// -F none: nothing from your ~/.ssh/config (proxies, forwarding, agents,
+	// local commands) applies. The known_hosts path is quoted, with forward
+	// slashes, as ssh splits that option at spaces.
+	argv := []string{bin, "-F", "none", "-i", keyFile, "-l", user, "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-o", "BatchMode=yes",
+		"-o", "StrictHostKeyChecking=accept-new", "-o", `UserKnownHostsFile="` + filepath.ToSlash(knownHosts) + `"`, "-o", "ConnectTimeout=10",
+		"-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "ClearAllForwardings=no",
 		"-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ServerAliveInterval=30"}
 	return node, nodeSSH{argv: argv, host: ip, cleanup: env.cleanup}, nil
 }
@@ -179,7 +196,11 @@ echo '##system'; uptime; df -h / | tail -1; free -m | sed -n 2p; nvidia-smi --qu
 
 // InspectNode reads what a machine NullBot made is running.
 func (a *App) InspectNode(ctx context.Context, id string) (NodeReport, error) {
-	node, conn, err := a.nodeConnection(id)
+	return a.inspectNode(ctx, id, false)
+}
+
+func (a *App) inspectNode(ctx context.Context, id string, agent bool) (NodeReport, error) {
+	node, conn, err := a.nodeConnectionFor(id, agent)
 	if err != nil {
 		return NodeReport{Name: id, Error: err.Error()}, err
 	}
@@ -462,8 +483,9 @@ type Tunnel struct {
 
 var tunnels = struct {
 	sync.Mutex
-	open map[string]*Tunnel
-}{open: map[string]*Tunnel{}}
+	open     map[string]*Tunnel
+	starting map[string]bool
+}{open: map[string]*Tunnel{}, starting: map[string]bool{}}
 
 // OpenTunnel forwards 127.0.0.1:localPort here to 127.0.0.1:remotePort on
 // a machine NullBot made. localPort 0 picks a free one. The tunnel lasts
@@ -483,15 +505,29 @@ func (a *App) OpenTunnel(id string, remotePort, localPort int) (Tunnel, error) {
 		conn.cleanup()
 		return *t, nil
 	}
+	if tunnels.starting[key] {
+		tunnels.Unlock()
+		conn.cleanup()
+		return Tunnel{}, fmt.Errorf("a tunnel to port %d on %s is opening already", remotePort, node.Name)
+	}
+	tunnels.starting[key] = true
 	tunnels.Unlock()
+	defer func() {
+		tunnels.Lock()
+		delete(tunnels.starting, key)
+		tunnels.Unlock()
+	}()
+	// The port must be free here, or the readiness check below would
+	// answer for whatever already listens on it.
 	if localPort == 0 {
-		l, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			conn.cleanup()
-			return Tunnel{}, err
-		}
-		localPort = l.Addr().(*net.TCPAddr).Port
-		l.Close()
+		localPort = freeLocalPort(0)
+	} else if freeLocalPort(localPort) != localPort {
+		conn.cleanup()
+		return Tunnel{}, fmt.Errorf("port %d is in use on this computer; choose another", localPort)
+	}
+	if localPort == 0 {
+		conn.cleanup()
+		return Tunnel{}, errors.New("no free port was found on this computer")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	argv := append(append([]string(nil), conn.argv...), "-N", "-o", "ExitOnForwardFailure=yes",
@@ -582,7 +618,17 @@ func CloseTunnels() {
 // ConnectNodeOllama opens a tunnel to a machine's Ollama and adds it as a
 // local model server named after the machine.
 func (a *App) ConnectNodeOllama(id string) (LocalEndpoint, error) {
-	t, err := a.OpenTunnel(id, 11434, 0)
+	// The same machine gets the same port here each time when it can, so
+	// the model server saved for it keeps working after a reconnect.
+	port := 0
+	if resources, err := infraStore(a.Config()).Resources(); err == nil {
+		for _, r := range resources {
+			if r.ID == id || (r.Name == id && r.Kind == infra.KindInstance && r.Live()) {
+				port = freeLocalPort(stablePort(r.ID))
+			}
+		}
+	}
+	t, err := a.OpenTunnel(id, 11434, port)
 	if err != nil {
 		return LocalEndpoint{}, err
 	}
@@ -595,6 +641,24 @@ func (a *App) ConnectNodeOllama(id string) (LocalEndpoint, error) {
 	}
 	CloseTunnel(t.ID)
 	return LocalEndpoint{}, err
+}
+
+// freeLocalPort returns port if it is free on 127.0.0.1, or, given 0, a
+// free port; 0 when there is none.
+func freeLocalPort(port int) int {
+	l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return 0
+	}
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port
+}
+
+// stablePort is a port between 41000 and 48999 that depends only on id.
+func stablePort(id string) int {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(id))
+	return 41000 + int(h.Sum32()%8000)
 }
 
 // nodeServerID is the local model server name for a machine's tunnel, and

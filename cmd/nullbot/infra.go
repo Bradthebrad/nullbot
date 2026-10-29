@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,7 +10,9 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 
 	"github.com/Bradthebrad/nullbot/pkg/app"
@@ -44,7 +47,7 @@ vault; the commands run through the aws and gcloud tools.
 `
 
 // runInfraCLI handles "nullbot infra ...".
-func runInfraCLI(args []string, appDir string, stdout, stderr io.Writer) int {
+func runInfraCLI(args []string, appDir string, stdin io.Reader, stdout, stderr io.Writer) int {
 	args, appDir = takeAppDir(args, appDir)
 	var positional, rest []string
 	for i := 0; i < len(args); i++ {
@@ -94,7 +97,9 @@ func runInfraCLI(args []string, appDir string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	a := app.New(config)
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	// Stopped by Ctrl+C, a terminal closing or a kill: tunnels close, key
+	// files go, and a plan records where it stopped.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
 	fail := func(err error) int {
 		fmt.Fprintln(stderr, "nullbot:", err)
@@ -202,7 +207,13 @@ func runInfraCLI(args []string, appDir string, stdout, stderr io.Writer) int {
 		if err != nil {
 			return fail(err)
 		}
-		if _, err := a.DecideInfraPlan(id, sub == "approve", "you (command line)"); err != nil {
+		seen := ""
+		if sub == "approve" {
+			if seen, err = confirmApproval(config, id, stdin, stdout); err != nil {
+				return fail(err)
+			}
+		}
+		if _, err := a.DecideInfraPlan(id, sub == "approve", "you (command line)", seen); err != nil {
 			return fail(err)
 		}
 		fmt.Fprintf(stdout, "Plan %s %sd.\n", id, sub)
@@ -346,13 +357,55 @@ func infraPlan(config app.Config, id string) (infra.Plan, error) {
 	return infra.Open(config.AppDir + string(os.PathSeparator) + "infra").Plan(id)
 }
 
+// confirmApproval shows the plan in full and asks the person at the
+// terminal to type its code. Approving is a person's decision: a command an
+// agent runs (no terminal, or marked as an agent's) is refused.
+func confirmApproval(config app.Config, id string, stdin io.Reader, w io.Writer) (string, error) {
+	if os.Getenv(app.AgentCommandEnv) != "" {
+		return "", errors.New("agents cannot approve plans; approve it in the app or in your own terminal")
+	}
+	if !isTerminal(stdin) {
+		return "", errors.New("approve from a terminal (or in the app): approving asks you to type the plan's code")
+	}
+	plan, err := infraPlan(config, id)
+	if err != nil {
+		return "", err
+	}
+	if plan.State != infra.PlanProposed {
+		return "", fmt.Errorf("plan %s is %s, not waiting for a decision", id, plan.State)
+	}
+	printPlan(w, plan)
+	code := plan.ID[len(plan.ID)-4:]
+	fmt.Fprintf(w, "\nTo run these %d commands, type %s and press Enter: ", len(plan.Steps), code)
+	line, _ := bufio.NewReader(stdin).ReadString('\n')
+	if strings.TrimSpace(line) != code {
+		return "", errors.New("not approved")
+	}
+	return plan.Hash, nil
+}
+
+// isTerminal reports input from a person at a terminal, not a pipe or a
+// file; tests replace it.
+var isTerminal = func(r io.Reader) bool {
+	f, ok := r.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := f.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
 func printPlan(w io.Writer, p infra.Plan) {
 	if p.ID == "" {
 		return
 	}
-	fmt.Fprintf(w, "%s  %s  [%s]\n", p.ID, p.Title, p.State)
+	clean := infra.CleanText
+	fmt.Fprintf(w, "%s  %s  [%s]\n", p.ID, clean(p.Title), p.State)
+	if p.Requester != "" {
+		fmt.Fprintf(w, "Asked for by %s\n", clean(p.Requester))
+	}
 	if p.Reason != "" {
-		fmt.Fprintf(w, "Why: %s\n", p.Reason)
+		fmt.Fprintf(w, "Why: %s\n", clean(p.Reason))
 	}
 	fmt.Fprintf(w, "Uses the %s credentials %q", p.Cloud, p.Credential)
 	if p.CostHourly != 0 {
@@ -368,21 +421,47 @@ func printPlan(w io.Writer, p infra.Plan) {
 		if mark == "" {
 			mark = " "
 		}
-		fmt.Fprintf(w, " %s %s. %s\n", mark, s.ID, s.Summary)
+		fmt.Fprintf(w, " %s %s. %s\n", mark, s.ID, clean(s.Summary))
 		if len(s.Argv) > 0 {
-			fmt.Fprintf(w, "     $ %s\n", strings.Join(s.Argv, " "))
+			quoted := make([]string, len(s.Argv))
+			for i, a := range s.Argv {
+				quoted[i] = shellQuote(clean(a))
+			}
+			fmt.Fprintf(w, "     $ %s\n", strings.Join(quoted, " "))
+		}
+		if s.Input != "" {
+			// The script runs as root on the machine: show all of it.
+			fmt.Fprintln(w, "     with this first-boot script:")
+			for _, line := range strings.Split(strings.TrimRight(clean(s.Input), "\n"), "\n") {
+				fmt.Fprintf(w, "     | %s\n", line)
+			}
 		}
 		if s.Error != "" {
-			fmt.Fprintf(w, "     error: %s\n", s.Error)
+			fmt.Fprintf(w, "     error: %s\n", clean(s.Error))
 		}
 	}
 	for _, n := range p.Notes {
-		fmt.Fprintf(w, "Note: %s\n", n)
+		fmt.Fprintf(w, "Note: %s\n", clean(n))
 	}
 	if p.Error != "" {
-		fmt.Fprintf(w, "Stopped: %s\n", p.Error)
+		fmt.Fprintf(w, "Stopped: %s\n", clean(p.Error))
 	}
 }
+
+// shellQuote quotes an argument the way a POSIX shell needs it, so a
+// command reads as it runs and can be copied. A placeholder on its own
+// stays bare: NullBot fills it in when the step runs.
+func shellQuote(arg string) string {
+	if shellSafe.MatchString(arg) || placeholderArg.MatchString(arg) {
+		return arg
+	}
+	return "'" + strings.ReplaceAll(arg, "'", `'\''`) + "'"
+}
+
+var (
+	shellSafe      = regexp.MustCompile(`^[A-Za-z0-9_./:=,@%+-]+$`)
+	placeholderArg = regexp.MustCompile(`^\{\{(cloud_id:nb-[0-9a-f]+|input_file)\}\}$`)
+)
 
 func abs(f float64) float64 {
 	if f < 0 {
@@ -392,6 +471,9 @@ func abs(f float64) float64 {
 }
 
 func printNode(w io.Writer, r app.NodeReport) {
+	// Everything here came from the machine: no control characters reach
+	// the terminal.
+	w = cleanWriter{w}
 	fmt.Fprintf(w, "%s", r.Name)
 	if r.Address != "" {
 		fmt.Fprintf(w, " (%s)", r.Address)
@@ -434,4 +516,14 @@ func printNode(w io.Writer, r app.NodeReport) {
 	for _, l := range r.System {
 		fmt.Fprintln(w, l)
 	}
+}
+
+// cleanWriter drops control characters (other than new lines and tabs).
+type cleanWriter struct{ w io.Writer }
+
+func (c cleanWriter) Write(p []byte) (int, error) {
+	if _, err := io.WriteString(c.w, infra.CleanText(string(p))); err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }

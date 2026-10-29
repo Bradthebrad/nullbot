@@ -111,7 +111,9 @@ var publicIPFunc = func(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	// Directly, not through a proxy: the address asked for is the one this
+	// computer's own connections (SSH) come from.
+	resp, err := (&http.Client{Transport: &http.Transport{Proxy: nil}}).Do(req)
 	if err != nil {
 		return "", fmt.Errorf("this computer's public address could not be found (%v); give allow_from as an address range", err)
 	}
@@ -141,6 +143,19 @@ func (a *App) PlanInfra(ctx context.Context, req InfraRequest, requester string)
 	if err != nil {
 		return infra.Plan{}, err
 	}
+	agent := byAgent(requester)
+	if agent {
+		if err := agentMayUse(cred); err != nil {
+			return infra.Plan{}, err
+		}
+		// An agent names a key from the vault, which you can see and
+		// revoke; a key of its own would let in whoever holds it.
+		for _, m := range spec.Machines {
+			if strings.TrimSpace(m.SSHKey) != "" {
+				return infra.Plan{}, errors.New("agents give an SSH key by its vault name (ssh_key_secret), not as a key")
+			}
+		}
+	}
 	if spec.Cloud == infra.GCP && spec.Project == "" {
 		spec.Project = gcpProject(cred)
 	}
@@ -154,6 +169,11 @@ func (a *App) PlanInfra(ctx context.Context, req InfraRequest, requester string)
 			return infra.Plan{}, err
 		}
 		pub = key
+	}
+	// The spec's machines are the caller's; work on a copy.
+	spec.Machines = append([]infra.MachineSpec(nil), spec.Machines...)
+	for i := range spec.Machines {
+		spec.Machines[i].AllowFrom = append([]string(nil), spec.Machines[i].AllowFrom...)
 	}
 	myIP := ""
 	for i := range spec.Machines {
@@ -211,10 +231,14 @@ func (a *App) sshPublicKey(name string) (string, error) {
 	return "", fmt.Errorf("there is no SSH key secret %s; make one with nullbot secrets ssh-keygen %s", name, name)
 }
 
-// PlanInfraDestroy saves a plan that removes resources, by NullBot id, or
-// everything a plan created when given a plan id.
+// PlanInfraDestroy saves a plan that removes resources, by NullBot id or
+// name, or everything a plan created when given a plan id. A machine goes
+// with what it used (its security group or firewall rules, its key pair)
+// unless another machine still uses them.
 func (a *App) PlanInfraDestroy(ids []string, deleteContents bool, requester, reason string) (infra.Plan, error) {
-	store := infraStore(a.Config())
+	config := a.Config()
+	store := infraStore(config)
+	_ = store.RecoverStale(processAlive)
 	all, err := store.Resources()
 	if err != nil {
 		return infra.Plan{}, err
@@ -223,16 +247,49 @@ func (a *App) PlanInfraDestroy(ids []string, deleteContents bool, requester, rea
 	for _, id := range ids {
 		want[strings.TrimSpace(id)] = true
 	}
-	var chosen []infra.Resource
+	chosen := map[string]bool{}
 	for _, r := range all {
-		if want[r.ID] || want[r.PlanID] || want[r.Name] {
-			chosen = append(chosen, r)
+		if r.Live() && (want[r.ID] || want[r.PlanID] || want[r.Name]) {
+			chosen[r.ID] = true
 		}
 	}
-	if len(chosen) == 0 {
-		return infra.Plan{}, errors.New("none of those are resources NullBot made; infra_status lists them")
+	usedElsewhere := map[string]bool{}
+	for _, r := range all {
+		if r.Live() && !chosen[r.ID] {
+			for _, dep := range r.DependsOn {
+				usedElsewhere[dep] = true
+			}
+		}
 	}
-	plan, err := infra.BuildDestroyPlan(chosen, deleteContents, requester, reason)
+	for _, r := range all {
+		if chosen[r.ID] {
+			for _, dep := range r.DependsOn {
+				if !usedElsewhere[dep] {
+					chosen[dep] = true
+				}
+			}
+		}
+	}
+	var picked []infra.Resource
+	for _, r := range all {
+		if chosen[r.ID] && r.Live() {
+			picked = append(picked, r)
+		}
+	}
+	if len(picked) == 0 {
+		return infra.Plan{}, errors.New("none of those are resources NullBot made that still exist; infra_status lists them")
+	}
+	if byAgent(requester) {
+		cred, err := infraCredential(config, picked[0].Cloud, picked[0].Credential)
+		if err != nil {
+			return infra.Plan{}, err
+		}
+		if err := agentMayUse(cred); err != nil {
+			return infra.Plan{}, err
+		}
+	}
+	chosenList := picked
+	plan, err := infra.BuildDestroyPlan(chosenList, deleteContents, requester, reason)
 	if err != nil {
 		return plan, err
 	}
@@ -245,8 +302,12 @@ func (a *App) PlanInfraDestroy(ids []string, deleteContents bool, requester, rea
 
 // DecideInfraPlan approves or rejects a plan. People only: the user
 // interfaces and the command line call it; no agent tool does.
-func (a *App) DecideInfraPlan(id string, approve bool, by string) (infra.Plan, error) {
-	plan, err := infraStore(a.Config()).Decide(id, approve, by)
+//
+// seen is the plan's Hash as the person saw it; approving fails if the plan
+// changed since. Empty skips that check (the caller showed the plan just
+// now, under the same lock).
+func (a *App) DecideInfraPlan(id string, approve bool, by, seen string) (infra.Plan, error) {
+	plan, err := infraStore(a.Config()).Decide(id, approve, by, seen)
 	if err == nil {
 		a.logInfo("infrastructure plan decided", "plan", id, "approved", approve, "by", by)
 		a.notifyChange(ChangeInfra)
@@ -262,6 +323,7 @@ var infraDecided = sync.NewCond(&sync.Mutex{})
 func (a *App) ApplyInfraPlan(ctx context.Context, id, by string) (infra.Plan, error) {
 	config := a.Config()
 	store := infraStore(config)
+	_ = store.RecoverStale(processAlive)
 	plan, err := store.Plan(id)
 	if err != nil {
 		return plan, err
@@ -286,8 +348,65 @@ func (a *App) ApplyInfraPlan(ctx context.Context, id, by string) (infra.Plan, er
 	} else {
 		a.logInfo("infrastructure plan applied", "plan", id)
 	}
+	if done.Kind == "destroy" {
+		forgetHostKeys(config, done)
+	}
 	a.notifyChange(ChangeInfra)
 	return done, err
+}
+
+// byAgent reports a plan asked for by an agent rather than a person.
+func byAgent(requester string) bool { return strings.HasPrefix(requester, "agent ") }
+
+// agentMayUse checks that a secret is allowed for agents (Settings >
+// Secrets), as it would be for secret_run.
+func agentMayUse(s Secret) error {
+	if !s.AgentUse {
+		return fmt.Errorf("secret %s is not allowed for agents; allow it in Settings > Secrets, or plan this yourself (nullbot infra plan)", s.Name)
+	}
+	return nil
+}
+
+// forgetHostKeys removes removed machines' addresses from NullBot's
+// known_hosts, so a new machine that gets the same address later is not
+// refused as a changed host.
+func forgetHostKeys(config Config, plan infra.Plan) {
+	resources, err := infraStore(config).Resources()
+	if err != nil {
+		return
+	}
+	gone := map[string]bool{}
+	for _, r := range resources {
+		if r.Kind == infra.KindInstance && r.State == infra.StateDeleted && r.PlanID != "" {
+			for _, p := range plan.Resources {
+				if p.ID == r.ID && r.Details["public_ip"] != "" {
+					gone[r.Details["public_ip"]] = true
+				}
+			}
+		}
+	}
+	if len(gone) == 0 {
+		return
+	}
+	path := filepath.Join(config.AppDir, "infra", "known_hosts")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var kept []string
+	for _, line := range strings.Split(string(data), "\n") {
+		hosts, _, _ := strings.Cut(line, " ")
+		drop := false
+		for _, h := range strings.Split(hosts, ",") {
+			if gone[strings.Trim(h, "[]")] || gone[strings.TrimSuffix(strings.TrimPrefix(h, "["), "]:22")] {
+				drop = true
+			}
+		}
+		if !drop {
+			kept = append(kept, line)
+		}
+	}
+	_ = os.WriteFile(path, []byte(strings.Join(kept, "\n")), 0o600)
 }
 
 // infraRunner runs aws and gcloud with a plan's credentials and nothing
@@ -301,6 +420,7 @@ type infraRunner struct {
 }
 
 func newInfraRunner(config Config, plan infra.Plan, cred Secret) (*infraRunner, func(), error) {
+	sweepSecretTemp()
 	secretEnv, err := buildSecretEnv([]Secret{cred}, true)
 	if err != nil {
 		return nil, func() {}, err
@@ -316,6 +436,13 @@ func newInfraRunner(config Config, plan infra.Plan, cred Secret) (*infraRunner, 
 		os.RemoveAll(dir)
 	}
 	env := commandBaseEnv()
+	for k := range env {
+		// Only the settings below reach the CLIs: no endpoint overrides,
+		// impersonation or profiles from this computer's environment.
+		if strings.HasPrefix(strings.ToUpper(k), "CLOUDSDK_") || strings.HasPrefix(strings.ToUpper(k), "AWS_") || strings.HasPrefix(strings.ToUpper(k), "GOOGLE_") {
+			delete(env, k)
+		}
+	}
 	for k, v := range secretEnv.vars {
 		env[k] = v
 	}
@@ -352,6 +479,9 @@ func (r *infraRunner) Run(ctx context.Context, argv []string) (string, string, e
 	if err != nil {
 		return "", "", err
 	}
+	if err := checkBatchArgs(bin, argv[1:]); err != nil {
+		return "", "", err
+	}
 	timeout := 10 * time.Minute
 	if len(argv) > 2 && argv[2] == "wait" {
 		timeout = 30 * time.Minute
@@ -377,6 +507,23 @@ func (r *infraRunner) Run(ctx context.Context, argv []string) (string, string, e
 	return stdout.buf.String(), stderr.buf.String(), err
 }
 
+// checkBatchArgs refuses arguments cmd.exe would read as commands. On
+// Windows gcloud is gcloud.cmd, which runs through cmd.exe, and Go cannot
+// quote an argument safely for it: a quote, &, |, <, >, ^, % or ! in one
+// could run something else. NullBot's own arguments never contain them.
+func checkBatchArgs(bin string, args []string) error {
+	ext := strings.ToLower(filepath.Ext(bin))
+	if ext != ".cmd" && ext != ".bat" {
+		return nil
+	}
+	for _, arg := range args {
+		if strings.ContainsAny(arg, "\"&|<>^%!\r\n") || strings.ContainsFunc(arg, func(r rune) bool { return r < 0x20 }) {
+			return fmt.Errorf("an argument has a character %s cannot pass on safely: %q", filepath.Base(bin), arg)
+		}
+	}
+	return nil
+}
+
 // InfraState is everything the infrastructure view shows.
 type InfraState struct {
 	AgentTools bool             `json:"agent_tools"`
@@ -391,6 +538,7 @@ type InfraState struct {
 func (a *App) InfraState() (InfraState, error) {
 	config := a.Config()
 	store := infraStore(config)
+	_ = store.RecoverStale(processAlive)
 	state := InfraState{AgentTools: config.Infra.AgentTools, Tools: map[string]string{}}
 	var err error
 	if state.Plans, err = store.Plans(100); err != nil {

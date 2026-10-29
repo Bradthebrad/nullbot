@@ -12,6 +12,9 @@ import (
 
 var projectPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{4,28}[a-z0-9]$`)
 
+// ValidProject reports a Google Cloud project id NullBot will pass to gcloud.
+func ValidProject(p string) bool { return ValidName(p) || projectPattern.MatchString(p) }
+
 func gcpLabels(r Resource) string {
 	return "nullbot-managed=true,nullbot-id=" + r.ID + ",nullbot-plan=" + r.PlanID
 }

@@ -134,9 +134,24 @@ func runInfraCLI(args []string, appDir string, stdin io.Reader, stdout, stderr i
 		return 0
 	}
 
+	// A command an agent runs sees only the accounts agents may use.
+	infraState := func() (app.InfraState, error) {
+		st, err := a.InfraState()
+		if err == nil && os.Getenv(app.AgentCommandEnv) != "" {
+			mine := []app.CloudAccount{}
+			for _, acct := range st.Accounts {
+				if acct.AgentUse {
+					mine = append(mine, acct)
+				}
+			}
+			st.Accounts = mine
+		}
+		return st, err
+	}
+
 	switch sub {
 	case "":
-		st, err := a.InfraState()
+		st, err := infraState()
 		if err != nil {
 			return fail(err)
 		}
@@ -179,7 +194,7 @@ func runInfraCLI(args []string, appDir string, stdin io.Reader, stdout, stderr i
 		return 0
 
 	case "accounts":
-		st, err := a.InfraState()
+		st, err := infraState()
 		if err != nil {
 			return fail(err)
 		}
@@ -199,6 +214,9 @@ func runInfraCLI(args []string, appDir string, stdin io.Reader, stdout, stderr i
 			if acct.Checked != "" {
 				checked = "checked"
 			}
+			if acct.Note != "" {
+				checked = "checked: " + acct.Note
+			}
 			agents := ""
 			if acct.AgentUse {
 				agents = "agents may use"
@@ -215,7 +233,7 @@ func runInfraCLI(args []string, appDir string, stdin io.Reader, stdout, stderr i
 		}
 		if os.Getenv(app.AgentCommandEnv) != "" {
 			// An agent checks only accounts it may use.
-			st, err := a.InfraState()
+			st, err := infraState()
 			if err != nil {
 				return fail(err)
 			}
@@ -462,6 +480,8 @@ func printAccountsLine(w io.Writer, st app.InfraState) {
 		}
 		if acct.Checked == "" {
 			bits = append(bits, "not checked: nullbot infra check "+acct.Name)
+		} else if acct.Note != "" {
+			bits = append(bits, "needs setup: nullbot infra check "+acct.Name)
 		}
 		parts = append(parts, fmt.Sprintf("%s (%s)", acct.Name, strings.Join(bits, ", ")))
 	}

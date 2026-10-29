@@ -876,7 +876,7 @@ func SaveSecret(config Config, input SecretInput) (SecretInfo, error) {
 		if s.Public == nil {
 			s.Public = map[string]string{}
 		}
-		before := credentialStamp(s)
+		before, keyProject := credentialStamp(s), gcpProject(s)
 		for _, field := range input.ClearValues {
 			delete(s.Values, field)
 		}
@@ -902,6 +902,11 @@ func SaveSecret(config Config, input SecretInput) (SecretInfo, error) {
 		s.Description = strings.TrimSpace(input.Description)
 		s.AgentUse = input.AgentUse
 		s.Servers = cleanServerList(input.Servers)
+		if newProject := gcpProject(s); s.Kind == SecretGCP && keyProject != "" && newProject != "" && newProject != keyProject && s.Public["project_id"] == keyProject {
+			// A key from another project replaces one whose project was
+			// taken from its file: the new file's project, unless set apart.
+			delete(s.Public, "project_id")
+		}
 		if err := deriveSecretPublic(&s); err != nil {
 			return err
 		}
@@ -930,7 +935,7 @@ func SaveSecret(config Config, input SecretInput) (SecretInfo, error) {
 }
 
 // checkedFields are what checking a token or cloud account records.
-var checkedFields = []string{"login", "scopes", "account", "identity", "verified"}
+var checkedFields = []string{"login", "scopes", "account", "identity", "verified", "check_note"}
 
 // credentialStamp is what a check vouches for: when it changes, the secret
 // has to be checked again.

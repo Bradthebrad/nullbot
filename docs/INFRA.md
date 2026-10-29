@@ -47,7 +47,10 @@ your control:
 3. Check it: **Check** next to the account, or `nullbot infra check NAME`.
    This asks the cloud who the key signs in as (`aws sts
    get-caller-identity`, or `gcloud compute project-info describe`); it
-   changes nothing and costs nothing. `nullbot infra accounts` lists them.
+   changes nothing and costs nothing. A key that signs in but cannot be used
+   yet gets a note saying what to fix. `nullbot infra accounts` lists them.
+   On a network that inspects TLS, set `AWS_CA_BUNDLE` or
+   `CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE`; plans and checks keep them.
 4. Optionally, an SSH key secret for logging in to machines:
    `nullbot secrets ssh-keygen cloud`.
 5. To let agents propose plans: **Agents can propose** in the app's Cloud

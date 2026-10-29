@@ -31,8 +31,9 @@ type CloudAccount struct {
 	Account  string `json:"account,omitempty"`
 	Identity string `json:"identity,omitempty"`
 	// Checked is when the key last signed in (RFC 3339), empty if never or
-	// since it changed.
+	// since it changed. Note is what that check found the key cannot do yet.
 	Checked  string `json:"checked,omitempty"`
+	Note     string `json:"note,omitempty"`
 	AgentUse bool   `json:"agent_use"`
 }
 
@@ -57,7 +58,7 @@ func CloudAccounts(config Config) ([]CloudAccount, error) {
 	}
 	out := []CloudAccount{}
 	for _, s := range secrets {
-		a := CloudAccount{Name: s.Name, AgentUse: s.AgentUse, Checked: s.Public["verified"]}
+		a := CloudAccount{Name: s.Name, AgentUse: s.AgentUse, Checked: s.Public["verified"], Note: s.Public["check_note"]}
 		switch s.Kind {
 		case SecretAWS:
 			a.Cloud, a.Region, a.Account, a.Identity = string(infra.AWS), s.Public["region"], s.Public["account"], s.Public["identity"]
@@ -75,7 +76,8 @@ func CloudAccounts(config Config) ([]CloudAccount, error) {
 // as, and records it with the secret.
 func (a *App) CheckCloudAccount(ctx context.Context, name string) (CloudIdentity, error) {
 	id, err := CheckCloudAccount(ctx, a.Config(), name)
-	if err == nil {
+	if err == nil || errors.Is(err, errKeyRejected) {
+		// Recorded, or an earlier check forgotten.
 		a.secretsChanged(false, nil)
 		a.notifyChange(ChangeInfra)
 	}
@@ -101,11 +103,17 @@ func CheckCloudAccount(ctx context.Context, config Config, name string) (CloudId
 	case SecretAWS:
 		// STS answers in every region; us-east-1 when the account has none.
 		id.Region = firstNonEmpty(s.Public["region"], "us-east-1")
+		if !infra.ValidLocation(id.Region) {
+			return id, fmt.Errorf("%q is not an AWS region; change %s's region", id.Region, s.Name)
+		}
 		plan = infra.Plan{Cloud: infra.AWS, Region: id.Region}
 	case SecretGCP:
 		id.Project, id.Identity = gcpAccountProject(s), s.Public["client_email"]
 		if id.Project == "" {
 			return id, fmt.Errorf("%s names no project and its key file has none; set its project", s.Name)
+		}
+		if !infra.ValidProject(id.Project) {
+			return id, fmt.Errorf("%q is not a Google Cloud project id; change %s's project", id.Project, s.Name)
 		}
 		plan = infra.Plan{Cloud: infra.GCP, Project: id.Project}
 	default:
@@ -125,12 +133,24 @@ func CheckCloudAccount(ctx context.Context, config Config, name string) (CloudId
 
 	switch plan.Cloud {
 	case infra.AWS:
-		out, stderr, err := runner.Run(ctx, []string{"aws", "sts", "get-caller-identity", "--output", "json"})
+		ask := func(region string) (string, string, error) {
+			return runner.Run(ctx, []string{"aws", "sts", "get-caller-identity", "--output", "json", "--region", region})
+		}
+		out, stderr, err := ask(id.Region)
+		if err != nil && ctx.Err() == nil && strings.Contains(stderr, "InvalidClientTokenId") && id.Region != "us-east-1" {
+			// A region the account has not turned on refuses every key; ask
+			// where every account answers before blaming the key.
+			if out2, _, err2 := ask("us-east-1"); err2 == nil {
+				out, err = out2, nil
+				id.Note = fmt.Sprintf("The key signs in, but not in %s: turn that region on for the account in the AWS console, or change this account's region.", id.Region)
+			}
+		}
 		if ctx.Err() != nil {
 			return id, errors.New("AWS did not answer in time; check this computer's connection")
 		}
 		if err != nil {
-			return id, forgetRejected(config, s, awsCheckError(config, stderr, err))
+			temporary := strings.HasPrefix(s.Values["access_key_id"], "ASIA") && s.Values["session_token"] == ""
+			return id, forgetRejected(config, s, awsCheckError(config, stderr, err, temporary))
 		}
 		var who struct{ Account, Arn string }
 		if json.Unmarshal([]byte(out), &who) != nil || who.Account == "" {
@@ -138,7 +158,7 @@ func CheckCloudAccount(ctx context.Context, config Config, name string) (CloudId
 		}
 		id.Account, id.Identity = who.Account, who.Arn
 	case infra.GCP:
-		_, stderr, err := runner.Run(ctx, []string{"gcloud", "compute", "project-info", "describe", "--project", id.Project, "--format", "json(name)"})
+		_, stderr, err := runner.Run(ctx, []string{"gcloud", "compute", "project-info", "describe", "--project", id.Project, "--format", "json"})
 		if ctx.Err() != nil {
 			return id, errors.New("Google Cloud did not answer in time; check this computer's connection")
 		}
@@ -167,6 +187,11 @@ func CheckCloudAccount(ctx context.Context, config Config, name string) (CloudId
 			pub["account"], pub["identity"] = id.Account, id.Identity
 		}
 		pub["verified"] = time.Now().UTC().Format(time.RFC3339)
+		if id.Note != "" {
+			pub["check_note"] = id.Note
+		} else {
+			delete(pub, "check_note")
+		}
 		p.Secrets[i].Public = pub
 		return nil
 	})
@@ -225,9 +250,29 @@ func cliError(config Config, stderr string, err error) string {
 	return text
 }
 
-func awsCheckError(config Config, stderr string, err error) error {
+// clockMessage is for a refusal because this computer's clock is wrong, not
+// because of the key.
+const clockMessage = "%s refused the sign-in because this computer's clock is off; set it to update automatically, then check again"
+
+func containsAny(text string, parts ...string) bool {
+	for _, p := range parts {
+		if strings.Contains(text, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func awsCheckError(config Config, stderr string, err error, temporaryWithoutToken bool) error {
 	text := cliError(config, stderr, err)
+	lower := strings.ToLower(text)
 	switch {
+	case containsAny(lower, "signature expired", "signature not yet current", "requesttimetooskewed", "request has expired"):
+		return fmt.Errorf(clockMessage, "AWS")
+	case containsAny(lower, "could not connect to the endpoint", "ssl validation failed", "connect timeout", "read timeout", "proxy", "name resolution", "connection reset", "connection refused"):
+		return fmt.Errorf("aws could not reach AWS: %s", text)
+	case strings.Contains(text, "InvalidClientTokenId") && temporaryWithoutToken:
+		return rejectedError("this is a temporary access key (it starts with ASIA), which works only with its session token: add the token with Replace or change")
 	case strings.Contains(text, "InvalidClientTokenId"):
 		return rejectedError("AWS does not recognize this access key ID: check it, and that the key is active in IAM")
 	case strings.Contains(text, "SignatureDoesNotMatch"):
@@ -235,25 +280,31 @@ func awsCheckError(config Config, stderr string, err error) error {
 	case strings.Contains(text, "ExpiredToken"):
 		return rejectedError("these temporary credentials have expired: paste fresh ones, session token included")
 	}
-	return fmt.Errorf("aws could not sign in: %s", text)
+	return fmt.Errorf("aws could not check the key: %s", text)
 }
 
-// gcpCheckError tells a key that does not sign in (an error) from one that
-// signs in but cannot use Compute Engine in the project yet (a note).
+// gcpCheckError tells a key Google refused (an error that forgets the last
+// check) from one that signs in but cannot use Compute Engine in the
+// project yet (a note), and both from a check that could not finish.
 func gcpCheckError(config Config, project, stderr string, err error) (string, error) {
 	text := cliError(config, stderr, err)
 	lower := strings.ToLower(text)
 	switch {
-	case strings.Contains(lower, "failed to establish") || strings.Contains(lower, "name resolution") || strings.Contains(lower, "timed out") || strings.Contains(lower, "connection refused"):
+	case containsAny(lower, "reasonable timeframe", "used too early", "used too late"):
+		return "", fmt.Errorf(clockMessage, "Google Cloud")
+	// gcloud wraps any failure to get a token, the network's included, in
+	// "There was a problem refreshing your current auth tokens".
+	case containsAny(lower, "ssl", "certificate", "max retries", "connection reset", "connection aborted", "remotedisconnected", "remote end closed",
+		"proxy", "tunnel connection failed", "failed to establish", "name resolution", "timed out", "connection refused", "network is unreachable", "temporary failure"):
 		return "", fmt.Errorf("gcloud could not reach Google Cloud: %s", text)
-	case strings.Contains(lower, "auth token") || strings.Contains(lower, "invalid_grant") || strings.Contains(lower, "invalid jwt") || strings.Contains(lower, "unauthenticated"):
+	case containsAny(lower, "invalid_grant", "invalid jwt signature", "unauthenticated", "invalid_client", "account not found"):
 		return "", rejectedError("Google Cloud did not accept this key; it may have been deleted or disabled: " + text)
-	case strings.Contains(lower, "has not been used in project") || strings.Contains(lower, "service_disabled") || strings.Contains(lower, "it is disabled"):
+	case containsAny(lower, "has not been used in project", "service_disabled", "it is disabled"):
 		return fmt.Sprintf("The key signs in, but the Compute Engine API is off in project %s. Turn it on in the Google Cloud console before planning machines.", project), nil
-	case strings.Contains(lower, "was not found") || strings.Contains(lower, "notfound"):
+	case containsAny(lower, "was not found", "notfound"):
 		return fmt.Sprintf("The key signs in, but there is no project %s: check the project ID.", project), nil
-	case strings.Contains(lower, "permission") || strings.Contains(lower, "forbidden") || strings.Contains(lower, "403"):
+	case containsAny(lower, "permission", "forbidden", "403"):
 		return fmt.Sprintf("The key signs in, but it cannot use Compute Engine in project %s: check the project ID, and give the service account Compute Admin (for machines) and Storage Admin (for buckets) there.", project), nil
 	}
-	return "", fmt.Errorf("gcloud could not sign in: %s", text)
+	return "", fmt.Errorf("gcloud could not check the key: %s", text)
 }

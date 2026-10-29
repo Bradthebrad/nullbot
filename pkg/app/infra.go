@@ -507,10 +507,21 @@ func newInfraRunner(config Config, plan infra.Plan, cred Secret) (*infraRunner, 
 	env := commandBaseEnv()
 	for k := range env {
 		// Only the settings below reach the CLIs: no endpoint overrides,
-		// impersonation or profiles from this computer's environment.
-		if strings.HasPrefix(strings.ToUpper(k), "CLOUDSDK_") || strings.HasPrefix(strings.ToUpper(k), "AWS_") || strings.HasPrefix(strings.ToUpper(k), "GOOGLE_") {
+		// impersonation or profiles from this computer's environment. A
+		// certificate bundle stays, for networks that inspect TLS; it adds
+		// trust in a proxy, never another account or endpoint.
+		upper := strings.ToUpper(k)
+		if upper == "AWS_CA_BUNDLE" || upper == "CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE" {
+			continue
+		}
+		if strings.HasPrefix(upper, "CLOUDSDK_") || strings.HasPrefix(upper, "AWS_") || strings.HasPrefix(upper, "GOOGLE_") {
 			delete(env, k)
 		}
+	}
+	// Commands never inherit AWS_ variables; the certificate bundle is the
+	// one plans need back.
+	if bundle := os.Getenv("AWS_CA_BUNDLE"); bundle != "" {
+		env["AWS_CA_BUNDLE"] = bundle
 	}
 	for k, v := range secretEnv.vars {
 		env[k] = v

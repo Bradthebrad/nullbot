@@ -43,7 +43,18 @@ func secretsListTool(config Config, state *App) agent.Tool {
 			}
 			out := []item{}
 			for _, s := range secrets {
-				out = append(out, item{s.Name, s.Kind, s.Description, s.Provides, s.Public, s.AgentUse, s.Servers})
+				public := s.Public
+				if !s.AgentUse {
+					// Who a cloud key signs in as is the account's business
+					// only once the user lets agents use it.
+					public = map[string]string{}
+					for k, v := range s.Public {
+						if k != "account" && k != "identity" && k != "check_note" {
+							public[k] = v
+						}
+					}
+				}
+				out = append(out, item{s.Name, s.Kind, s.Description, s.Provides, public, s.AgentUse, s.Servers})
 			}
 			note := "Run commands with these secrets through secret_run (secrets: [names]). A secret with usable_by_agents=false must be allowed by the user in Settings > Secrets first. If what you need is missing, ask the user to add it there; never ask them to paste a secret into the chat."
 			if len(out) == 0 {

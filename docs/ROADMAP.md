@@ -7,15 +7,23 @@ The premise stays the same: a small core you can read, agents you can steer,
 and every model or tool a choice you make. New powers arrive as providers or
 as separate tool servers, under the same per-project permissions.
 
-## Cloud infrastructure
+## Remote nodes
 
-Tool servers that create and tear down infrastructure on AWS and Google Cloud:
-start and stop machines, create storage, and run jobs, so an agent can set up
-an environment for a task and remove it afterwards. Planned rules:
+Drive a headless NullBot on another machine (one NullBot made in the cloud,
+or any server) from the desktop app: send it requests, watch its activity,
+steer and stop its runs, over an SSH connection rather than an open port.
+Today a node runs `nullbot serve` and is reached with `ssh` and
+`nullbot infra connect` for its model.
 
-- every create, change and delete is shown and confirmed before it runs, with
-  the expected cost where the provider reports one;
-- everything NullBot creates is tagged, so it can be listed and removed;
-- credentials come from the vault ([SECRETS.md](SECRETS.md)): an `aws` or
-  `gcp` secret is handed to the provider's tools for the call and never shown
-  to the agent.
+## OpenTofu for larger setups
+
+Plans cover machines, firewall rules, key pairs and buckets through the
+official CLIs. For setups with many parts (networks, databases, load
+balancers), an OpenTofu configuration could be one step of a plan: shown
+with `tofu plan`'s output, approved like any other plan, applied, and torn
+down with the rest, its state kept in NullBot's infrastructure folder.
+
+## More of the cloud
+
+Managed databases, DNS records and scheduled start/stop for machines, in the
+same plan-approve-ledger form.

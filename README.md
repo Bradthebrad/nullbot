@@ -137,6 +137,7 @@ with its size; the full history stays searchable. See
 | Marketplace and servers | `market_list_available`, `market_read_package`, `market_install_package`, `market_refresh`, `mcp_list_servers`, `mcp_enable_server`, `mcp_disable_server`, `mcp_remove_server` |
 | Secrets | `secrets_list` (names only), `secret_run` (a command with secrets in its environment, values removed from its output) |
 | Chats (main chat only) | `chats_list`, `chat_read`, `chat_send`, `chat_control`, `chat_open` |
+| Cloud (when allowed) | `infra_status`, `infra_plan`, `infra_apply`, `infra_destroy`, `infra_inspect` |
 | NullBot itself | `config_dir_list`, `config_dir_read`, `logs_recent` |
 
 ### Tool servers
@@ -179,6 +180,26 @@ nullbot secrets github github                            # check who the token s
 ```
 
 See [docs/SECRETS.md](docs/SECRETS.md).
+
+### Cloud infrastructure
+
+Machines and buckets on AWS and Google Cloud, made through the official
+`aws` and `gcloud` tools. Every change is a plan of exact commands with its
+hourly cost, and nothing runs until you approve it; every command goes in a
+ledger, and everything made is tagged and can be removed. A machine can set
+itself up on first boot with NVIDIA drivers, Ollama and its models, and a
+headless NullBot; `nullbot infra connect` tunnels its model here so your
+agents use it. `nullbot infra inspect` shows what a machine runs: ports and
+who can reach them, services, nginx sites, containers.
+
+```sh
+nullbot infra plan --file gpu-box.json          # propose: every command, and the cost
+nullbot infra approve plan-1a2b3c4d --apply     # run it
+nullbot infra connect gpu-box                   # its Ollama becomes local:gpu-box
+nullbot infra destroy gpu-box                   # remove it, after you approve
+```
+
+See [docs/INFRA.md](docs/INFRA.md).
 
 ### Skills
 
@@ -254,6 +275,8 @@ per tool on the Tools page. See [docs/PERMISSIONS.md](docs/PERMISSIONS.md).
   skills/<name>/SKILL.md    installed skills
   plans/, artifacts/        saved plans and saved answers
   visualizations/           visuals for projects that can't hold them
+  infra/                    cloud plans, inventory and ledger
+  models/                   model files saved for llama.cpp
 ```
 
 Each project also gets a `.nullbot` folder for its visuals, with a
@@ -277,8 +300,9 @@ Use a separate NullBot folder while developing: set `NULLBOT_APP_DIR` or pass
 
 Planned, not built yet:
 
-- **Cloud infrastructure tools** that create and tear down AWS and Google Cloud
-  resources, with every change confirmed first.
+- **Remote nodes**: drive a headless NullBot on another machine from the
+  desktop app, over SSH, with its activity streamed back.
+- **OpenTofu** for larger cloud setups, as one approved step of a plan.
 
 See [docs/ROADMAP.md](docs/ROADMAP.md).
 
@@ -295,6 +319,7 @@ See [docs/ROADMAP.md](docs/ROADMAP.md).
 | Secrets and the vault | [docs/SECRETS.md](docs/SECRETS.md) |
 | Claude through the claude command | [docs/CLAUDE_CLI.md](docs/CLAUDE_CLI.md) |
 | Local models | [docs/LOCAL_MODELS.md](docs/LOCAL_MODELS.md) |
+| Cloud infrastructure | [docs/INFRA.md](docs/INFRA.md) |
 | Several chats at once | [docs/CHATS.md](docs/CHATS.md) |
 | Service accounts | [docs/SERVICE_ACCOUNTS.md](docs/SERVICE_ACCOUNTS.md) |
 | Activity events API | [docs/ACTIVITY_API.md](docs/ACTIVITY_API.md) |

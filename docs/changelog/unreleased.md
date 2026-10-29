@@ -1,5 +1,26 @@
 # Unreleased
 
+## Cloud infrastructure
+
+- **Plans you approve**: machines and buckets on AWS and Google Cloud become
+  plans of exact `aws`/`gcloud` commands with an approximate hourly cost.
+  Nothing runs until a person approves; agents (when allowed) propose and
+  run approved plans, and wait for the decision.
+- **A ledger and an inventory**: every proposal, decision and command, and
+  every resource made, tagged as NullBot's, so a failed plan's leftovers can
+  still be removed. Removal plans go in dependency order.
+- **Safe defaults**: ports open only to the addresses given (`my-ip` for
+  yours), encrypted disks and IMDSv2 on AWS, Shielded VM on Google Cloud,
+  private buckets; credentials from the vault, run with a private CLI
+  configuration.
+- **First-boot setup**: NVIDIA drivers, Ollama and models, a headless
+  NullBot verified against its release checksums.
+- **What runs where**: `nullbot infra inspect` (ports and who can reach
+  them, services, nginx sites, containers, setup, GPU) and `nullbot infra
+  here`; tunnels, and `nullbot infra connect` to use a cloud machine's
+  model as a local model server.
+- `nullbot infra`, `nullbot models use`; see [docs/INFRA.md](../INFRA.md).
+
 ## Local models
 
 - **Model servers you host** are providers of their own (`local:<id>`):

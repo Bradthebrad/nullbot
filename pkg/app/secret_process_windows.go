@@ -4,6 +4,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,6 +33,10 @@ func newSecretProcess(cmd *exec.Cmd) *secretProcess {
 	return p
 }
 
+var procNtResumeProcess = windows.NewLazySystemDLL("ntdll.dll").NewProc("NtResumeProcess")
+
+// start creates the process suspended, puts it in the job, and only then
+// lets it run, so nothing it starts can slip out before the job holds it.
 func (p *secretProcess) start() error {
 	job, err := windows.CreateJobObject(nil, nil)
 	if err == nil {
@@ -43,14 +48,34 @@ func (p *secretProcess) start() error {
 			windows.CloseHandle(job)
 		}
 	}
+	suspended := p.job != 0 && procNtResumeProcess.Find() == nil
+	if suspended {
+		p.cmd.SysProcAttr.CreationFlags |= windows.CREATE_SUSPENDED
+	}
 	if err := p.cmd.Start(); err != nil {
 		p.finish()
 		return err
 	}
-	if p.job != 0 {
-		if h, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(p.cmd.Process.Pid)); err == nil {
-			_ = windows.AssignProcessToJobObject(p.job, h)
-			windows.CloseHandle(h)
+	if p.job == 0 {
+		return nil
+	}
+	h, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE|windows.PROCESS_SUSPEND_RESUME, false, uint32(p.cmd.Process.Pid))
+	if err != nil {
+		if suspended {
+			// It cannot be put in the job or resumed: don't leave it hanging.
+			_ = p.cmd.Process.Kill()
+			p.finish()
+			return err
+		}
+		return nil
+	}
+	defer windows.CloseHandle(h)
+	_ = windows.AssignProcessToJobObject(p.job, h)
+	if suspended {
+		if status, _, _ := procNtResumeProcess.Call(uintptr(h)); status != 0 {
+			_ = p.cmd.Process.Kill()
+			p.finish()
+			return fmt.Errorf("could not start the command (NTSTATUS 0x%x)", status)
 		}
 	}
 	return nil

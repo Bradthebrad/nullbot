@@ -33,5 +33,7 @@
   `ssh-keygen`, `github`, `github-add-key`, `kinds`); `/secrets` in the
   terminal UI. A passphrase vault asks for its passphrase before the terminal
   UI opens.
+- **Masked keys** in Settings and the terminal UI show nothing of a key of
+  12 characters or fewer, and a mask sent back never replaces a key.
 
 See [docs/SECRETS.md](../SECRETS.md).

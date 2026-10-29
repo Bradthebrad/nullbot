@@ -28,14 +28,17 @@ new one, never half of one, and a lock file keeps two NullBot processes (the
 desktop app and `nullbot serve`, say) from writing at once. A vault file or
 folder that is a symbolic link is refused. If a keychain says it is there but
 cannot store a key (a Secret Service bus with nothing behind it, a locked
-keychain over SSH), NullBot treats it as absent and asks for a passphrase.
+keychain over SSH), NullBot says so and asks for a passphrase; it does not
+fall back to plain-text files, which are kept only for systems with no
+keychain at all.
 
 Older versions kept API keys in `api/keys.json` and the ChatGPT sign-in in
 `api/codex_auth.json` in plain text. NullBot moves both into the vault the
 first time it can, then overwrites and deletes each file, but only once
 everything in it is in the vault. Provider names are normalized on the way
-(`Perplexity AI` becomes `perplexity-ai`); a name that cannot be used keeps
-the file and is noted in the log. On a system
+(`Perplexity AI` becomes `perplexity-ai`). A key that cannot be moved (its
+name cannot be used, or another secret already has it) keeps the file and is
+noted in the log; the other keys move. On a system
 with no keychain and no passphrase configured, those two files stay where they
 are and keep working, and NullBot says so (`nullbot vault`, Settings >
 Secrets). Every other kind of secret needs the vault.
@@ -115,7 +118,9 @@ What `secret_run` does:
 6. Runs the command in a session (on Windows, a job) of its own, with a time
    limit (300 seconds by default, at most an hour). When the command ends,
    anything it left running is stopped, so nothing keeps the secrets after
-   the call.
+   the call. On Windows the command starts suspended and joins the job
+   before it runs a single instruction. git over SSH never leaves a shared
+   connection (`ControlMaster`) behind.
 7. Removes every secret value from what the command printed before the agent
    sees it, and records the use in the activity log (secret names, project,
    program and the agent's stated reason, never values).
@@ -127,7 +132,7 @@ password). An agent can only overwrite secrets agents made.
 ### Every tool result is checked
 
 Every tool's result, built in or from a tool server, and every Codex answer
-passes through the same filter before it reaches a model: saved secret
+and error passes through the same filter before it reaches a model: saved secret
 values, the ChatGPT sign-in, provider keys from the environment, the vault
 passphrase and the vault's own key are replaced with `[secret:name]`. Each
 value is caught as written, escaped inside JSON, in Base64 (on one line or
@@ -138,6 +143,18 @@ servers' error output shown in Tools is filtered the same way.
 
 Agents cannot read the vault, or the legacy `api/` files, with NullBot's own
 file tools.
+
+Codex runs with the same environment as a `secret_run` command: nothing that
+looks like a credential, apart from its own `CODEX_API_KEY`.
+
+### Settings and the Google key
+
+The provider keys in Settings are API key secrets named after their provider
+(`openai`, `brave`, or `x.ai` for provider `x-ai`). Changing a key there
+changes that secret; clearing it removes the secret. Other API key secrets
+(`openai-work`) are left alone. Google's key may be named `google` or
+`gemini`; with both, Settings uses and changes `google` and leaves `gemini`
+as it is.
 
 ## Tool servers
 
@@ -200,6 +217,10 @@ value reads it from standard input; a kind with several reads a JSON object
   separate outputs) defeats it.
 - Short values (under eight characters) are not filtered vault-wide, only in
   the output of the command they were given to.
+- A program that deliberately detaches from the command (a daemon that
+  starts its own session, `gpg-agent`, an `ssh` started with `ControlPersist`
+  by your own configuration) can outlive it with the secrets in its
+  environment. NullBot stops what stays in the command's session or job.
 - The overwrite before deleting temporary and legacy files does not reach
   every disk: SSDs and copy-on-write file systems may keep old blocks.
 - Anyone who can run programs as you on an unlocked session can ask the

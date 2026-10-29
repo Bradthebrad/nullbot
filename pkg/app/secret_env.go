@@ -125,7 +125,8 @@ func buildSecretEnv(secrets []Secret, files bool) (*secretEnv, error) {
 				return fail(err)
 			}
 			slash := filepath.ToSlash(path)
-			command := "ssh -i '" + slash + "' -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+			// No shared master connection: one would outlive the command.
+			command := "ssh -i '" + slash + "' -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ControlMaster=no -o ControlPath=none"
 			if err := set("GIT_SSH_COMMAND", command); err != nil {
 				return fail(err)
 			}
@@ -296,8 +297,9 @@ func serversWithSecrets() []string {
 // stay known for the life of the process, so a rotated, removed or
 // locked-away value is still caught.
 type secretRedactor struct {
-	modTime  time.Time
-	size     int64
+	// stamp identifies the vault and legacy files the redactor was built
+	// from; a change to any of them rebuilds it.
+	stamp    string
 	built    time.Time
 	replacer *strings.Replacer
 	values   []redactValue
@@ -347,9 +349,51 @@ func secretValues(s Secret) []string {
 	return out
 }
 
+// payloadValues are the values in a vault payload to redact, with labels.
+func payloadValues(payload vaultPayload) map[string]string {
+	out := map[string]string{}
+	add := func(value, label string) {
+		if value = strings.TrimSpace(value); len(value) >= 8 {
+			out[value] = label
+		}
+	}
+	for _, s := range payload.Secrets {
+		for _, v := range secretValues(s) {
+			add(v, "[secret:"+s.Name+"]")
+		}
+	}
+	if c := payload.System.CodexAuth; c != nil {
+		add(c.AccessToken, "[secret:chatgpt-sign-in]")
+		add(c.RefreshToken, "[secret:chatgpt-sign-in]")
+		add(c.IDToken, "[secret:chatgpt-sign-in]")
+	}
+	return out
+}
+
 // rememberSecrets records a payload's values as seen, so they stay redacted
 // even if the vault is locked before the next tool result.
 func rememberSecrets(config Config, payload vaultPayload) {
+	rememberValues(config, payloadValues(payload))
+}
+
+// rememberVaultKey records the vault's own key material as seen. It takes
+// the vault's lock, so it is called after a read or update, never inside.
+func rememberVaultKey(config Config) {
+	values := map[string]string{}
+	for _, v := range openVault(config).RedactionValues() {
+		if len(v) >= 8 {
+			values[v] = "[secret:vault key]"
+		}
+	}
+	rememberValues(config, values)
+}
+
+// rememberValues adds values to the vault's seen set. The set is capped;
+// values past the cap are still redacted while they are current.
+func rememberValues(config Config, values map[string]string) {
+	if len(values) == 0 {
+		return
+	}
 	path := VaultPath(config)
 	redactorsMu.Lock()
 	defer redactorsMu.Unlock()
@@ -359,15 +403,10 @@ func rememberSecrets(config Config, payload vaultPayload) {
 		seenValues[path] = seen
 	}
 	added := false
-	for _, s := range payload.Secrets {
-		for _, v := range secretValues(s) {
-			if v = strings.TrimSpace(v); len(v) < 8 {
-				continue
-			}
-			if _, ok := seen[v]; !ok && len(seen) < maxSeenValues {
-				seen[v] = "[secret:" + s.Name + "]"
-				added = true
-			}
+	for v, label := range values {
+		if _, ok := seen[v]; !ok && len(seen) < maxSeenValues {
+			seen[v] = label
+			added = true
 		}
 	}
 	if added {
@@ -375,20 +414,29 @@ func rememberSecrets(config Config, payload vaultPayload) {
 	}
 }
 
+// redactorStamp identifies the files the redactor reads: the vault and the
+// legacy plain-text files.
+func redactorStamp(config Config) string {
+	var b strings.Builder
+	for _, path := range []string{VaultPath(config), KeysPath(config), CodexAuthPath(config)} {
+		if info, err := os.Stat(path); err == nil {
+			fmt.Fprintf(&b, "%d/%d;", info.ModTime().UnixNano(), info.Size())
+		} else {
+			b.WriteString("-;")
+		}
+	}
+	return b.String()
+}
+
 func currentRedactor(config Config) *secretRedactor {
 	path := VaultPath(config)
-	info, statErr := os.Stat(path)
+	stamp := redactorStamp(config)
 	redactorsMu.Lock()
 	r := redactors[path]
 	redactorsMu.Unlock()
-	var modTime time.Time
-	var size int64
-	if statErr == nil {
-		modTime, size = info.ModTime(), info.Size()
-	}
-	// Rebuilt when the vault changes, and every few minutes for keys that
-	// come from the environment or legacy files.
-	if r != nil && time.Since(r.built) < 5*time.Minute && r.modTime.Equal(modTime) && r.size == size {
+	// Rebuilt when the vault or a legacy file changes, and every few minutes
+	// for keys that come from the environment.
+	if r != nil && time.Since(r.built) < 5*time.Minute && r.stamp == stamp {
 		return r
 	}
 	current := map[string]string{}
@@ -398,15 +446,8 @@ func currentRedactor(config Config) *secretRedactor {
 		}
 	}
 	if payload, err := loadSecretsPayload(config); err == nil {
-		for _, s := range payload.Secrets {
-			for _, v := range secretValues(s) {
-				add(v, "[secret:"+s.Name+"]")
-			}
-		}
-		if c := payload.System.CodexAuth; c != nil {
-			add(c.AccessToken, "[secret:chatgpt-sign-in]")
-			add(c.RefreshToken, "[secret:chatgpt-sign-in]")
-			add(c.IDToken, "[secret:chatgpt-sign-in]")
+		for v, label := range payloadValues(payload) {
+			current[v] = label
 		}
 	}
 	for _, v := range openVault(config).RedactionValues() {
@@ -443,8 +484,13 @@ func currentRedactor(config Config) *secretRedactor {
 			seen[v] = label
 		}
 	}
-	all := make(map[string]string, len(seen))
+	// Everything current, and everything seen before: the cap limits what
+	// is remembered, never what is redacted now.
+	all := make(map[string]string, len(seen)+len(current))
 	for v, label := range seen {
+		all[v] = label
+	}
+	for v, label := range current {
 		all[v] = label
 	}
 	redactorsMu.Unlock()
@@ -464,7 +510,7 @@ func currentRedactor(config Config) *secretRedactor {
 	for _, v := range values {
 		pairs = append(pairs, v.value, v.label)
 	}
-	r = &secretRedactor{built: time.Now(), modTime: modTime, size: size, replacer: strings.NewReplacer(pairs...), values: values}
+	r = &secretRedactor{built: time.Now(), stamp: stamp, replacer: strings.NewReplacer(pairs...), values: values}
 	redactorsMu.Lock()
 	redactors[path] = r
 	redactorsMu.Unlock()

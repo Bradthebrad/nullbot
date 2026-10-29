@@ -73,6 +73,11 @@ var (
 	// ErrExists: Create was called for a vault that already exists.
 	ErrExists = errors.New("vault: a vault already exists")
 	errBusy   = errors.New("vault: another NullBot is changing the vault; try again in a moment")
+	// ErrKeychainFailed: this system has a keychain, but it would not store
+	// the vault key (a declined prompt, no provider behind the bus). The
+	// remedy is a passphrase; unlike ErrNoKeychain it never means "fall back
+	// to plain text".
+	ErrKeychainFailed = errors.New("vault: the system keychain would not store the vault key; set NULLBOT_VAULT_PASSPHRASE (or NULLBOT_VAULT_PASSPHRASE_FILE) to use a passphrase instead")
 )
 
 // header is the file format. Everything but Data is metadata; Data is the
@@ -204,16 +209,18 @@ func (v *Vault) Create(protection Protection, passphrase string) error {
 
 // CreateWith makes a vault holding payload; see Create.
 func (v *Vault) CreateWith(protection Protection, passphrase string, payload []byte) error {
-	v.mu.Lock()
-	defer v.mu.Unlock()
 	if v.Exists() {
 		return ErrExists
 	}
+	// The file lock is taken before v.mu, so reads in this process never
+	// wait behind another process's write.
 	unlock, err := v.fileLock()
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	// Another process may have made it while this one waited.
 	if v.Exists() {
 		return ErrExists
@@ -244,6 +251,8 @@ func (v *Vault) create(protection Protection, passphrase string, payload []byte)
 			protection, passphrase = Passphrase, p
 		} else if v.keyringUsable() {
 			protection = v.keyring.Kind()
+		} else if v.keyringFailed {
+			return ErrKeychainFailed
 		} else {
 			return ErrNoKeychain
 		}
@@ -260,7 +269,7 @@ func (v *Vault) create(protection Protection, passphrase string, payload []byte)
 			// provider behind the bus, a locked login keychain over SSH):
 			// treat it as absent from now on.
 			v.keyringFailed = true
-			return fmt.Errorf("%w (%v)", ErrNoKeychain, err)
+			return fmt.Errorf("%w (%v)", ErrKeychainFailed, err)
 		}
 		return err
 	}
@@ -384,16 +393,20 @@ func (v *Vault) readLocked() ([]byte, error) {
 	return plain, nil
 }
 
+// ErrNoChange, returned by an Update function, leaves the vault as it is;
+// Update then returns nil.
+var ErrNoChange = errors.New("vault: no change")
+
 // Update rereads the payload, passes it to fn and writes what fn returns,
 // all under the vault's lock. fn's input is cleared afterwards.
 func (v *Vault) Update(fn func(payload []byte) ([]byte, error)) error {
-	v.mu.Lock()
-	defer v.mu.Unlock()
 	unlock, err := v.fileLock()
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	h, err := v.readHeader()
 	if err != nil {
 		return err
@@ -404,6 +417,9 @@ func (v *Vault) Update(fn func(payload []byte) ([]byte, error)) error {
 	}
 	defer clear(plain)
 	next, err := fn(plain)
+	if errors.Is(err, ErrNoChange) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -419,13 +435,13 @@ func (v *Vault) Update(fn func(payload []byte) ([]byte, error)) error {
 // passphrase to the keychain, or to a new passphrase. The payload is
 // re-encrypted under a fresh data key.
 func (v *Vault) Reprotect(protection Protection, passphrase string) error {
-	v.mu.Lock()
-	defer v.mu.Unlock()
 	unlock, err := v.fileLock()
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	old, err := v.readHeader()
 	if err != nil {
 		return err
@@ -472,13 +488,13 @@ func (v *Vault) Reprotect(protection Protection, passphrase string) error {
 // Destroy removes the vault file and its keychain entry. Its secrets are
 // gone for good.
 func (v *Vault) Destroy() error {
-	v.mu.Lock()
-	defer v.mu.Unlock()
 	unlock, err := v.fileLock()
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	h, err := v.readHeader()
 	if errors.Is(err, ErrCorrupt) {
 		// Still find the keychain entry to remove, if the id is readable.

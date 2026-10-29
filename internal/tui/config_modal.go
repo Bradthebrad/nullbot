@@ -149,25 +149,24 @@ func (m *Model) saveConfigFields() error {
 	for _, field := range m.configFields {
 		values[field.Key] = field.Value
 	}
-	// Saving writes every key, so the current ones must have been read.
-	keys, err := m.app.LoadAPIKeys()
-	if err != nil {
-		return fmt.Errorf("saved keys could not be read, so none were changed: %w", err)
-	}
-	changed := false
-	for _, k := range []struct {
-		field string
-		value *string
-	}{{"key_openai", &keys.OpenAI}, {"key_anthropic", &keys.Anthropic}, {"key_openrouter", &keys.OpenRouter}} {
-		typed := sanitizeConfigValue(values[k.field])
-		// The field shows the key masked; an untouched field is unchanged.
-		if typed == app.MaskSecret(*k.value) || isMasked(typed) {
-			continue
+	// Key fields show the stored key masked; one left as it was is
+	// unchanged. Keys are read, and written, only when one was typed.
+	typedKeys := map[string]string{}
+	for _, field := range []string{"key_openai", "key_anthropic", "key_openrouter"} {
+		if typed := sanitizeConfigValue(values[field]); !isMasked(typed) {
+			typedKeys[field] = typed
 		}
-		*k.value = typed
-		changed = true
 	}
-	if changed {
+	if len(typedKeys) > 0 {
+		keys, err := m.app.LoadAPIKeys()
+		if err != nil {
+			return fmt.Errorf("saved keys could not be read, so none were changed: %w", err)
+		}
+		for field, dst := range map[string]*string{"key_openai": &keys.OpenAI, "key_anthropic": &keys.Anthropic, "key_openrouter": &keys.OpenRouter} {
+			if typed, ok := typedKeys[field]; ok && typed != app.MaskSecret(*dst) {
+				*dst = typed
+			}
+		}
 		if err := m.app.SaveAPIKeys(keys); err != nil {
 			return err
 		}
@@ -196,7 +195,7 @@ func (m *Model) saveConfigFields() error {
 }
 
 func isMasked(value string) bool {
-	return value == "" || value == "(not set)" || strings.Contains(value, "...")
+	return value == "" || app.LooksMasked(value)
 }
 
 func sanitizeConfigValue(value string) string {

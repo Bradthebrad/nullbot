@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -249,3 +250,206 @@ var _ = errors.New
 var _ = exec.Command
 var _ = vault.ErrLocked
 var _ tcagent.Tool
+
+// --- second review ----------------------------------------------------------
+
+func TestConfigPathsCannotReachCredentialsByWindowsSpellings(t *testing.T) {
+	config := projectTestConfig(t, "full")
+	for _, path := range []string{"api./keys.json", "api ./keys.json", "API. . /keys.json", "vault./vault.json", "api:stream", "notes/x:y"} {
+		if _, err := safeConfigPath(config.AppDir, path); err == nil {
+			t.Errorf("%q was allowed", path)
+		}
+	}
+	if _, err := safeConfigPath(config.AppDir, "apiary/notes.md"); err != nil {
+		t.Errorf("an ordinary folder was refused: %v", err)
+	}
+}
+
+func TestGoogleWinsOverGeminiAndGeminiIsKept(t *testing.T) {
+	config := projectTestConfig(t, "full")
+	for name, value := range map[string]string{"gemini": "AIza-gemini-key-0001", "google": "AIza-google-key-0002"} {
+		if _, err := SaveSecret(config, SecretInput{Name: name, Kind: SecretAPIKey, Public: map[string]string{"provider": name}, Values: map[string]string{"value": value}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keys, _ := LoadAPIKeys(config)
+	if keys.Google != "AIza-google-key-0002" {
+		t.Fatalf("google key %q", keys.Google)
+	}
+	keys.Google = "AIza-google-key-0003"
+	if err := SaveAPIKeys(config, keys); err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := loadSecretsPayload(config)
+	got := map[string]string{}
+	for _, s := range payload.Secrets {
+		got[s.Name] = s.Values["value"]
+	}
+	if got["google"] != "AIza-google-key-0003" || got["gemini"] != "AIza-gemini-key-0001" {
+		t.Fatalf("secrets after save: %v", got)
+	}
+	// Clearing the Google key clears "google" only.
+	keys.Google = ""
+	_ = SaveAPIKeys(config, keys)
+	payload, _ = loadSecretsPayload(config)
+	got = map[string]string{}
+	for _, s := range payload.Secrets {
+		got[s.Name] = s.Values["value"]
+	}
+	if _, ok := got["google"]; ok || got["gemini"] != "AIza-gemini-key-0001" {
+		t.Fatalf("secrets after clearing: %v", got)
+	}
+}
+
+func TestProviderNamedSecretsMatchNormalizedNames(t *testing.T) {
+	config := projectTestConfig(t, "full")
+	if _, err := SaveSecret(config, SecretInput{Name: "x.ai", Kind: SecretAPIKey, Public: map[string]string{"provider": "x-ai"}, Values: map[string]string{"value": "xai-original-00001"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveAPIKeys(config, APIKeys{Other: map[string]string{"x-ai": "xai-replaced-00002"}}); err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := loadSecretsPayload(config)
+	if len(payload.Secrets) != 1 || payload.Secrets[0].Name != "x.ai" || payload.Secrets[0].Values["value"] != "xai-replaced-00002" {
+		t.Fatalf("secrets %+v", payload.Secrets)
+	}
+}
+
+func TestMigrationStoresWhatItCanAndDoesNotRewriteOnEveryRead(t *testing.T) {
+	config := projectTestConfig(t, "full")
+	writeLegacyKeys(t, config, APIKeys{OpenAI: "sk-legacy-openai-001", Other: map[string]string{"!!!": "kept-key-000000004"}})
+	if _, err := LoadAPIKeys(config); err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := loadSecretsPayload(config)
+	if apiKeysFromPayload(payload).OpenAI != "sk-legacy-openai-001" {
+		t.Fatal("a usable key was not moved because another was unusable")
+	}
+	before, err := os.ReadFile(VaultPath(config))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		_, _ = LoadAPIKeys(config)
+		_ = VaultStatus(config)
+	}
+	migrated.Delete(config.AppDir) // even without the memo, nothing changes
+	_, _ = LoadAPIKeys(config)
+	after, _ := os.ReadFile(VaultPath(config))
+	if string(before) != string(after) {
+		t.Fatal("reading the vault rewrote it")
+	}
+	// Saving other keys keeps the file while it holds a key the vault can't.
+	if err := SaveAPIKeys(config, APIKeys{OpenAI: "sk-legacy-openai-001", Anthropic: "sk-ant-new-000000005"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(KeysPath(config)); err != nil {
+		t.Fatal("keys.json was deleted while it held a key only it has")
+	}
+}
+
+func TestSaveKeepsLegacyKeysAMaskStandsFor(t *testing.T) {
+	config := projectTestConfig(t, "full")
+	// A vault that can't take a key from the file (its name is taken) keeps
+	// the file; a form then sends that key back masked.
+	if _, err := SaveSecret(config, SecretInput{Name: "anthropic", Kind: SecretGeneric, Values: map[string]string{"value": "generic-value-0001"}, Public: map[string]string{"env": "SOME_VALUE"}}); err != nil {
+		t.Fatal(err)
+	}
+	writeLegacyKeys(t, config, APIKeys{OpenAI: "sk-legacy-openai-002", Anthropic: "sk-ant-legacy-00003"})
+	keys, _ := LoadAPIKeys(config)
+	if keys.Anthropic != "sk-ant-legacy-00003" {
+		t.Fatalf("keys %+v", keys)
+	}
+	keys.OpenAI = MaskSecret(keys.OpenAI)
+	keys.Anthropic = MaskSecret(keys.Anthropic)
+	_ = SaveAPIKeys(config, keys)
+	if _, err := os.Stat(KeysPath(config)); err != nil {
+		t.Fatal("keys.json was deleted with the Anthropic key only in it")
+	}
+	got, _ := LoadAPIKeys(config)
+	if got.OpenAI != "sk-legacy-openai-002" || got.Anthropic != "sk-ant-legacy-00003" {
+		t.Fatalf("keys after save: %+v", got)
+	}
+}
+
+func TestRedactionPastTheCapAndOfSignInTokens(t *testing.T) {
+	withoutKeychain(t)
+	config := projectTestConfig(t, "full")
+	path := VaultPath(config)
+	redactorsMu.Lock()
+	full := map[string]string{}
+	for i := 0; i < maxSeenValues; i++ {
+		full[fmt.Sprintf("filler-value-%06d", i)] = "[secret:filler]"
+	}
+	seenValues[path] = full
+	redactorsMu.Unlock()
+	t.Cleanup(func() {
+		redactorsMu.Lock()
+		delete(seenValues, path)
+		redactorsMu.Unlock()
+	})
+	if err := CreateVault(config, "passphrase", "cap passphrase"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SaveSecret(config, SecretInput{Name: "late", Kind: SecretGeneric, Values: map[string]string{"value": "late-value-00000001"}, Public: map[string]string{"env": "LATE"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := RedactSecrets(config, "late-value-00000001"); strings.Contains(got, "late-value") {
+		t.Fatalf("a current value past the cap was shown: %q", got)
+	}
+	// Sign-in tokens saved while unlocked stay redacted once locked.
+	redactorsMu.Lock()
+	delete(seenValues, path)
+	redactorsMu.Unlock()
+	if err := saveCodexAuth(config, codexAuthStore{AccessToken: "access-token-0000000009", RefreshToken: "refresh-token-000000009"}); err != nil {
+		t.Fatal(err)
+	}
+	keyForms := openVault(config).RedactionValues()
+	LockVault(config)
+	for _, v := range append([]string{"access-token-0000000009", "refresh-token-000000009"}, keyForms...) {
+		if got := RedactSecrets(config, "x "+v); strings.Contains(got, v) {
+			t.Fatalf("shown after lock: %q", got)
+		}
+	}
+}
+
+func TestRedactorNoticesALegacyFileAtOnce(t *testing.T) {
+	withoutKeychain(t)
+	t.Setenv(vault.PassphraseEnv, "")
+	config := projectTestConfig(t, "full")
+	_ = RedactSecrets(config, "warm the cache")
+	writeLegacyKeys(t, config, APIKeys{OpenAI: "sk-dropped-in-000000010"})
+	if got := RedactSecrets(config, "sk-dropped-in-000000010"); strings.Contains(got, "sk-dropped") {
+		t.Fatalf("a new legacy key was shown: %q", got)
+	}
+}
+
+func TestShortKeysAreFullyMaskedAndSSHKeepsNoMaster(t *testing.T) {
+	if got := MaskSecret("abcdefghijkl"); got != "********" {
+		t.Fatalf("12-character key masked as %q", got)
+	}
+	if !LooksMasked("****") || !LooksMasked("(not set)") || LooksMasked("sk-real") {
+		t.Fatal("LooksMasked")
+	}
+	env, err := buildSecretEnv([]Secret{{Name: "deploy", Kind: SecretSSHKey, Values: map[string]string{"private_key": mustSSHKey(t)}}}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer env.cleanup()
+	if cmd := env.vars["GIT_SSH_COMMAND"]; !strings.Contains(cmd, "ControlMaster=no") || !strings.Contains(cmd, "ControlPath=none") {
+		t.Fatalf("GIT_SSH_COMMAND %q", cmd)
+	}
+}
+
+func TestCodexGetsNoInheritedCredentials(t *testing.T) {
+	t.Setenv("DEPLOY_KEY", "inherited-deploy-key")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
+	t.Setenv("CODEX_API_KEY", "codex-own-key")
+	env := strings.Join(codexCommandEnv(projectTestConfig(t, "full")), "\n")
+	if strings.Contains(env, "inherited-deploy-key") || strings.Contains(env, "aws-secret") {
+		t.Fatalf("codex inherits credentials")
+	}
+	if !strings.Contains(env, "CODEX_API_KEY=codex-own-key") {
+		t.Fatal("codex lost its own key")
+	}
+}

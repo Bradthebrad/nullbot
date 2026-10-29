@@ -4,6 +4,7 @@ package vault
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -26,7 +27,11 @@ func lockPath(path string) (func(), error) {
 				_ = f.Close()
 			}, nil
 		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) || time.Now().After(deadline) {
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			f.Close()
+			return nil, fmt.Errorf("vault: locking %s: %w", path, err)
+		}
+		if time.Now().After(deadline) {
 			f.Close()
 			return nil, errBusy
 		}

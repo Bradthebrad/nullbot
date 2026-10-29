@@ -893,7 +893,15 @@ func safeConfigPath(root, rel string) (string, error) {
 	// Credentials stay out of the agent's reach, even encrypted: the vault,
 	// legacy key files and the vault's lock.
 	if inner, err := filepath.Rel(rootClean, full); err == nil {
-		first := strings.ToLower(strings.Split(filepath.ToSlash(inner), "/")[0])
+		parts := strings.Split(filepath.ToSlash(inner), "/")
+		for _, part := range parts {
+			// Windows reads "api." and "api " as "api", and "api:x" as a
+			// stream of it; no settings file needs either form.
+			if strings.Contains(part, ":") {
+				return "", fmt.Errorf("%q is not a settings file name", part)
+			}
+		}
+		first := strings.ToLower(strings.TrimRight(parts[0], ". "))
 		if first == "vault" || first == "api" {
 			return "", fmt.Errorf("%s holds credentials; agents use secrets through secrets_list and secret_run", first)
 		}

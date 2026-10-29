@@ -317,8 +317,12 @@ func (k *brokenKeyring) Store(string, []byte) ([]byte, error) { return nil, erro
 
 func TestABrokenKeychainCountsAsNone(t *testing.T) {
 	v := newTestVault(t, &brokenKeyring{}, nil)
-	if err := v.Create(Auto, ""); !errors.Is(err, ErrNoKeychain) {
+	if err := v.Create(Auto, ""); !errors.Is(err, ErrKeychainFailed) || errors.Is(err, ErrNoKeychain) {
 		t.Fatalf("create with a broken keychain: %v", err)
+	}
+	// Still not "no keychain" on the next try: never a reason for plain text.
+	if err := v.Create(Auto, ""); !errors.Is(err, ErrKeychainFailed) {
+		t.Fatalf("second create with a broken keychain: %v", err)
 	}
 	if st := v.Status(); st.Keychain != "" || st.Exists {
 		t.Fatalf("status %+v", st)

@@ -79,6 +79,11 @@ func ResolveContextWindow(config Config, model ModelConfig) ContextWindow {
 			return saved.ContextWindow
 		}
 	}
+	if IsLocalProvider(model.Provider) {
+		// Local servers often run models with a small context; plan for one
+		// until the server says.
+		return ContextWindow{Tokens: 8192, Source: "default", Detail: "Unknown until NullBot reads the server's models"}
+	}
 	if strings.EqualFold(model.Provider, ClaudeCLIProvider) {
 		// The CLI keeps its own context; NullBot sends it only what is new.
 		return ContextWindow{Tokens: 200000, Source: "built-in", Detail: "The Claude CLI manages its own context"}

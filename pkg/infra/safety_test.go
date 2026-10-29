@@ -21,10 +21,10 @@ func approveAndApply(t *testing.T, store *Store, plan Plan, runner Runner) (Plan
 	if err := store.Propose(plan); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Decide(plan.ID, true, "you", ""); err != nil {
+	if _, err := store.Decide(plan.ID, true, "you", "", testKey); err != nil {
 		t.Fatal(err)
 	}
-	return store.Apply(context.Background(), plan.ID, ApplyOptions{Runner: runner})
+	return store.Apply(context.Background(), plan.ID, ApplyOptions{ApprovalKey: testKey, Runner: runner})
 }
 
 func ranLines(r *fakeRunner) string {
@@ -158,18 +158,56 @@ func TestApprovalCoversExactlyWhatWasShown(t *testing.T) {
 		_ = os.WriteFile(path, data, 0o600)
 	}
 	edit(func(p *Plan) { p.Steps[0].Argv = []string{"aws", "iam", "create-access-key"} })
-	if _, err := store.Decide(plan.ID, true, "you", shown.Hash); err == nil || !strings.Contains(err.Error(), "changed since you looked") {
+	if _, err := store.Decide(plan.ID, true, "you", shown.Hash, testKey); err == nil || !strings.Contains(err.Error(), "changed since you looked") {
 		t.Fatalf("approved a changed plan: %v", err)
 	}
 	now, _ := store.Plan(plan.ID)
-	if _, err := store.Decide(plan.ID, true, "you", now.Hash); err != nil {
+	if _, err := store.Decide(plan.ID, true, "you", now.Hash, testKey); err != nil {
 		t.Fatal(err)
 	}
 	edit(func(p *Plan) { p.Steps[1].Argv = []string{"aws", "iam", "create-user", "--user-name", "x"} })
 	runner := &fakeRunner{}
-	done, err := store.Apply(context.Background(), plan.ID, ApplyOptions{Runner: runner})
-	if err == nil || !strings.Contains(err.Error(), "changed after it was approved") || len(runner.ran) != 0 || done.State != PlanFailed {
+	done, err := store.Apply(context.Background(), plan.ID, ApplyOptions{ApprovalKey: testKey, Runner: runner})
+	if err == nil || !strings.Contains(err.Error(), "does not match what was approved") || len(runner.ran) != 0 || done.State != PlanFailed {
 		t.Fatalf("ran a changed plan: %v %v", err, runner.ran)
+	}
+}
+
+// Writing a plan file as approved does not make it run: the seal needs the
+// key from the vault.
+func TestApprovalCannotBeForgedInTheFile(t *testing.T) {
+	store := Open(t.TempDir())
+	plan, _ := BuildCreatePlan(awsSpec(), "agent main")
+	// Approved with a seal made with another key.
+	plan.State, plan.DecidedBy = PlanApproved, "you"
+	plan.Approval = plan.Seal([]byte("a key the agent made up"), "you")
+	_ = store.SavePlan(plan)
+	runner := &fakeRunner{}
+	if _, err := store.Apply(context.Background(), plan.ID, ApplyOptions{ApprovalKey: testKey, Runner: runner}); err == nil || len(runner.ran) != 0 {
+		t.Fatalf("a forged approval ran: %v", err)
+	}
+	// Approved without any seal: it goes back to waiting for a person.
+	plan, _ = BuildCreatePlan(awsSpec(), "agent main")
+	plan.State, plan.DecidedBy = PlanApproved, "you"
+	_ = store.SavePlan(plan)
+	if _, err := store.Apply(context.Background(), plan.ID, ApplyOptions{ApprovalKey: testKey, Runner: runner}); err == nil || len(runner.ran) != 0 {
+		t.Fatalf("an unsealed approval ran: %v", err)
+	}
+	if p, _ := store.Plan(plan.ID); p.State != PlanProposed {
+		t.Fatalf("unsealed plan is %s", p.State)
+	}
+	// Changing who approved it breaks the seal too.
+	plan, _ = BuildCreatePlan(awsSpec(), "agent main")
+	_ = store.Propose(plan)
+	_, _ = store.Decide(plan.ID, true, "you", "", testKey)
+	p, _ := store.Plan(plan.ID)
+	p.DecidedBy = "someone else"
+	_ = store.SavePlan(p)
+	if _, err := store.Apply(context.Background(), plan.ID, ApplyOptions{ApprovalKey: testKey, Runner: runner}); err == nil || len(runner.ran) != 0 {
+		t.Fatalf("a re-attributed approval ran: %v", err)
+	}
+	if _, err := store.Decide(plan.ID, true, "you", "", nil); err == nil {
+		t.Fatal("approved without a key")
 	}
 }
 
@@ -223,7 +261,7 @@ func TestStaleRunsAreRecovered(t *testing.T) {
 	store := Open(t.TempDir())
 	plan, _ := BuildCreatePlan(awsSpec(), "main")
 	_ = store.Propose(plan)
-	_, _ = store.Decide(plan.ID, true, "you", "")
+	_, _ = store.Decide(plan.ID, true, "you", "", testKey)
 	p, _ := store.Plan(plan.ID)
 	p.State, p.RunnerPID, p.RunnerHost = PlanApplying, 999999, hostName()
 	p.Steps[0].State = "running"
@@ -315,3 +353,5 @@ func TestBootstrapScriptsParse(t *testing.T) {
 		}
 	}
 }
+
+var testKey = []byte("an approval key for tests, 32 b.")

@@ -400,12 +400,21 @@ func printPlan(w io.Writer, p infra.Plan) {
 		return
 	}
 	clean := infra.CleanText
-	fmt.Fprintf(w, "%s  %s  [%s]\n", p.ID, clean(p.Title), p.State)
+	// One line, for text that must not pass for a step of its own.
+	flat := func(s string) string { return strings.Join(strings.Fields(clean(s)), " ") }
+	fmt.Fprintf(w, "%s  %s  [%s]\n", p.ID, flat(p.Title), p.State)
 	if p.Requester != "" {
-		fmt.Fprintf(w, "Asked for by %s\n", clean(p.Requester))
+		fmt.Fprintf(w, "Asked for by %s\n", flat(p.Requester))
 	}
 	if p.Reason != "" {
-		fmt.Fprintf(w, "Why: %s\n", clean(p.Reason))
+		// The reason is the requester's words: each line is marked as such.
+		for i, line := range strings.Split(strings.TrimSpace(clean(p.Reason)), "\n") {
+			label := "Why: "
+			if i > 0 {
+				label = "     "
+			}
+			fmt.Fprintf(w, "%s> %s\n", label, line)
+		}
 	}
 	fmt.Fprintf(w, "Uses the %s credentials %q", p.Cloud, p.Credential)
 	if p.CostHourly != 0 {
@@ -421,7 +430,7 @@ func printPlan(w io.Writer, p infra.Plan) {
 		if mark == "" {
 			mark = " "
 		}
-		fmt.Fprintf(w, " %s %s. %s\n", mark, s.ID, clean(s.Summary))
+		fmt.Fprintf(w, " %s %s. %s\n", mark, s.ID, flat(s.Summary))
 		if len(s.Argv) > 0 {
 			quoted := make([]string, len(s.Argv))
 			for i, a := range s.Argv {
@@ -437,14 +446,14 @@ func printPlan(w io.Writer, p infra.Plan) {
 			}
 		}
 		if s.Error != "" {
-			fmt.Fprintf(w, "     error: %s\n", clean(s.Error))
+			fmt.Fprintf(w, "     error: %s\n", flat(s.Error))
 		}
 	}
 	for _, n := range p.Notes {
-		fmt.Fprintf(w, "Note: %s\n", clean(n))
+		fmt.Fprintf(w, "Note: %s\n", flat(n))
 	}
 	if p.Error != "" {
-		fmt.Fprintf(w, "Stopped: %s\n", clean(p.Error))
+		fmt.Fprintf(w, "Stopped: %s\n", flat(p.Error))
 	}
 }
 

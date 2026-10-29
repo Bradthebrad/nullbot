@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -279,6 +282,28 @@ func (a *App) PlanInfraDestroy(ids []string, deleteContents bool, requester, rea
 	if len(picked) == 0 {
 		return infra.Plan{}, errors.New("none of those are resources NullBot made that still exist; infra_status lists them")
 	}
+	plans, _ := store.Plans(0)
+	running := map[string]bool{}
+	for _, p := range plans {
+		if p.State == infra.PlanApplying || p.State == infra.PlanApproved {
+			running[p.ID] = true
+		}
+	}
+	for _, r := range picked {
+		// Removing something while its plan still creates it could look
+		// for it before it exists, and leave it running unrecorded.
+		if running[r.PlanID] {
+			return infra.Plan{}, fmt.Errorf("%s is still being created by plan %s; remove it when that plan has finished", r.Name, r.PlanID)
+		}
+		// A rule or group a machine still uses stays with the machine: a
+		// Google Cloud deny rule removed alone would open the machine to
+		// the default network's SSH and RDP from anywhere.
+		for _, other := range all {
+			if other.Live() && !chosen[other.ID] && slices.Contains(other.DependsOn, r.ID) && r.Kind != infra.KindKeyPair {
+				return infra.Plan{}, fmt.Errorf("%s %s is used by %s; remove %s instead, and it goes with it", r.Kind, r.Name, other.Name, other.Name)
+			}
+		}
+	}
 	if byAgent(requester) {
 		cred, err := infraCredential(config, picked[0].Cloud, picked[0].Credential)
 		if err != nil {
@@ -307,7 +332,15 @@ func (a *App) PlanInfraDestroy(ids []string, deleteContents bool, requester, rea
 // changed since. Empty skips that check (the caller showed the plan just
 // now, under the same lock).
 func (a *App) DecideInfraPlan(id string, approve bool, by, seen string) (infra.Plan, error) {
-	plan, err := infraStore(a.Config()).Decide(id, approve, by, seen)
+	var key []byte
+	if approve {
+		var err error
+		if key, err = infraApprovalKey(a.Config(), true); err != nil {
+			return infra.Plan{}, err
+		}
+	}
+	plan, err := infraStore(a.Config()).Decide(id, approve, by, seen, key)
+	clear(key)
 	if err == nil {
 		a.logInfo("infrastructure plan decided", "plan", id, "approved", approve, "by", by)
 		a.notifyChange(ChangeInfra)
@@ -332,6 +365,10 @@ func (a *App) ApplyInfraPlan(ctx context.Context, id, by string) (infra.Plan, er
 	if err != nil {
 		return plan, err
 	}
+	// Without a key (nothing approved yet, or the vault is shut), the store
+	// says why the plan cannot run.
+	key, _ := infraApprovalKey(config, false)
+	defer clear(key)
 	runner, cleanup, err := newInfraRunner(config, plan, cred)
 	if err != nil {
 		return plan, err
@@ -339,7 +376,7 @@ func (a *App) ApplyInfraPlan(ctx context.Context, id, by string) (infra.Plan, er
 	defer cleanup()
 	a.logInfo("infrastructure plan applying", "plan", id, "by", by)
 	done, err := store.Apply(ctx, id, infra.ApplyOptions{
-		Runner: runner, By: by, TempDir: runner.dir,
+		Runner: runner, By: by, TempDir: runner.dir, ApprovalKey: key,
 		Redact:   func(s string) string { return RedactSecrets(config, s) },
 		Progress: func(infra.Plan) { a.notifyChange(ChangeInfra) },
 	})
@@ -353,6 +390,38 @@ func (a *App) ApplyInfraPlan(ctx context.Context, id, by string) (infra.Plan, er
 	}
 	a.notifyChange(ChangeInfra)
 	return done, err
+}
+
+// infraApprovalKey is the key that seals plan approvals, kept in the vault
+// with NullBot's other system credentials, which agents and commands never
+// get. It is made the first time a plan is approved.
+func infraApprovalKey(config Config, create bool) ([]byte, error) {
+	payload, err := loadSecretsPayload(config)
+	if err != nil {
+		return nil, fmt.Errorf("the vault could not be opened for the approval key: %w", err)
+	}
+	if payload.System.InfraKey == "" && create {
+		err = updateSecrets(config, func(p *vaultPayload) error {
+			if p.System.InfraKey == "" {
+				var b [32]byte
+				if _, err := rand.Read(b[:]); err != nil {
+					return err
+				}
+				p.System.InfraKey = base64.StdEncoding.EncodeToString(b[:])
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		if payload, err = loadSecretsPayload(config); err != nil {
+			return nil, err
+		}
+	}
+	if payload.System.InfraKey == "" {
+		return nil, errors.New("no plan has been approved with this NullBot folder's vault")
+	}
+	return base64.StdEncoding.DecodeString(payload.System.InfraKey)
 }
 
 // byAgent reports a plan asked for by an agent rather than a person.
@@ -479,9 +548,6 @@ func (r *infraRunner) Run(ctx context.Context, argv []string) (string, string, e
 	if err != nil {
 		return "", "", err
 	}
-	if err := checkBatchArgs(bin, argv[1:]); err != nil {
-		return "", "", err
-	}
 	timeout := 10 * time.Minute
 	if len(argv) > 2 && argv[2] == "wait" {
 		timeout = 30 * time.Minute
@@ -489,6 +555,11 @@ func (r *infraRunner) Run(ctx context.Context, argv []string) (string, string, e
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, argv[1:]...)
+	// The program exec resolved, extension and all: NULLBOT_GCLOUD_BIN
+	// without .cmd still runs gcloud.cmd on Windows.
+	if err := checkBatchArgs(cmd.Path, argv[1:]); err != nil {
+		return "", "", err
+	}
 	cmd.Env = r.env
 	cmd.Dir = r.dir
 	var stdout, stderr cappedBuffer

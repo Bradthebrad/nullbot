@@ -311,3 +311,36 @@ func TestBatchFilesGetOnlySafeArguments(t *testing.T) {
 		t.Fatal("a program (not a batch file) was checked")
 	}
 }
+
+func TestRemovalsThatWouldLeaveThingsWorse(t *testing.T) {
+	config := projectTestConfig(t, "read-only")
+	a := New(config)
+	store := infraStore(config)
+	vm := infra.Resource{ID: "nb-aaaaaaaa", Cloud: infra.GCP, Kind: infra.KindInstance, Name: "web", Zone: "us-central1-a", Project: "p-12345", CloudID: "web", State: infra.StateReady, PlanID: "plan-11111111", Credential: "gcp", DependsOn: []string{"nb-bbbbbbbb", "nb-cccccccc"}}
+	allow := infra.Resource{ID: "nb-bbbbbbbb", Cloud: infra.GCP, Kind: infra.KindFirewall, Name: "nb-bbbbbbbb", Project: "p-12345", CloudID: "nb-bbbbbbbb", State: infra.StateReady, PlanID: "plan-11111111", Credential: "gcp"}
+	deny := infra.Resource{ID: "nb-cccccccc", Cloud: infra.GCP, Kind: infra.KindFirewall, Name: "nb-cccccccc", Project: "p-12345", CloudID: "nb-cccccccc", State: infra.StateReady, PlanID: "plan-11111111", Credential: "gcp", Details: map[string]string{"denies": "everything else"}}
+	_ = store.UpdateResources(func([]infra.Resource) []infra.Resource { return []infra.Resource{vm, allow, deny} })
+	// The deny rule alone would open the machine to the default network.
+	if _, err := a.PlanInfraDestroy([]string{deny.ID}, false, "you", ""); err == nil || !strings.Contains(err.Error(), "used by web") {
+		t.Fatalf("removing the deny rule alone: %v", err)
+	}
+	// While its plan still runs, a machine cannot be removed.
+	_ = store.SavePlan(infra.Plan{ID: "plan-11111111", Cloud: infra.GCP, Kind: "create", State: infra.PlanApplying, Created: time.Now()})
+	if _, err := a.PlanInfraDestroy([]string{"web"}, false, "you", ""); err == nil || !strings.Contains(err.Error(), "still being created") {
+		t.Fatalf("removing during creation: %v", err)
+	}
+	// A plan left running for hours by a NullBot elsewhere is recovered.
+	p, _ := store.Plan("plan-11111111")
+	p.RunnerHost, p.RunnerPID, p.Decided = "another-laptop", 4242, time.Now().Add(-5*time.Hour)
+	_ = store.SavePlan(p)
+	if _, err := a.InfraState(); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := store.Plan("plan-11111111"); p.State != infra.PlanFailed {
+		t.Fatalf("stale plan is %s", p.State)
+	}
+	plan, err := a.PlanInfraDestroy([]string{"web"}, false, "you", "")
+	if err != nil || len(plan.Resources) != 3 {
+		t.Fatalf("removing the machine: %v %+v", err, plan.Resources)
+	}
+}

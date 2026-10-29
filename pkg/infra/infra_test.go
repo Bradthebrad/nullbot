@@ -152,15 +152,15 @@ func TestApplyNeedsApprovalThenRunsAndTearsDown(t *testing.T) {
 		"aws ec2 run-instances":         `{"Instances": [{"InstanceId": "i-0abc", "PrivateIpAddress": "10.0.0.5"}]}`,
 		"aws ec2 describe-instances":    `{"public_ip": "34.1.2.3", "private_ip": "10.0.0.5", "state": "running"}`,
 	}, fail: map[string]string{"aws s3api head-bucket": headBucket404}}
-	if _, err := store.Apply(context.Background(), plan.ID, ApplyOptions{Runner: runner}); err == nil || !strings.Contains(err.Error(), "waiting for approval") {
+	if _, err := store.Apply(context.Background(), plan.ID, ApplyOptions{ApprovalKey: testKey, Runner: runner}); err == nil || !strings.Contains(err.Error(), "waiting for approval") {
 		t.Fatalf("ran unapproved: %v", err)
 	}
-	if _, err := store.Decide(plan.ID, true, "you", ""); err != nil {
+	if _, err := store.Decide(plan.ID, true, "you", "", testKey); err != nil {
 		t.Fatal(err)
 	}
 	var userData string
 	runner.answers["aws ec2 run-instances"] = `{"Instances": [{"InstanceId": "i-0abc", "PrivateIpAddress": "10.0.0.5"}]}`
-	done, err := store.Apply(context.Background(), plan.ID, ApplyOptions{Runner: runnerFunc(func(argv []string) (string, string, error) {
+	done, err := store.Apply(context.Background(), plan.ID, ApplyOptions{ApprovalKey: testKey, Runner: runnerFunc(func(argv []string) (string, string, error) {
 		for i, a := range argv {
 			if a == "--user-data" {
 				data, _ := os.ReadFile(strings.TrimPrefix(argv[i+1], "file://"))
@@ -215,10 +215,10 @@ func TestApplyNeedsApprovalThenRunsAndTearsDown(t *testing.T) {
 		t.Fatalf("machine not first: %v", destroy.Steps[0].Argv)
 	}
 	_ = store.Propose(destroy)
-	_, _ = store.Decide(destroy.ID, true, "you", "")
+	_, _ = store.Decide(destroy.ID, true, "you", "", testKey)
 	runner.fail = map[string]string{"aws ec2 delete-key-pair": "An error occurred (InvalidKeyPair.NotFound) when calling the DeleteKeyPair operation"}
 	runner.answers["aws s3api get-bucket-tagging"] = `{"TagSet": [{"Key": "nullbot-id", "Value": "` + bucketID(resources) + `"}]}`
-	if _, err := store.Apply(context.Background(), destroy.ID, ApplyOptions{Runner: runner}); err != nil {
+	if _, err := store.Apply(context.Background(), destroy.ID, ApplyOptions{ApprovalKey: testKey, Runner: runner}); err != nil {
 		t.Fatal(err)
 	}
 	resources, _ = store.Resources()
@@ -251,20 +251,20 @@ func TestApplyFailureLeavesARecord(t *testing.T) {
 	store := Open(t.TempDir())
 	plan, _ := BuildCreatePlan(awsSpec(), "main")
 	_ = store.Propose(plan)
-	if _, err := store.Decide(plan.ID, false, "you", ""); err != nil {
+	if _, err := store.Decide(plan.ID, false, "you", "", testKey); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Decide(plan.ID, true, "you", ""); err == nil {
+	if _, err := store.Decide(plan.ID, true, "you", "", testKey); err == nil {
 		t.Fatal("a rejected plan was approved")
 	}
 	plan, _ = BuildCreatePlan(awsSpec(), "main")
 	_ = store.Propose(plan)
-	_, _ = store.Decide(plan.ID, true, "you", "")
+	_, _ = store.Decide(plan.ID, true, "you", "", testKey)
 	runner := &fakeRunner{answers: map[string]string{
 		"aws ec2 import-key-pair":       `{"KeyPairId": "key-0abc"}`,
 		"aws ec2 create-security-group": `{"GroupId": "sg-0abc"}`,
 	}, fail: map[string]string{"aws ec2 run-instances": "An error occurred (InsufficientInstanceCapacity): no g6.xlarge capacity", "aws s3api head-bucket": headBucket404}}
-	done, err := store.Apply(context.Background(), plan.ID, ApplyOptions{Runner: runner})
+	done, err := store.Apply(context.Background(), plan.ID, ApplyOptions{ApprovalKey: testKey, Runner: runner})
 	if err == nil || !strings.Contains(err.Error(), "InsufficientInstanceCapacity") || done.State != PlanFailed {
 		t.Fatalf("%v %+v", err, done.State)
 	}

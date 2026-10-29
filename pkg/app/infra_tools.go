@@ -35,8 +35,8 @@ func infraStatusTool(state *App) agent.Tool {
 			}
 			type plan struct {
 				ID, Title, Kind, State string
-				CostHourly           float64 `json:"cost_hourly,omitempty"`
-				Error                string  `json:"error,omitempty"`
+				CostHourly             float64 `json:"cost_hourly,omitempty"`
+				Error                  string  `json:"error,omitempty"`
 			}
 			var plans []plan
 			for _, p := range st.Plans {

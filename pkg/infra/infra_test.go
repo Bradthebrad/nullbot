@@ -18,19 +18,19 @@ func awsSpec() Spec {
 
 func TestSpecValidation(t *testing.T) {
 	for name, mutate := range map[string]func(*Spec){
-		"no cloud":        func(s *Spec) { s.Cloud = "azure" },
-		"no credential":   func(s *Spec) { s.Credential = "" },
-		"open to all":     func(s *Spec) { s.Machines[0].AllowFrom = nil },
-		"bad cidr":        func(s *Spec) { s.Machines[0].AllowFrom = []string{"0.0.0.0/33"} },
-		"bad name":        func(s *Spec) { s.Machines[0].Name = "GPU box" },
-		"bad type":        func(s *Spec) { s.Machines[0].Type = "g6.xlarge; rm -rf /" },
-		"bad key":         func(s *Spec) { s.Machines[0].SSHKey = "-----BEGIN PRIVATE KEY-----" },
-		"key with comma":  func(s *Spec) { s.Machines[0].SSHKey = pub + ",x" },
-		"bad port":        func(s *Spec) { s.Machines[0].Ports = []int{70000} },
-		"bad bucket":      func(s *Spec) { s.Buckets[0].Name = "Bad_Bucket" },
-		"gcp no project":  func(s *Spec) { s.Cloud = GCP; s.Region = ""; s.Project = "" },
-		"bad region":      func(s *Spec) { s.Region = "eu west" },
-		"huge disk":       func(s *Spec) { s.Machines[0].DiskGB = 100000 },
+		"no cloud":       func(s *Spec) { s.Cloud = "azure" },
+		"no credential":  func(s *Spec) { s.Credential = "" },
+		"open to all":    func(s *Spec) { s.Machines[0].AllowFrom = nil },
+		"bad cidr":       func(s *Spec) { s.Machines[0].AllowFrom = []string{"0.0.0.0/33"} },
+		"bad name":       func(s *Spec) { s.Machines[0].Name = "GPU box" },
+		"bad type":       func(s *Spec) { s.Machines[0].Type = "g6.xlarge; rm -rf /" },
+		"bad key":        func(s *Spec) { s.Machines[0].SSHKey = "-----BEGIN PRIVATE KEY-----" },
+		"key with comma": func(s *Spec) { s.Machines[0].SSHKey = pub + ",x" },
+		"bad port":       func(s *Spec) { s.Machines[0].Ports = []int{70000} },
+		"bad bucket":     func(s *Spec) { s.Buckets[0].Name = "Bad_Bucket" },
+		"gcp no project": func(s *Spec) { s.Cloud = GCP; s.Region = ""; s.Project = "" },
+		"bad region":     func(s *Spec) { s.Region = "eu west" },
+		"huge disk":      func(s *Spec) { s.Machines[0].DiskGB = 100000 },
 	} {
 		spec := awsSpec()
 		mutate(&spec)

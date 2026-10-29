@@ -129,17 +129,17 @@ type Plan struct {
 	Steps      []Step     `json:"steps"`
 	Resources  []Resource `json:"resources"` // what it creates or removes
 	// CostHourly is the approximate cost of what it creates, per hour.
-	CostHourly float64 `json:"cost_hourly,omitempty"`
-	CostNote   string  `json:"cost_note,omitempty"`
-	Notes      []string `json:"notes,omitempty"`
-	State      string  `json:"state"`
-	Reason     string  `json:"reason,omitempty"` // why the agent asked
-	Requester  string  `json:"requester,omitempty"`
+	CostHourly float64   `json:"cost_hourly,omitempty"`
+	CostNote   string    `json:"cost_note,omitempty"`
+	Notes      []string  `json:"notes,omitempty"`
+	State      string    `json:"state"`
+	Reason     string    `json:"reason,omitempty"` // why the agent asked
+	Requester  string    `json:"requester,omitempty"`
 	Created    time.Time `json:"created"`
 	Decided    time.Time `json:"decided,omitempty"`
-	DecidedBy  string  `json:"decided_by,omitempty"`
+	DecidedBy  string    `json:"decided_by,omitempty"`
 	Finished   time.Time `json:"finished,omitempty"`
-	Error      string  `json:"error,omitempty"`
+	Error      string    `json:"error,omitempty"`
 }
 
 // Pending reports a plan waiting for a decision.

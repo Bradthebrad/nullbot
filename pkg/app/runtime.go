@@ -475,6 +475,9 @@ func modelFromModelConfig(config Config, modelConfig ModelConfig) (tcagent.Model
 		tempPtr = &temp
 	}
 
+	if IsLocalProvider(modelConfig.Provider) {
+		return localModel(config, modelConfig, tempPtr, maxTokensPtr)
+	}
 	switch strings.ToLower(modelConfig.Provider) {
 	case ClaudeCLIProvider:
 		if _, err := claudeCommandFunc(); err != nil {

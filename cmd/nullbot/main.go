@@ -36,6 +36,8 @@ Usage:
                               on standard input is a request
   nullbot secrets             list saved secrets; nullbot secrets help for more
   nullbot vault               show how the secrets vault is protected
+  nullbot models              list models; nullbot models help for local
+                              model servers and installing models
   nullbot version             print the version
 
 Options (headless):
@@ -67,6 +69,9 @@ type options struct {
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// nullbot [--app-dir DIR] vault|secrets ... has its own options.
 	if appDir, rest, ok := vaultCommand(args); ok {
+		if rest[0] == "models" {
+			return runModelsCLI(rest[1:], appDir, stdout, stderr)
+		}
 		return runVaultCLI(rest[0], rest[1:], appDir, stdin, stdout, stderr)
 	}
 	command := ""
@@ -344,7 +349,7 @@ func oneLine(s string, max int) string {
 	return s
 }
 
-// vaultCommand recognizes "vault ..." and "secrets ...", with an optional
+// vaultCommand recognizes "vault ...", "secrets ..." and "models ...", with an optional
 // --app-dir before them.
 func vaultCommand(args []string) (string, []string, bool) {
 	appDir := ""
@@ -362,7 +367,7 @@ func vaultCommand(args []string) (string, []string, bool) {
 		}
 		break
 	}
-	if len(args) > 0 && (args[0] == "vault" || args[0] == "secrets") {
+	if len(args) > 0 && (args[0] == "vault" || args[0] == "secrets" || args[0] == "models") {
 		return appDir, args, true
 	}
 	return "", nil, false

@@ -27,9 +27,12 @@ type ModelOption struct {
 }
 
 type ModelGroup struct {
-	Provider string        `json:"provider"`
-	Models   []ModelOption `json:"models"`
-	Error    string        `json:"error,omitempty"`
+	Provider string `json:"provider"`
+	// Title names the group where the provider id is not enough, such as a
+	// local model server.
+	Title  string        `json:"title,omitempty"`
+	Models []ModelOption `json:"models"`
+	Error  string        `json:"error,omitempty"`
 }
 
 func ModelCatalog() []ModelOption {
@@ -182,7 +185,11 @@ func DiscoverModelGroups(ctx context.Context, config Config) []ModelGroup {
 			groups[3].Models = models
 		}
 	}
+	groups = append(groups, localModelGroups(ctx, config)...)
 	for g := range groups {
+		if IsLocalProvider(groups[g].Provider) {
+			continue // recorded as they were listed
+		}
 		reported := map[string]int{}
 		for _, model := range groups[g].Models {
 			if model.ContextWindow > 0 {
@@ -441,15 +448,26 @@ const modelCatalogTTL = 10 * time.Minute
 
 var modelCatalogCache struct {
 	sync.Mutex
-	key     string
-	fetched time.Time
-	groups  []ModelGroup
+	key        string
+	fetched    time.Time
+	groups     []ModelGroup
+	generation int
 }
 
 // CachedModelGroups returns the provider model catalog, fetching it at most
 // once per TTL for the same set of credentials. Pass refresh to force a fetch.
 func modelCatalogKey(config Config, keys APIKeys) string {
-	return fmt.Sprintf("%t|%s|%s|%s|%s", CodexAuthPresent(config), MaskSecret(keys.OpenAI), MaskSecret(keys.Anthropic), MaskSecret(keys.OpenRouter), config.AppDir)
+	endpoints, _ := json.Marshal(config.LocalEndpoints)
+	return fmt.Sprintf("%t|%s|%s|%s|%s|%s", CodexAuthPresent(config), MaskSecret(keys.OpenAI), MaskSecret(keys.Anthropic), MaskSecret(keys.OpenRouter), config.AppDir, endpoints)
+}
+
+// invalidateModelCatalog makes the next model list fetch again, after a
+// change NullBot's cache key cannot see (a model pulled into a server).
+func invalidateModelCatalog() {
+	modelCatalogCache.Lock()
+	modelCatalogCache.groups = nil
+	modelCatalogCache.generation++
+	modelCatalogCache.Unlock()
 }
 
 func CachedModelGroups(ctx context.Context, config Config, refresh bool) []ModelGroup {
@@ -461,10 +479,15 @@ func CachedModelGroups(ctx context.Context, config Config, refresh bool) []Model
 		modelCatalogCache.Unlock()
 		return withContextWindows(config, groups)
 	}
+	generation := modelCatalogCache.generation
 	modelCatalogCache.Unlock()
 	groups := DiscoverModelGroups(ctx, config)
 	modelCatalogCache.Lock()
-	modelCatalogCache.key, modelCatalogCache.fetched, modelCatalogCache.groups = key, time.Now(), cloneModelGroups(groups)
+	// A list fetched before an invalidation may miss what changed; it is
+	// returned, but not kept.
+	if modelCatalogCache.generation == generation {
+		modelCatalogCache.key, modelCatalogCache.fetched, modelCatalogCache.groups = key, time.Now(), cloneModelGroups(groups)
+	}
 	modelCatalogCache.Unlock()
 	return groups
 }

@@ -34,6 +34,8 @@ type Config struct {
 	PermissionDefaults  map[string]string   `json:"permission_defaults"`
 	HistoryRecentLimit  int                 `json:"history_recent_limit"`
 	ArtifactRecentLimit int                 `json:"artifact_recent_limit"`
+	// LocalEndpoints are model servers you host; see local_models.go.
+	LocalEndpoints []LocalEndpoint `json:"local_endpoints,omitempty"`
 }
 
 type ModelConfig struct {

@@ -109,6 +109,11 @@ any provider you have set up:
   works with its own tools within the project's permission, and its steps
   stream into the chat ([docs/CLAUDE_CLI.md](docs/CLAUDE_CLI.md))
 - OpenAI, Anthropic and OpenRouter, with an API key
+- models you host: Ollama, llama.cpp, LM Studio, vLLM or any
+  OpenAI-compatible server, here or on another machine. NullBot ranks which
+  models run well on your hardware (a Go port of
+  [llmfit](https://github.com/AlexsJones/llmfit)) and installs them from
+  Hugging Face ([docs/LOCAL_MODELS.md](docs/LOCAL_MODELS.md))
 
 Every request is measured against the model's context window. Tool results the
 model has already read are shortened from 60% full, older messages are
@@ -272,12 +277,6 @@ Use a separate NullBot folder while developing: set `NULLBOT_APP_DIR` or pass
 
 Planned, not built yet:
 
-- **Local models** on `localhost`, another machine on the LAN, or an internal
-  domain, through OpenAI-compatible servers such as Ollama, llama.cpp, LM
-  Studio and vLLM, set per agent.
-- **Model installs** with [llmfit](https://github.com/AlexsJones/llmfit), which
-  ranks the models that fit the machine's CPU, memory and GPU, and with
-  Hugging Face downloads.
 - **Cloud infrastructure tools** that create and tear down AWS and Google Cloud
   resources, with every change confirmed first.
 
@@ -295,6 +294,7 @@ See [docs/ROADMAP.md](docs/ROADMAP.md).
 | History and search | [docs/HISTORY.md](docs/HISTORY.md) |
 | Secrets and the vault | [docs/SECRETS.md](docs/SECRETS.md) |
 | Claude through the claude command | [docs/CLAUDE_CLI.md](docs/CLAUDE_CLI.md) |
+| Local models | [docs/LOCAL_MODELS.md](docs/LOCAL_MODELS.md) |
 | Several chats at once | [docs/CHATS.md](docs/CHATS.md) |
 | Service accounts | [docs/SERVICE_ACCOUNTS.md](docs/SERVICE_ACCOUNTS.md) |
 | Activity events API | [docs/ACTIVITY_API.md](docs/ACTIVITY_API.md) |

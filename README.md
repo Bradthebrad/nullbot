@@ -295,7 +295,7 @@ including [tinychain](https://github.com/Bradthebrad/tinychain).
 ```sh
 go test ./...
 go build -o nullbot ./cmd/nullbot
-go build -ldflags "-X main.version=v0.5.0" -o nullbot.exe ./cmd/nullbot   # with a version
+go build -ldflags "-X main.version=v0.6.0" -o nullbot.exe ./cmd/nullbot   # with a version
 ```
 
 Use a separate NullBot folder while developing: set `NULLBOT_APP_DIR` or pass

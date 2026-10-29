@@ -25,7 +25,7 @@ import (
 	"github.com/Bradthebrad/nullbot/pkg/vault"
 )
 
-// version is set at build time: -ldflags "-X main.version=v0.5.0".
+// version is set at build time: -ldflags "-X main.version=v0.6.0".
 var version = "dev"
 
 const usage = `NullBot: a small, auditable agent with controllable subagents.

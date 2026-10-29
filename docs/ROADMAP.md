@@ -46,8 +46,3 @@ an environment for a task and remove it afterwards. Planned rules:
 - credentials come from the vault ([SECRETS.md](SECRETS.md)): an `aws` or
   `gcp` secret is handed to the provider's tools for the call and never shown
   to the agent.
-
-## Also queued
-
-- A Claude Code provider that runs your own installed `claude` command with
-  your own sign-in and streams what it does into NullBot.

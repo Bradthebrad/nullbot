@@ -476,6 +476,11 @@ func modelFromModelConfig(config Config, modelConfig ModelConfig) (tcagent.Model
 	}
 
 	switch strings.ToLower(modelConfig.Provider) {
+	case ClaudeCLIProvider:
+		if _, err := claudeCommandFunc(); err != nil {
+			return nil, err
+		}
+		return ClaudeCLIModel{Config: config, Model: modelConfig.Model, ReasoningEffort: modelConfig.ReasoningEffort}, nil
 	case "codex":
 		if !CodexAuthPresent(config) {
 			return nil, fmt.Errorf("Codex subscription is not signed in. Use the Accounts tab to sign in with ChatGPT.")
@@ -547,6 +552,7 @@ func RuntimeStatus(config Config) map[string]any {
 		"google_api_key_set":     keys.Google != "" || os.Getenv("GOOGLE_API_KEY") != "" || os.Getenv("GEMINI_API_KEY") != "",
 		"codex_auth_set":         CodexAuthPresent(config),
 		"codex_auth_path":        CodexAuthPath(config),
+		"claude_cli_found":       claudeCLIFound(),
 		"mcp_servers_enabled":    len(config.EnabledMCPServers),
 		"skill_dirs":             config.SkillDirs,
 		"app_dir":                config.AppDir,

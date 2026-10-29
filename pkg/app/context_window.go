@@ -79,6 +79,10 @@ func ResolveContextWindow(config Config, model ModelConfig) ContextWindow {
 			return saved.ContextWindow
 		}
 	}
+	if strings.EqualFold(model.Provider, ClaudeCLIProvider) {
+		// The CLI keeps its own context; NullBot sends it only what is new.
+		return ContextWindow{Tokens: 200000, Source: "built-in", Detail: "The Claude CLI manages its own context"}
+	}
 	if tokens := builtinWindow(model.Model); tokens > 0 {
 		return ContextWindow{Tokens: tokens, Source: "built-in", Detail: "Typical for this model family"}
 	}

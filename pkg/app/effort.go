@@ -105,7 +105,7 @@ func ProviderEffort(provider, effort string) string {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "codex":
 		return option.Codex
-	case "anthropic":
+	case "anthropic", ClaudeCLIProvider:
 		return option.Anthropic
 	case "openrouter":
 		return option.OpenRouter

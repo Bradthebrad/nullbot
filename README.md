@@ -105,6 +105,9 @@ each, in parallel, with their own context window. Each can use any model from
 any provider you have set up:
 
 - a ChatGPT subscription, by signing in (Codex)
+- a Claude subscription, through your installed `claude` command: Claude
+  works with its own tools within the project's permission, and its steps
+  stream into the chat ([docs/CLAUDE_CLI.md](docs/CLAUDE_CLI.md))
 - OpenAI, Anthropic and OpenRouter, with an API key
 
 Every request is measured against the model's context window. Tool results the
@@ -291,6 +294,7 @@ See [docs/ROADMAP.md](docs/ROADMAP.md).
 | Context and compaction | [docs/CONTEXT.md](docs/CONTEXT.md) |
 | History and search | [docs/HISTORY.md](docs/HISTORY.md) |
 | Secrets and the vault | [docs/SECRETS.md](docs/SECRETS.md) |
+| Claude through the claude command | [docs/CLAUDE_CLI.md](docs/CLAUDE_CLI.md) |
 | Several chats at once | [docs/CHATS.md](docs/CHATS.md) |
 | Service accounts | [docs/SERVICE_ACCOUNTS.md](docs/SERVICE_ACCOUNTS.md) |
 | Activity events API | [docs/ACTIVITY_API.md](docs/ACTIVITY_API.md) |

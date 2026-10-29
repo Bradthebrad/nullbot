@@ -1,5 +1,22 @@
 # Unreleased
 
+## Claude CLI provider
+
+- **Use a Claude subscription** by picking a model from the Claude CLI group
+  (default, Opus, Sonnet, Haiku). NullBot runs your installed `claude`
+  command and never reads its credentials; `/accounts` shows whether it is
+  signed in.
+- **Claude's text, thinking, commentary and tool steps stream into the
+  chat**, redacted as they arrive, and its tool steps show in the activity
+  view.
+- **The project's permission picks Claude's tools**: read-only gets reading
+  and search, read & write adds edits, full access adds Bash. No MCP
+  servers or project hooks are loaded, and the CLI gets an environment
+  without credentials.
+- **Conversations continue** the same CLI session, sending only what is
+  new.
+- See [docs/CLAUDE_CLI.md](../CLAUDE_CLI.md).
+
 ## Chats
 
 - **Several chats at once.** A `Hub` runs chats that share the configuration,

@@ -13,7 +13,7 @@ require (
 )
 
 require (
-	github.com/Bradthebrad/tinychain v0.2.1-0.20261027175520-38e8d9479dcc
+	github.com/Bradthebrad/tinychain v0.2.1-0.20261029010927-1d120e11ff4d
 	github.com/alecthomas/chroma/v2 v2.20.0 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/aymerick/douceur v0.2.0 // indirect

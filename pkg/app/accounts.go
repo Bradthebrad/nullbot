@@ -53,6 +53,7 @@ func AccountStatus(config Config) AccountState {
 		apiAccountInfo("openrouter", "OpenRouter API", "OPENROUTER_API_KEY", keys.OpenRouter, "Use an OpenRouter API key for OpenAI-compatible routing, including Gemini-through-OpenRouter models."),
 		apiAccountInfo("google", "Google Gemini API", "GOOGLE_API_KEY / GEMINI_API_KEY", keys.Google, "Stored for MCP servers and future direct Gemini support. Current chat runtime can use Gemini through OpenRouter."),
 		apiAccountInfo("brave", "Brave Search API", "BRAVE_API_KEY", keys.ForProvider("brave"), "Powers nullbot-web-mcp web_search when Brave Search is selected or auto-detected."),
+		claudeAccountInfo(context.Background()),
 	}
 	for provider, key := range keys.Other {
 		provider = strings.ToLower(strings.TrimSpace(provider))

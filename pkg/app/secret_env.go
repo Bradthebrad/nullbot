@@ -326,7 +326,7 @@ func invalidateRedactor(config Config) {
 
 // providerEnvKeys are variables whose values NullBot uses as keys when the
 // vault has none; they are redacted too.
-var providerEnvKeys = []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "BRAVE_API_KEY", "GH_TOKEN", "GITHUB_TOKEN"}
+var providerEnvKeys = []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "BRAVE_API_KEY", "GH_TOKEN", "GITHUB_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"}
 
 // secretValues lists the values a secret holds that must be redacted. A
 // Google Cloud key file also contributes its private key and key id, which
@@ -593,13 +593,20 @@ func (r *secretRedactor) redact(text string) string {
 // trimPartialSecret removes a dangling start of a secret at the end of text
 // (where output was cut off), so a cut cannot reveal part of a value.
 func (r *secretRedactor) trimPartialSecret(text string) string {
+	// The longest dangling start wins, whichever secret it belongs to, so
+	// a short match cannot leave the rest of a longer one showing.
+	best, label := 0, ""
 	for _, v := range r.values {
 		max := min(len(v.value)-1, len(text))
-		for n := max; n >= 4; n-- {
+		for n := max; n >= 4 && n > best; n-- {
 			if strings.HasSuffix(text, v.value[:n]) {
-				return text[:len(text)-n] + v.label
+				best, label = n, v.label
+				break
 			}
 		}
 	}
-	return text
+	if best == 0 {
+		return text
+	}
+	return text[:len(text)-best] + label
 }

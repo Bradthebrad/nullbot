@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -288,5 +289,29 @@ func TestTextAndValues(t *testing.T) {
 	plan, err := BuildCreatePlan(spec, "agent main")
 	if err != nil || !strings.Contains(strings.Join(plan.Notes, " "), "whole internet") {
 		t.Fatalf("%v %v", err, plan.Notes)
+	}
+}
+
+// Every first-boot script NullBot writes is valid bash.
+func TestBootstrapScriptsParse(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("no bash")
+	}
+	for _, b := range []Bootstrap{
+		{Ollama: true, OllamaModels: []string{"qwen2.5:32b", "hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M"}, GPUDrivers: true, NullBot: true},
+		{NullBot: true, NullBotVersion: "v0.5.0"},
+		{Ollama: true, NullBot: true},
+		{Packages: []string{"nginx", "htop"}},
+	} {
+		script, err := b.Script("gpu", "ubuntu", false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(bash, "-n")
+		cmd.Stdin = strings.NewReader(script)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%+v: %v\n%s\n%s", b, err, out, script)
+		}
 	}
 }

@@ -82,7 +82,9 @@ type VisualOption struct {
 
 // Visualization describes one visual and how it was answered.
 type Visualization struct {
-	ID     string `json:"id"`
+	ID string `json:"id"`
+	// Chat is the chat that showed it, in Hub.LiveVisualizations; never saved.
+	Chat   string `json:"chat,omitempty"`
 	Title  string `json:"title"`
 	Kind   string `json:"kind"`
 	Prompt string `json:"prompt,omitempty"`

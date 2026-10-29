@@ -22,6 +22,8 @@ const (
 )
 
 type AgentTask struct {
+	// Chat is the chat the task runs in, in Hub.Tasks.
+	Chat         string           `json:"chat,omitempty"`
 	SubmissionID string           `json:"submission_id,omitempty"`
 	Lane         string           `json:"lane,omitempty"`
 	ParentTaskID string           `json:"parent_task_id,omitempty"`

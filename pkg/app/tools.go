@@ -52,6 +52,9 @@ func BuiltinToolsFor(config Config, state *App, includeSpawner bool) []agent.Too
 	}
 	tools = append(tools, projectFileTools(state)...)
 	tools = append(tools, visualTools(state)...)
+	if includeSpawner && state.isMainChat() {
+		tools = append(tools, chatTools(state)...)
+	}
 	return guardBuiltinTools(state, tools)
 }
 

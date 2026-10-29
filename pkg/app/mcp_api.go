@@ -83,7 +83,12 @@ func (a *App) Shutdown() {
 	a.StopScheduler()
 	a.mu.Lock()
 	pool := a.mcpPool
+	shared := a.hub != nil && a.chatID != MainChat
 	a.mu.Unlock()
+	if shared {
+		// The tool servers belong to the main chat.
+		return
+	}
 	if pool != nil {
 		pool.Close()
 	}

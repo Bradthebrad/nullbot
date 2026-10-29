@@ -357,6 +357,9 @@ func subagentSystemPrompt(config Config, name, task string, tools []tcagent.Tool
 			fmt.Fprintf(&b, "- %s: %s\n", def.Name, def.Description)
 		}
 	}
+	if hasTool(tools, "chats_list") {
+		b.WriteString(chatsGuidance)
+	}
 	if hasTool(tools, "secret_run") {
 		b.WriteString("Secrets: credentials the user saved (API keys, GitHub tokens, SSH keys, cloud keys) are in NullBot's vault. You never see their values. secrets_list shows what exists; secret_run runs a command with chosen secrets in its environment and removes their values from the output. Never ask the user to paste a credential into the chat, never print or write one to a file, and never send one anywhere but the service it belongs to. If a secret you need is missing, ask the user to add it in Settings > Secrets.\n")
 	}

@@ -326,7 +326,7 @@ func invalidateRedactor(config Config) {
 
 // providerEnvKeys are variables whose values NullBot uses as keys when the
 // vault has none; they are redacted too.
-var providerEnvKeys = []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "BRAVE_API_KEY", "GH_TOKEN", "GITHUB_TOKEN"}
+var providerEnvKeys = []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "BRAVE_API_KEY", "GH_TOKEN", "GITHUB_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"}
 
 // secretValues lists the values a secret holds that must be redacted. A
 // Google Cloud key file also contributes its private key and key id, which

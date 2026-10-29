@@ -125,6 +125,10 @@ func ModelCatalog() []ModelOption {
 			OpenAICompatible: true,
 			APIKeyEnv:        "OPENROUTER_API_KEY",
 		},
+		{Provider: ClaudeCLIProvider, ID: "default", Name: "Claude (CLI default)", Description: "Your Claude subscription through the claude command-line tool, with the model it picks by default. Claude works with its own tools within the project's permission.", Reasoning: true, APIKeyEnv: "CLAUDE_CLI"},
+		{Provider: ClaudeCLIProvider, ID: "opus", Name: "Claude Opus (CLI)", Description: "The latest Opus through your Claude subscription and the claude command-line tool.", Reasoning: true, APIKeyEnv: "CLAUDE_CLI"},
+		{Provider: ClaudeCLIProvider, ID: "sonnet", Name: "Claude Sonnet (CLI)", Description: "The latest Sonnet through your Claude subscription and the claude command-line tool.", Reasoning: true, APIKeyEnv: "CLAUDE_CLI"},
+		{Provider: ClaudeCLIProvider, ID: "haiku", Name: "Claude Haiku (CLI)", Description: "The latest Haiku, fast and light, through your Claude subscription.", Reasoning: true, APIKeyEnv: "CLAUDE_CLI"},
 		{
 			Provider:         "openrouter",
 			ID:               "google/gemini-2.5-pro",
@@ -144,6 +148,7 @@ func DiscoverModelGroups(ctx context.Context, config Config) []ModelGroup {
 		{Provider: "openai", Models: staticProviderModels("openai")},
 		{Provider: "anthropic", Models: staticProviderModels("anthropic")},
 		{Provider: "openrouter", Models: staticProviderModels("openrouter")},
+		{Provider: ClaudeCLIProvider, Models: staticProviderModels(ClaudeCLIProvider)},
 	}
 	if CodexAuthPresent(config) {
 		models, err := FetchCodexModelInfo(ctx, config)
@@ -212,6 +217,8 @@ func providerTitle(provider string) string {
 		return "OpenRouter"
 	case "codex":
 		return "Codex"
+	case ClaudeCLIProvider:
+		return "Claude CLI"
 	}
 	return provider
 }
@@ -483,6 +490,7 @@ func StaticModelGroups() []ModelGroup {
 		{Provider: "openai", Models: staticProviderModels("openai")},
 		{Provider: "anthropic", Models: staticProviderModels("anthropic")},
 		{Provider: "openrouter", Models: staticProviderModels("openrouter")},
+		{Provider: ClaudeCLIProvider, Models: staticProviderModels(ClaudeCLIProvider)},
 	}
 }
 

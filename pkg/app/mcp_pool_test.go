@@ -23,6 +23,8 @@ func TestMain(m *testing.M) {
 	}
 	// Tests never touch the real keychain.
 	vaultOptions = vault.Options{Keyring: testKeyring, Passphrase: func() (string, bool) { return "", false }, Iterations: 1000}
+	// Nor a real claude command.
+	claudeCommandFunc = func() (string, error) { return "", errClaudeNotFound }
 	os.Exit(m.Run())
 }
 

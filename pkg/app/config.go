@@ -36,6 +36,8 @@ type Config struct {
 	ArtifactRecentLimit int                 `json:"artifact_recent_limit"`
 	// LocalEndpoints are model servers you host; see local_models.go.
 	LocalEndpoints []LocalEndpoint `json:"local_endpoints,omitempty"`
+	// Infra controls cloud infrastructure; see infra.go.
+	Infra InfraConfig `json:"infra,omitempty"`
 }
 
 type ModelConfig struct {

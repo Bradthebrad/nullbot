@@ -20,6 +20,7 @@ func newSecretProcess(cmd *exec.Cmd) *secretProcess {
 	// A new session also means no controlling terminal: a program that asks
 	// for a password on /dev/tty fails instead of hanging.
 	cmd.SysProcAttr.Setsid = true
+	endWithParent(cmd)
 	p := &secretProcess{cmd: cmd}
 	cmd.Cancel = func() error { p.killAll(); return nil }
 	return p

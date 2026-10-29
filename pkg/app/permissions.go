@@ -271,6 +271,11 @@ var internalBuiltins = map[string]string{
 	"chat_send":             "sends a request to another chat, which runs it under the same permissions",
 	"chat_control":          "pauses, resumes or stops another chat",
 	"chat_open":             "opens a new chat",
+	"infra_status":          "reads the cloud resources NullBot made",
+	"infra_plan":            "proposes a cloud plan, which runs only after you approve it",
+	"infra_apply":           "runs a cloud plan you approved",
+	"infra_destroy":         "proposes removing cloud resources, which happens only after you approve it",
+	"infra_inspect":         "reads what a machine NullBot made, or this computer, is running",
 }
 
 var (

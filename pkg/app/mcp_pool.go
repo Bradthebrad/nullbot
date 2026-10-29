@@ -160,6 +160,9 @@ func (p *mcpPool) launchFor(config Config, id string, entry MCPEntry) mcpLaunch 
 	for k, v := range projectEnv(config) {
 		env[k] = v
 	}
+	// Commands a tool server runs for an agent can be told apart from a
+	// person at a terminal (nullbot infra approve refuses them).
+	env[AgentCommandEnv] = "1"
 	launch.env = env
 	return launch
 }

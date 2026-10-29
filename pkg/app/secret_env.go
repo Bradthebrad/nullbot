@@ -203,6 +203,11 @@ func buildSecretEnv(secrets []Secret, files bool) (*secretEnv, error) {
 
 // commandBaseEnv is NullBot's environment without anything that looks like
 // a credential, so a command gets only the secrets it asked for.
+// AgentCommandEnv is set for every command an agent runs, directly or
+// through a tool server, so steps meant for a person (approving a cloud
+// plan) can refuse them.
+const AgentCommandEnv = "NULLBOT_AGENT_COMMAND"
+
 func commandBaseEnv() map[string]string {
 	env := map[string]string{}
 	for _, item := range os.Environ() {
@@ -362,6 +367,7 @@ func payloadValues(payload vaultPayload) map[string]string {
 			add(v, "[secret:"+s.Name+"]")
 		}
 	}
+	add(payload.System.InfraKey, "[secret:approval-key]")
 	if c := payload.System.CodexAuth; c != nil {
 		add(c.AccessToken, "[secret:chatgpt-sign-in]")
 		add(c.RefreshToken, "[secret:chatgpt-sign-in]")

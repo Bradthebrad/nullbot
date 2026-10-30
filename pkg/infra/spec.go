@@ -98,7 +98,7 @@ func (s *Spec) normalize() error {
 		if s.Project == "" {
 			return errors.New("the Google Cloud project is unknown; give project, or use a key file that names one")
 		}
-		if !ValidName(s.Project) && !projectPattern.MatchString(s.Project) {
+		if !ValidProject(s.Project) {
 			return fmt.Errorf("%q is not a Google Cloud project id", s.Project)
 		}
 	}

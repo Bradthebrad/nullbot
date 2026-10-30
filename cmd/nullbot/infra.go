@@ -21,6 +21,9 @@ import (
 
 const infraUsage = `Usage:
   nullbot infra                      what NullBot made in the cloud, and plans waiting
+  nullbot infra accounts             the AWS and Google Cloud accounts plans can use
+  nullbot infra check ACCOUNT        ask the cloud who an account's key signs in as
+                                     (changes nothing, costs nothing)
   nullbot infra plans                recent plans
   nullbot infra show PLAN            a plan's steps: the exact commands, and how they went
   nullbot infra approve PLAN [--apply]
@@ -42,8 +45,10 @@ const infraUsage = `Usage:
   nullbot infra connect MACHINE      tunnel to the machine's Ollama and use it as a
                                      local model server, until Ctrl+C
 
-Nothing runs until you approve it. Credentials are aws or gcp secrets in the
-vault; the commands run through the aws and gcloud tools.
+Nothing runs until you approve it. Accounts are aws or gcp secrets in the
+vault: add one in the desktop app (Settings > Secrets > Cloud accounts) or
+with nullbot secrets set NAME --kind aws (or gcp). The commands run through
+the aws and gcloud tools.
 `
 
 // runInfraCLI handles "nullbot infra ...".
@@ -129,9 +134,24 @@ func runInfraCLI(args []string, appDir string, stdin io.Reader, stdout, stderr i
 		return 0
 	}
 
+	// A command an agent runs sees only the accounts agents may use.
+	infraState := func() (app.InfraState, error) {
+		st, err := a.InfraState()
+		if err == nil && os.Getenv(app.AgentCommandEnv) != "" {
+			mine := []app.CloudAccount{}
+			for _, acct := range st.Accounts {
+				if acct.AgentUse {
+					mine = append(mine, acct)
+				}
+			}
+			st.Accounts = mine
+		}
+		return st, err
+	}
+
 	switch sub {
 	case "":
-		st, err := a.InfraState()
+		st, err := infraState()
 		if err != nil {
 			return fail(err)
 		}
@@ -167,8 +187,79 @@ func runInfraCLI(args []string, appDir string, stdin io.Reader, stdout, stderr i
 				fmt.Fprintf(stdout, "%s: %s\n", name, strings.TrimPrefix(path, "missing: "))
 			}
 		}
+		printAccountsLine(stdout, st)
 		if !st.AgentTools {
 			fmt.Fprintln(stdout, "Agents cannot propose plans; turn that on with: nullbot infra agents on")
+		}
+		return 0
+
+	case "accounts":
+		st, err := infraState()
+		if err != nil {
+			return fail(err)
+		}
+		if st.AccountsError != "" {
+			return fail(errors.New(st.AccountsError))
+		}
+		if *asJSON {
+			return emit(st.Accounts)
+		}
+		if len(st.Accounts) == 0 {
+			fmt.Fprintln(stdout, noAccounts)
+			return 0
+		}
+		w := tabwriter.NewWriter(stdout, 0, 2, 2, ' ', 0)
+		for _, acct := range st.Accounts {
+			checked := "not checked"
+			if acct.Checked != "" {
+				checked = "checked"
+			}
+			if acct.Note != "" {
+				checked = "checked: " + acct.Note
+			}
+			agents := ""
+			if acct.AgentUse {
+				agents = "agents may use"
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", acct.Name, cloudLabel(acct.Cloud), firstOf(acct.Region, acct.Project), acct.Identity, checked, agents)
+		}
+		_ = w.Flush()
+		return 0
+
+	case "check":
+		name, err := one("account")
+		if err != nil {
+			return fail(err)
+		}
+		if os.Getenv(app.AgentCommandEnv) != "" {
+			// An agent checks only accounts it may use.
+			st, err := infraState()
+			if err != nil {
+				return fail(err)
+			}
+			allowed := false
+			for _, acct := range st.Accounts {
+				allowed = allowed || (acct.Name == name && acct.AgentUse)
+			}
+			if !allowed {
+				return fail(fmt.Errorf("agents can check only accounts they may use; %s is not one", name))
+			}
+		}
+		id, err := a.CheckCloudAccount(ctx, name)
+		if err != nil {
+			return fail(err)
+		}
+		if *asJSON {
+			return emit(id)
+		}
+		switch id.Cloud {
+		case "aws":
+			fmt.Fprintf(stdout, "%s signs in to AWS account %s as %s.\n", id.Name, id.Account, id.Identity)
+		default:
+			fmt.Fprintf(stdout, "%s signs in to Google Cloud as %s, in project %s.\n", id.Name, firstOf(id.Identity, "its service account"), id.Project)
+		}
+		if id.Note != "" {
+			fmt.Fprintln(stdout, id.Note)
 		}
 		return 0
 
@@ -351,6 +442,50 @@ func runInfraCLI(args []string, appDir string, stdin io.Reader, stdout, stderr i
 		return 0
 	}
 	return fail(fmt.Errorf("unknown command: infra %s (see nullbot infra help)", sub))
+}
+
+const noAccounts = "No cloud accounts yet. Add one in the desktop app (Settings > Secrets > Cloud accounts), or: nullbot secrets set aws-test --kind aws --set region=us-east-1"
+
+func cloudLabel(cloud string) string {
+	if cloud == "gcp" {
+		return "Google Cloud"
+	}
+	return "AWS"
+}
+
+func firstOf(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// printAccountsLine lists the accounts under nullbot infra's summary.
+func printAccountsLine(w io.Writer, st app.InfraState) {
+	if st.AccountsError != "" {
+		fmt.Fprintln(w, "Accounts: "+st.AccountsError)
+		return
+	}
+	if len(st.Accounts) == 0 {
+		fmt.Fprintln(w, noAccounts)
+		return
+	}
+	var parts []string
+	for _, acct := range st.Accounts {
+		bits := []string{cloudLabel(acct.Cloud)}
+		if where := firstOf(acct.Region, acct.Project); where != "" {
+			bits = append(bits, where)
+		}
+		if acct.Checked == "" {
+			bits = append(bits, "not checked: nullbot infra check "+acct.Name)
+		} else if acct.Note != "" {
+			bits = append(bits, "needs setup: nullbot infra check "+acct.Name)
+		}
+		parts = append(parts, fmt.Sprintf("%s (%s)", acct.Name, strings.Join(bits, ", ")))
+	}
+	fmt.Fprintln(w, "Accounts: "+strings.Join(parts, "; "))
 }
 
 func infraPlan(config app.Config, id string) (infra.Plan, error) {

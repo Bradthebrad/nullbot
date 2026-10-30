@@ -35,15 +35,57 @@ your control:
    or the [Google Cloud CLI](https://cloud.google.com/sdk/docs/install).
    NullBot finds `aws` and `gcloud` on your `PATH`, or at
    `NULLBOT_AWS_BIN` / `NULLBOT_GCLOUD_BIN`.
-2. Add credentials in **Settings > Secrets**: AWS credentials (an access key
-   for an IAM user limited to what NullBot should do, with its region), or a
-   Google Cloud service account key file (its project is used).
-3. Optionally, an SSH key secret for logging in to machines:
+2. Add an account: in the desktop app, **Settings > Secrets > Cloud
+   accounts** (or **Accounts** in the Cloud view), **Add AWS account** or
+   **Add Google Cloud account**. On the command line:
+   `nullbot secrets set aws-test --kind aws --set region=us-east-1` (it asks
+   for the key without showing it), or `nullbot secrets set gcp-lab --kind
+   gcp --file credentials_json=key.json`. An AWS account is an access key for
+   an IAM user limited to what NullBot should do (below), with its region; a
+   Google Cloud account is a service account's JSON key file, and its
+   project unless you set another.
+3. Check it: **Check** next to the account, or `nullbot infra check NAME`.
+   This asks the cloud who the key signs in as (`aws sts
+   get-caller-identity`, or `gcloud compute project-info describe`); it
+   changes nothing and costs nothing. A key that signs in but cannot be used
+   yet gets a note saying what to fix. `nullbot infra accounts` lists them.
+   On a network that inspects TLS, set `AWS_CA_BUNDLE` or
+   `CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE`; plans and checks keep them.
+4. Optionally, an SSH key secret for logging in to machines:
    `nullbot secrets ssh-keygen cloud`.
-4. To let agents propose plans: **Agents can propose** in the app's Cloud
+5. To let agents propose plans: **Agents can propose** in the app's Cloud
    view, or `nullbot infra agents on`. It is off by default. Agents can use
-   only credentials and SSH keys you allowed for agents in Settings >
-   Secrets.
+   only accounts and SSH keys you allowed for agents in Settings > Secrets.
+
+### Permissions plans need
+
+On AWS, an IAM policy like this one covers every command plans run (limit
+`Resource` further if you like):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Resource": "*",
+    "Action": [
+      "ec2:ImportKeyPair", "ec2:DescribeKeyPairs", "ec2:DeleteKeyPair",
+      "ec2:CreateSecurityGroup", "ec2:AuthorizeSecurityGroupIngress",
+      "ec2:DescribeSecurityGroups", "ec2:DeleteSecurityGroup",
+      "ec2:RunInstances", "ec2:DescribeInstances", "ec2:TerminateInstances",
+      "ec2:CreateTags", "ssm:GetParameters",
+      "s3:CreateBucket", "s3:ListBucket", "s3:PutBucketPublicAccessBlock",
+      "s3:PutBucketTagging", "s3:GetBucketTagging", "s3:DeleteObject",
+      "s3:DeleteBucket"
+    ]
+  }]
+}
+```
+
+`ssm:GetParameters` lets AWS look up the current Ubuntu image for a machine.
+On Google Cloud, give the service account **Compute Admin** (machines and
+firewall rules) and **Storage Admin** (buckets) on the project, and turn on
+the Compute Engine API there.
 
 ## A plan
 

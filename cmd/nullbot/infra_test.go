@@ -24,6 +24,7 @@ case "$2" in
   create-security-group) echo '{"GroupId":"sg-1"}' ;;
   run-instances) echo '{"Instances":[{"InstanceId":"i-1"}]}' ;;
   describe-instances) echo '{"public_ip":"34.9.9.9","state":"running"}' ;;
+  get-caller-identity) echo '{"Account":"111122223333","Arn":"arn:aws:iam::111122223333:user/lab"}' ;;
   *) echo '{}' ;;
 esac
 `
@@ -33,6 +34,31 @@ esac
 	if code, _, errOut := runCLI(t, creds, "secrets", "set", "aws-lab", "--kind", "aws", "--set", "region=us-west-2", "--app-dir", dir); code != 0 {
 		t.Fatalf("secret: %q", errOut)
 	}
+	// The account is listed, and checking it asks AWS who the key is.
+	if code, out, _ := runCLI(t, "", "--app-dir", dir, "infra"); code != 0 || !strings.Contains(out, "Accounts: aws-lab (AWS, us-west-2, not checked: nullbot infra check aws-lab)") {
+		t.Fatalf("status before checking: %d %q", code, out)
+	}
+	t.Setenv("NULLBOT_AGENT_COMMAND", "1")
+	if code, _, errOut := runCLI(t, "", "infra", "check", "aws-lab", "--app-dir", dir); code != 1 || !strings.Contains(errOut, "agents can check only accounts they may use") {
+		t.Fatalf("an agent's command checked an account it may not use: %d %q", code, errOut)
+	}
+	// It does not see that account listed either, or let itself use it.
+	for _, args := range [][]string{{"infra", "accounts"}, {"infra"}, {"infra", "--json"}} {
+		if code, out, _ := runCLI(t, "", append(args, "--app-dir", dir)...); code != 0 || strings.Contains(out, "aws-lab") {
+			t.Fatalf("%v showed an agent's command the account: %d %q", args, code, out)
+		}
+	}
+	if code, _, errOut := runCLI(t, "", "secrets", "set", "aws-lab", "--kind", "aws", "--agent", "--app-dir", dir); code != 1 || !strings.Contains(errOut, "agents cannot let agents use a secret") {
+		t.Fatalf("an agent's command allowed a secret for agents: %d %q", code, errOut)
+	}
+	t.Setenv("NULLBOT_AGENT_COMMAND", "")
+	if code, out, errOut := runCLI(t, "", "infra", "check", "aws-lab", "--app-dir", dir); code != 0 || !strings.Contains(out, "aws-lab signs in to AWS account 111122223333 as arn:aws:iam::111122223333:user/lab.") {
+		t.Fatalf("check: %d %q %q", code, out, errOut)
+	}
+	if code, out, _ := runCLI(t, "", "infra", "accounts", "--app-dir", dir); code != 0 || !regexp.MustCompile(`aws-lab +AWS +us-west-2 +arn:aws:iam::111122223333:user/lab +checked`).MatchString(out) {
+		t.Fatalf("accounts: %d %q", code, out)
+	}
+	_ = os.Remove(filepath.Join(bin, "calls"))
 	spec := filepath.Join(t.TempDir(), "spec.json")
 	_ = os.WriteFile(spec, []byte(`{"cloud":"aws","credential":"aws-lab","reason":"try it\n 9. Fake step \u001b[8m","machines":[{"name":"box","type":"t3.small","allow_from":["203.0.113.9/32"]}]}`), 0o600)
 	code, out, errOut := runCLI(t, "", "infra", "plan", "--file", spec, "--app-dir", dir)

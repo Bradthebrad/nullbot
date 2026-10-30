@@ -132,6 +132,8 @@ var secretKinds = []SecretKindInfo{
 		{Name: "secret_access_key", Label: "Secret access key", Secret: true, Required: true},
 		{Name: "session_token", Label: "Session token", Secret: true, Hint: "Only for temporary credentials"},
 		{Name: "region", Label: "Region", Hint: "us-east-1"},
+		{Name: "account", Label: "Account", Derived: true},
+		{Name: "identity", Label: "Signs in as", Derived: true},
 	}},
 	{Kind: SecretGCP, Label: "Google Cloud service account", Description: "A service account key file. Commands get it as a temporary file through GOOGLE_APPLICATION_CREDENTIALS.", FileBased: true, Fields: []SecretField{
 		{Name: "credentials_json", Label: "Key file (JSON)", Secret: true, Required: true, Multiline: true},
@@ -874,7 +876,7 @@ func SaveSecret(config Config, input SecretInput) (SecretInfo, error) {
 		if s.Public == nil {
 			s.Public = map[string]string{}
 		}
-		before := s.Values["token"]
+		before, keyProject := credentialStamp(s), gcpProject(s)
 		for _, field := range input.ClearValues {
 			delete(s.Values, field)
 		}
@@ -897,17 +899,22 @@ func SaveSecret(config Config, input SecretInput) (SecretInfo, error) {
 				}
 			}
 		}
-		if s.Kind == SecretGitHubToken && s.Values["token"] != before {
-			// A new token may belong to someone else; verify it again.
-			for _, k := range []string{"login", "scopes", "verified"} {
-				delete(s.Public, k)
-			}
-		}
 		s.Description = strings.TrimSpace(input.Description)
 		s.AgentUse = input.AgentUse
 		s.Servers = cleanServerList(input.Servers)
+		if newProject := gcpProject(s); s.Kind == SecretGCP && keyProject != "" && newProject != "" && newProject != keyProject && s.Public["project_id"] == keyProject {
+			// A key from another project replaces one whose project was
+			// taken from its file: the new file's project, unless set apart.
+			delete(s.Public, "project_id")
+		}
 		if err := deriveSecretPublic(&s); err != nil {
 			return err
+		}
+		if credentialStamp(s) != before {
+			// A new key may belong to someone else; check it again.
+			for _, k := range checkedFields {
+				delete(s.Public, k)
+			}
 		}
 		if err := validateSecret(s); err != nil {
 			return err
@@ -925,6 +932,23 @@ func SaveSecret(config Config, input SecretInput) (SecretInfo, error) {
 		return SecretInfo{}, err
 	}
 	return secretInfo(saved), nil
+}
+
+// checkedFields are what checking a token or cloud account records.
+var checkedFields = []string{"login", "scopes", "account", "identity", "verified", "check_note"}
+
+// credentialStamp is what a check vouches for: when it changes, the secret
+// has to be checked again.
+func credentialStamp(s Secret) string {
+	switch s.Kind {
+	case SecretGitHubToken:
+		return s.Values["token"]
+	case SecretAWS:
+		return s.Values["access_key_id"] + "\x00" + s.Values["secret_access_key"] + "\x00" + s.Values["session_token"]
+	case SecretGCP:
+		return s.Values["credentials_json"] + "\x00" + s.Public["project_id"]
+	}
+	return ""
 }
 
 func normalizeSecretValue(field SecretField, v string) string {

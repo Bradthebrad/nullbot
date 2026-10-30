@@ -160,7 +160,7 @@ func (a *App) PlanInfra(ctx context.Context, req InfraRequest, requester string)
 		}
 	}
 	if spec.Cloud == infra.GCP && spec.Project == "" {
-		spec.Project = gcpProject(cred)
+		spec.Project = gcpAccountProject(cred)
 	}
 	if spec.Cloud == infra.AWS && spec.Region == "" {
 		spec.Region = cred.Public["region"]
@@ -507,10 +507,21 @@ func newInfraRunner(config Config, plan infra.Plan, cred Secret) (*infraRunner, 
 	env := commandBaseEnv()
 	for k := range env {
 		// Only the settings below reach the CLIs: no endpoint overrides,
-		// impersonation or profiles from this computer's environment.
-		if strings.HasPrefix(strings.ToUpper(k), "CLOUDSDK_") || strings.HasPrefix(strings.ToUpper(k), "AWS_") || strings.HasPrefix(strings.ToUpper(k), "GOOGLE_") {
+		// impersonation or profiles from this computer's environment. A
+		// certificate bundle stays, for networks that inspect TLS; it adds
+		// trust in a proxy, never another account or endpoint.
+		upper := strings.ToUpper(k)
+		if upper == "AWS_CA_BUNDLE" || upper == "CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE" {
+			continue
+		}
+		if strings.HasPrefix(upper, "CLOUDSDK_") || strings.HasPrefix(upper, "AWS_") || strings.HasPrefix(upper, "GOOGLE_") {
 			delete(env, k)
 		}
+	}
+	// Commands never inherit AWS_ variables; the certificate bundle is the
+	// one plans need back.
+	if bundle := os.Getenv("AWS_CA_BUNDLE"); bundle != "" {
+		env["AWS_CA_BUNDLE"] = bundle
 	}
 	for k, v := range secretEnv.vars {
 		env[k] = v
@@ -603,6 +614,10 @@ type InfraState struct {
 	// CostHourly is what the live resources cost per hour, approximately.
 	CostHourly float64           `json:"cost_hourly"`
 	Tools      map[string]string `json:"tools"` // aws/gcloud: path, or why not found
+	// Accounts are the aws and gcp secrets plans can use; AccountsError
+	// says why they could not be read (a locked vault).
+	Accounts      []CloudAccount `json:"accounts"`
+	AccountsError string         `json:"accounts_error,omitempty"`
 }
 
 // InfraState reads plans and resources.
@@ -622,6 +637,9 @@ func (a *App) InfraState() (InfraState, error) {
 		if r.Live() {
 			state.CostHourly += r.CostHourly
 		}
+	}
+	if state.Accounts, err = CloudAccounts(config); err != nil {
+		state.Accounts, state.AccountsError = []CloudAccount{}, err.Error()
 	}
 	for _, name := range []string{"aws", "gcloud"} {
 		if path, err := infraCLI(name); err == nil {

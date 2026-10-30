@@ -246,6 +246,9 @@ func runVaultCLI(command string, args []string, appDir string, stdin io.Reader, 
 			if login := s.Public["login"]; login != "" {
 				fmt.Fprintf(stdout, "%-20s signed in as %s\n", "", login)
 			}
+			if identity := s.Public["identity"]; identity != "" {
+				fmt.Fprintf(stdout, "%-20s signs in as %s\n", "", identity)
+			}
 			if pub := s.Public["public_key"]; pub != "" {
 				fmt.Fprintf(stdout, "%-20s %s\n", "", pub)
 			}
@@ -334,6 +337,9 @@ func runVaultCLI(command string, args []string, appDir string, stdin io.Reader, 
 		given := map[string]bool{}
 		flags.Visit(func(f *flag.Flag) { given[f.Name] = true })
 		agent, desc, bound := *agentUse, *description, []string(servers)
+		if agent && (current == nil || !current.AgentUse) && os.Getenv(app.AgentCommandEnv) != "" {
+			return fail(errors.New("agents cannot let agents use a secret; the user does that in Settings > Secrets or in their own terminal"))
+		}
 		if current != nil {
 			if !given["agent"] {
 				agent = current.AgentUse
